@@ -31,6 +31,18 @@ export function AuthProvider({ children }) {
     return () => window.removeEventListener('auth:unauthorized', onUnauthorized)
   }, [])
 
+  // Solo en escritorio: el límite de transferencia y la tasa del dólar los
+  // cambia el dueño desde su teléfono, no desde esta caja. El sync worker
+  // (desktop/src/sync/syncWorker.js) los refresca contra el servidor en cada
+  // pasada y avisa por el mismo evento que ya usa el indicador de sincronía
+  // — nos enganchamos ahí para no abrir un segundo canal solo para esto.
+  useEffect(() => {
+    if (!isElectron()) return
+    return window.electronAPI.onSyncStatus((status) => {
+      if (status.settingsRefreshed) loadMe()
+    })
+  }, [loadMe])
+
   const login = async (email, password) => {
     // apiFetch (no fetch directo): en modo Electron esto se enruta por IPC y
     // el propio proceso principal habla con el servidor real para autenticar

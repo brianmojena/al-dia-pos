@@ -1,6 +1,6 @@
 {
   "name": "mypimes-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MYPIMES Inventario — app de escritorio offline-first",
   "main": "main.js",
   "scripts": {
@@ -25,7 +25,7 @@
       "src/**/*",
       "client-dist/**/*"
     ],
-    "win": { "target": "nsis" },
+    "win": { "target": "portable" },
     "mac": { "target": "dmg" },
     "linux": { "target": "AppImage" }
   }

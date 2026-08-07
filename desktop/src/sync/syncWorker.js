@@ -1,5 +1,5 @@
 const { getLocalDb } = require('../db/localDb');
-const { getPendingOutbox, getSession } = require('../db/queries');
+const { getPendingOutbox, getSession, updateSessionSettings } = require('../db/queries');
 const { apiRequest } = require('./apiClient');
 
 // ---------------------------------------------------------------------------
@@ -178,6 +178,20 @@ async function syncOnce() {
     // 5xx u otro código inesperado: tratamos como transitorio.
     markRetry(db, row.id, res.data?.error || `HTTP ${res.status}`);
   }
+
+  // El límite de transferencia y la tasa del dólar los cambia el dueño desde
+  // su teléfono, no desde esta caja — así que la única forma de que la caja
+  // se entere es preguntándole al servidor. Se aprovecha cada pasada del
+  // sync worker (misma cadencia que ya existe) en vez de abrir una conexión
+  // aparte solo para esto. Si no hay red, se ignora en silencio: el valor
+  // guardado localmente sigue siendo válido hasta la próxima pasada exitosa.
+  try {
+    const me = await apiRequest('GET', '/api/auth/me', { token: session.token });
+    if (me.ok) {
+      updateSessionSettings({ transfer_limit: me.data.user.transfer_limit, usd_rate: me.data.user.usd_rate });
+      summary.settingsRefreshed = true;
+    }
+  } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
 
   return summary;
 }

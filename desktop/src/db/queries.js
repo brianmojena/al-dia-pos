@@ -10,15 +10,30 @@ function getSession() {
   return db.prepare('SELECT * FROM session WHERE id = 1').get() || null;
 }
 
-function setSession({ user_id, email, store_name, plan, token }) {
+function setSession({ user_id, email, store_name, plan, token, transfer_limit = null, usd_rate = null }) {
   const db = getLocalDb();
   db.prepare(`
-    INSERT INTO session (id, user_id, email, store_name, plan, token, updated_at)
-    VALUES (1, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, updated_at)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id, email = excluded.email, store_name = excluded.store_name,
-      plan = excluded.plan, token = excluded.token, updated_at = datetime('now')
-  `).run(user_id, email, store_name, plan, token);
+      plan = excluded.plan, token = excluded.token,
+      transfer_limit = excluded.transfer_limit, usd_rate = excluded.usd_rate,
+      updated_at = datetime('now')
+  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate);
+}
+
+/**
+ * Actualiza SOLO transfer_limit/usd_rate de la sesión ya guardada, sin tocar
+ * el resto — la usa el sync worker para reflejar en la caja lo que el dueño
+ * cambió desde su teléfono, sin tener que volver a loguearse. No crea sesión
+ * si no hay una activa: no tendría a quién actualizar.
+ */
+function updateSessionSettings({ transfer_limit = null, usd_rate = null }) {
+  const db = getLocalDb();
+  db.prepare(`
+    UPDATE session SET transfer_limit = ?, usd_rate = ?, updated_at = datetime('now') WHERE id = 1
+  `).run(transfer_limit, usd_rate);
 }
 
 function clearSession() {
@@ -273,7 +288,7 @@ function getDashboard() {
 }
 
 module.exports = {
-  getSession, setSession, clearSession,
+  getSession, setSession, updateSessionSettings, clearSession,
   getPendingOutbox, countPendingOutbox, enqueueOutbox,
   listProducts, createProduct, updateProduct, deleteProduct,
   createSaleLocal, listSales, getSale,

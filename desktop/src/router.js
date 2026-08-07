@@ -33,6 +33,7 @@ async function routeRequest(method, fullPath, body) {
           setSession({
             user_id: res.data.user.id, email: res.data.user.email,
             store_name: res.data.user.store_name, plan: res.data.user.plan, token: res.data.token,
+            transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
           });
           await auth.pullInitialCatalogIfEmpty(res.data.token).catch(() => {});
         }
@@ -45,6 +46,7 @@ async function routeRequest(method, fullPath, body) {
           user: {
             id: session.user_id, email: session.email,
             store_name: session.store_name, plan: session.plan,
+            transfer_limit: session.transfer_limit, usd_rate: session.usd_rate,
           },
         });
       }

@@ -25,6 +25,8 @@ function initLocalDb(dbPath) {
       store_name TEXT,
       plan TEXT,
       token TEXT,
+      transfer_limit REAL,
+      usd_rate REAL,
       updated_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -84,6 +86,16 @@ function initLocalDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_products_server ON products(server_id);
     CREATE INDEX IF NOT EXISTS idx_sales_client_id  ON sales(client_sale_id);
   `);
+
+  // Migración aditiva: instalaciones ya existentes tienen una tabla session
+  // creada antes de que transfer_limit/usd_rate existieran — el CREATE TABLE
+  // IF NOT EXISTS de arriba no las agrega a una tabla que ya existe.
+  for (const sql of [
+    'ALTER TABLE session ADD COLUMN transfer_limit REAL',
+    'ALTER TABLE session ADD COLUMN usd_rate REAL',
+  ]) {
+    try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
+  }
 
   return db;
 }
