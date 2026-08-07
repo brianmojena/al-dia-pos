@@ -1,0 +1,73 @@
+import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { apiFetch, getToken, setToken, clearToken, isElectron } from '../lib/api'
+
+const AuthContext = createContext(null)
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  const loadMe = useCallback(async () => {
+    // En modo Electron, /api/auth/me no usa red (lee la sesión SQLite local vía
+    // IPC) — siempre vale la pena preguntarle, en vez de confiar en localStorage,
+    // que podría haberse limpiado sin que la sesión local realmente se perdiera.
+    if (!isElectron() && !getToken()) { setLoading(false); return }
+    const res = await apiFetch('/api/auth/me')
+    if (res.ok) {
+      const data = await res.json()
+      setUser(data.user)
+    } else {
+      clearToken()
+      setUser(null)
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { loadMe() }, [loadMe])
+
+  useEffect(() => {
+    const onUnauthorized = () => setUser(null)
+    window.addEventListener('auth:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('auth:unauthorized', onUnauthorized)
+  }, [])
+
+  const login = async (email, password) => {
+    // apiFetch (no fetch directo): en modo Electron esto se enruta por IPC y
+    // el propio proceso principal habla con el servidor real para autenticar
+    // (login siempre necesita red la primera vez, aunque el resto de la app no).
+    const res = await apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'No se pudo iniciar sesión')
+    setToken(data.token)
+    setUser(data.user)
+    return data.user
+  }
+
+  const register = async ({ email, password, store_name, plan }) => {
+    const res = await apiFetch('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, store_name, plan }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'No se pudo crear la cuenta')
+    setToken(data.token)
+    setUser(data.user)
+    return data.user
+  }
+
+  const logout = () => {
+    clearToken()
+    setUser(null)
+  }
+
+  return (
+    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export const useAuth = () => useContext(AuthContext)

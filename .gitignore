@@ -1,0 +1,22 @@
+# Dependencias
+node_modules/
+
+# Secretos y configuración local
+.env
+.env.local
+.vercel/
+
+# Base de datos SQLite local de desarrollo (el estado real vive en Turso)
+server/db/inventory.db
+server/db/inventory.db-*
+
+# Artefactos de build
+client/dist/
+desktop/dist/
+desktop/client-dist/
+
+# Notas de trabajo (no forman parte del producto)
+ejecucion y eso
+
+# macOS
+.DS_Store

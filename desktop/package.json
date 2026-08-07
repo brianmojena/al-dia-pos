@@ -1,0 +1,32 @@
+{
+  "name": "mypimes-desktop",
+  "version": "1.0.0",
+  "description": "MYPIMES Inventario — app de escritorio offline-first",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:client": "cd ../client && npx vite build --base=./ && node -e \"require('fs').cpSync('dist', '../desktop/client-dist', { recursive: true })\"",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "npm run build:client && electron-builder"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "cu.mitienda.pos",
+    "productName": "Mi Tienda",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "client-dist/**/*"
+    ],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
+  }
+}
