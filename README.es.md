@@ -4,6 +4,14 @@
 > conexión intermitente es la norma y no la excepción. Un solo backend y tres clientes: una app
 > web, una app de escritorio que funciona sin internet, y un panel móvil nativo para el dueño.
 
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
+![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
+![Turso](https://img.shields.io/badge/Turso-libSQL-4FF8D2?logo=turso&logoColor=black)
+![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
+![Vercel](https://img.shields.io/badge/Vercel-deployed-000000?logo=vercel&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 🇬🇧 **[Read this in English](./README.md)** · 🖥️ [Demo en vivo](https://client-tan-one-13.vercel.app) · 📱 [Panel del dueño (repo aparte)](https://github.com/brianmojena/al-dia-dashboard)
 
 ---
