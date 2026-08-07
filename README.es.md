@@ -213,7 +213,7 @@ Requiere Node.js 18 o superior. No hace falta configurar base de datos: cae a un
 local.
 
 ```bash
-git clone https://github.com/brianmojena/mipymes-pos.git
+git clone https://github.com/brianmojena/al-dia-pos.git
 cd mipymes-pos
 ```
 

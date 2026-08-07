@@ -208,7 +208,7 @@ there is no payment processor wired up) and *Plan Dev* (free, used for prototypi
 Requires Node.js 18+. No database setup needed — it falls back to a local SQLite file.
 
 ```bash
-git clone https://github.com/brianmojena/mipymes-pos.git
+git clone https://github.com/brianmojena/al-dia-pos.git
 cd mipymes-pos
 ```
 
