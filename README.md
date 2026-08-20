@@ -4,6 +4,7 @@
 > intermittent internet is the norm, not the exception. One backend, three clients: a web app,
 > an offline-first desktop app, and a native mobile dashboard for the business owner.
 
+[![tests](https://github.com/brianmojena/al-dia-pos/actions/workflows/test.yml/badge.svg)](https://github.com/brianmojena/al-dia-pos/actions/workflows/test.yml)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
@@ -101,6 +102,16 @@ if (updated.rowsAffected !== 1) {
 Re-running the same test: 5 × `201 Created`, 3 × `409 Conflict`, final stock exactly `0`.
 A `CHECK (stock >= 0)` constraint was added as a backstop via a one-off rebuild migration
 ([`server/db/migrate.js`](./server/db/migrate.js)).
+
+This is not a claim you have to take on trust — it runs on every push:
+
+```bash
+cd server && npm test
+```
+
+See [`server/test/sales.test.js`](./server/test/sales.test.js), which fires the eight
+concurrent sales through the real HTTP endpoint against an isolated database and asserts the
+5/3 split and the final stock of `0`.
 
 ### 2. Idempotent checkout — a dropped response must not double-charge
 
@@ -256,8 +267,9 @@ environment variables on the API project.
 This is a working MVP under active development, not a finished commercial product.
 
 - Payments are **simulated** — no processor is integrated, the plan is a flag on the user row.
-- No automated test suite yet; the concurrency and idempotency fixes were verified with
-  scripted load against the real API, and the results are reproduced above.
+- Test coverage is deliberately narrow: it targets the money-critical paths (overselling,
+  idempotency, transaction rollback, tenant isolation) rather than chasing a coverage
+  percentage. The React client and the Electron sync worker have no automated tests yet.
 - The desktop app syncs *up* (local → cloud). Pulling changes made elsewhere back down is
   designed but not implemented — acceptable while each shop runs a single register.
 - Windows builds are unsigned by design: the app is installed in person from a USB stick, which

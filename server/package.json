@@ -6,7 +6,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "seed": "node db/seed.js",
-    "migrate": "node db/migrate.js"
+    "migrate": "node db/migrate.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
