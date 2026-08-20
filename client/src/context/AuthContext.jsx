@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { apiFetch, getToken, setToken, clearToken, isElectron } from '../lib/api'
+import { cacheUser, getCachedUser } from '../lib/offlineCache'
 
 const AuthContext = createContext(null)
 
@@ -12,13 +13,22 @@ export function AuthProvider({ children }) {
     // IPC) — siempre vale la pena preguntarle, en vez de confiar en localStorage,
     // que podría haberse limpiado sin que la sesión local realmente se perdiera.
     if (!isElectron() && !getToken()) { setLoading(false); return }
-    const res = await apiFetch('/api/auth/me')
-    if (res.ok) {
-      const data = await res.json()
-      setUser(data.user)
-    } else {
-      clearToken()
-      setUser(null)
+    try {
+      const res = await apiFetch('/api/auth/me')
+      if (res.ok) {
+        const data = await res.json()
+        setUser(data.user)
+        cacheUser(data.user)
+      } else {
+        // 401/403 reales: la sesión no vale, no hay nada que rescatar del cache.
+        clearToken()
+        setUser(null)
+      }
+    } catch (_) {
+      // Sin red (PWA offline al abrir): confiamos en el último usuario
+      // conocido en vez de dejar al cajero sin poder vender.
+      const cached = getCachedUser()
+      if (cached) setUser(cached)
     }
     setLoading(false)
   }, [])
@@ -55,6 +65,7 @@ export function AuthProvider({ children }) {
     if (!res.ok) throw new Error(data.error || 'No se pudo iniciar sesión')
     setToken(data.token)
     setUser(data.user)
+    cacheUser(data.user)
     return data.user
   }
 
@@ -67,6 +78,7 @@ export function AuthProvider({ children }) {
     if (!res.ok) throw new Error(data.error || 'No se pudo crear la cuenta')
     setToken(data.token)
     setUser(data.user)
+    cacheUser(data.user)
     return data.user
   }
 

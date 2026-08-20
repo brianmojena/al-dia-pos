@@ -1,20 +1,25 @@
 import { useState, useEffect } from 'react'
 import { CloudOff, AlertTriangle } from 'lucide-react'
 import { isElectron } from '../lib/api'
+import { subscribe as subscribeQueue } from '../lib/salesQueue'
 
-// Solo existe dentro de la app de escritorio — la web no tiene cola offline.
-// Discreto a propósito: no se muestra nada cuando no hay nada pendiente,
-// para no generar ansiedad de "¿esto está fallando?" en el día a día normal.
+// En escritorio lee el estado del outbox de Electron por IPC; en la PWA web
+// lee la cola de IndexedDB (src/lib/salesQueue.js) — misma idea, dos
+// almacenamientos distintos porque el modo web no tiene un proceso local con
+// SQLite. Discreto a propósito: no se muestra nada cuando no hay nada
+// pendiente, para no generar ansiedad de "¿esto está fallando?" en el día a
+// día normal.
 export default function SyncStatus() {
   const [status, setStatus] = useState(null)
 
   useEffect(() => {
-    if (!isElectron()) return
-    return window.electronAPI.onSyncStatus(setStatus)
+    if (isElectron()) {
+      return window.electronAPI.onSyncStatus(setStatus)
+    }
+    return subscribeQueue((pending) => setStatus({ pending, conflicts: 0 }))
   }, [])
 
-  if (!isElectron() || !status) return null
-  if (!status.pending) return null
+  if (!status || !status.pending) return null
 
   const hasConflict = status.conflicts > 0
 

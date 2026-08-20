@@ -13,3 +13,9 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background-color: #F5F5F7;
 }
+
+/* Instalada como PWA (standalone) tapa la barra de gestos de Android / el
+   home indicator de iOS con contenido real si no se le deja aire abajo. */
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

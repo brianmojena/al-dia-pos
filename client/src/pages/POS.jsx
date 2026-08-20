@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle } from 'lucide-react'
-import { apiFetch } from '../lib/api'
+import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle, CloudOff } from 'lucide-react'
+import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
+import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
+import { enqueueSale } from '../lib/salesQueue'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -24,6 +26,7 @@ export default function POS() {
   const [showPaymentModal,  setShowPaymentModal]  = useState(false)
   const [lastPaymentMethod, setLastPaymentMethod] = useState('efectivo')
   const [error,             setError]             = useState('')
+  const [queuedOffline,     setQueuedOffline]     = useState(false)
   const searchRef = useRef(null)
   // Identificador de la venta en curso. Se mantiene entre reintentos para que el
   // servidor reconozca el reintento y no registre la venta dos veces; solo se
@@ -31,7 +34,21 @@ export default function POS() {
   const saleIdRef = useRef(null)
 
   const loadProducts = () =>
-    apiFetch('/api/products').then(r => r.json()).then(d => { setProducts(d); setLoading(false) })
+    apiFetch('/api/products')
+      .then(r => r.json())
+      .then(d => {
+        setProducts(d)
+        setLoading(false)
+        if (!isElectron()) cacheProducts(d) // última foto conocida por si la próxima carga es offline
+      })
+      .catch(() => {
+        // Sin red al abrir la PWA: mejor vender con el catálogo de la última
+        // vez que con una pantalla en blanco. El stock puede estar desfasado
+        // — se corrige solo al sincronizar y volver a pedir /api/products.
+        const cached = !isElectron() && getCachedProducts()
+        if (cached) setProducts(cached)
+        setLoading(false)
+      })
 
   useEffect(() => { loadProducts() }, [])
 
@@ -86,6 +103,7 @@ export default function POS() {
         setCart([])
         setShowCart(false)
         setLastPaymentMethod(paymentMethod)
+        setQueuedOffline(false)
         setSuccess(true)
         await loadProducts()
         setTimeout(() => setSuccess(false), 2500)
@@ -96,7 +114,33 @@ export default function POS() {
         await loadProducts().catch(() => {})
       }
     } catch (_) {
-      setError('Sin conexión. Revisa tu Internet y vuelve a intentar — no se cobrará dos veces.')
+      // Sin red (típico en Cuba, no un caso raro): en Electron esto no debería
+      // pasar nunca (apiFetch va por IPC local), así que si llegamos aquí es
+      // porque estamos en la PWA web sin conexión. La venta ya se cobró en
+      // caja — no tiene sentido bloquear al cajero, la encolamos y seguimos.
+      if (!isElectron()) {
+        const soldItems = cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price }))
+        await enqueueSale({
+          items: soldItems,
+          payment_method: paymentMethod,
+          client_sale_id: saleIdRef.current,
+        })
+        // Descuento optimista del stock local para que el siguiente cliente
+        // no compre algo que ya no queda — se corrige solo al re-sincronizar.
+        setProducts(prev => prev.map(p => {
+          const sold = soldItems.find(i => i.product_id === p.id)
+          return sold ? { ...p, stock: Math.max(0, p.stock - sold.quantity) } : p
+        }))
+        saleIdRef.current = null
+        setCart([])
+        setShowCart(false)
+        setLastPaymentMethod(paymentMethod)
+        setQueuedOffline(true)
+        setSuccess(true)
+        setTimeout(() => setSuccess(false), 3500)
+      } else {
+        setError('Sin conexión. Revisa tu Internet y vuelve a intentar — no se cobrará dos veces.')
+      }
     } finally {
       setCompleting(false)
     }
@@ -143,9 +187,11 @@ export default function POS() {
     <div className="flex h-full overflow-hidden">
       {/* Success toast */}
       {success && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-green-500 text-white px-6 py-3 rounded-full shadow-xl flex items-center gap-2 font-semibold text-sm animate-bounce">
-          <CheckCircle size={18} />
-          ¡Venta registrada! ·&nbsp;
+        <div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 text-white px-6 py-3 rounded-full shadow-xl flex items-center gap-2 font-semibold text-sm animate-bounce ${
+          queuedOffline ? 'bg-gray-700' : 'bg-green-500'
+        }`}>
+          {queuedOffline ? <CloudOff size={18} /> : <CheckCircle size={18} />}
+          {queuedOffline ? 'Venta guardada, sincroniza al volver la red · ' : '¡Venta registrada! · '}
           {lastPaymentMethod === 'efectivo' ? 'Efectivo' : 'Transferencia'}
         </div>
       )}
