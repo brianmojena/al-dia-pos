@@ -113,4 +113,26 @@ function todayBounds(timeZone = TIME_ZONE) {
   return { date, ...boundsForDate(date, timeZone) };
 }
 
-module.exports = { TIME_ZONE, todayBounds, boundsForDate, businessToday, toSqlUtc, startOfLocalDay };
+const LABEL_FORMAT = new Intl.DateTimeFormat('es-ES', {
+  timeZone: TIME_ZONE,
+  day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+});
+
+/**
+ * Un instante UTC expresado en HORA DE LA TIENDA, listo para mostrar.
+ *
+ * Lo formatea el servidor a propósito, en vez de mandar el timestamp crudo y
+ * que cada cliente lo resuelva: la zona relevante es la del negocio, no la del
+ * dispositivo. El dueño que está de viaje quiere leer "cerró a las 9:15 pm"
+ * en hora de su tienda, no traducido al huso donde él se encuentre.
+ */
+function shopLocalLabel(sqlUtc) {
+  if (!sqlUtc) return null;
+  const instant = new Date(String(sqlUtc).replace(' ', 'T') + 'Z');
+  if (Number.isNaN(instant.getTime())) return null;
+  return LABEL_FORMAT.format(instant);
+}
+
+module.exports = {
+  TIME_ZONE, todayBounds, boundsForDate, businessToday, toSqlUtc, startOfLocalDay, shopLocalLabel,
+};
