@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { boundsForDate } = require('../lib/businessDay');
+const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 
 const isUniqueViolation = (err) => {
@@ -67,6 +68,10 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  // Fuera de la transacción a propósito: es una lectura por clave primaria y
+  // la cuenta que cobra no cambia a mitad del cobro.
+  const account = await describeAccount(db, req);
+
   const tx = await db.transaction('write');
   try {
     let total = 0;
@@ -121,8 +126,9 @@ router.post('/', asyncHandler(async (req, res) => {
     }
 
     const saleResult = await tx.execute({
-      sql: 'INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method) VALUES (?, ?, ?, ?, ?)',
-      args: [req.userId, client_sale_id, total, profit, payment_method],
+      sql: `INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_sale_id, total, profit, payment_method, account.id, account.email],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

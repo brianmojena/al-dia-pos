@@ -109,6 +109,8 @@ async function initDb() {
       units_extra INTEGER NOT NULL DEFAULT 0,
       value_missing REAL NOT NULL DEFAULT 0,
       note TEXT,
+      account_id INTEGER,
+      account_email TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
@@ -144,6 +146,8 @@ async function initDb() {
       expected_transfer REAL NOT NULL DEFAULT 0,
       sales_count INTEGER NOT NULL DEFAULT 0,
       note TEXT,
+      account_id INTEGER,
+      account_email TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
@@ -166,6 +170,25 @@ async function initDb() {
     // id de la tienda, no al de quien inició sesión.
     "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'dueño'",
     'ALTER TABLE users ADD COLUMN owner_id INTEGER REFERENCES users(id)',
+    // Atribución: quién hizo cada operación. Sin esto, "faltaron 12.000 pesos
+    // este mes" no se puede accionar; con esto, "los faltantes aparecen en el
+    // turno de la tarde" sí.
+    //
+    // El email va CONGELADO junto al id, igual que sale_items.product_name:
+    // si el dueño borra al cajero que pilló robando, la evidencia no puede
+    // desaparecer con él. El id sirve para agrupar; el email, para mostrar.
+    //
+    // account_id NO lleva REFERENCES a propósito, por la misma razón que
+    // sale_items.product_id tampoco: esto es un hecho histórico, no una
+    // relación viva. Con la clave foránea puesta, la base impide borrar al
+    // cajero que ya vendió — o sea, impide justo la acción que el dueño
+    // necesita tomar cuando descubre el faltante.
+    'ALTER TABLE sales ADD COLUMN account_id INTEGER',
+    'ALTER TABLE sales ADD COLUMN account_email TEXT',
+    'ALTER TABLE cash_closes ADD COLUMN account_id INTEGER',
+    'ALTER TABLE cash_closes ADD COLUMN account_email TEXT',
+    'ALTER TABLE inventory_counts ADD COLUMN account_id INTEGER',
+    'ALTER TABLE inventory_counts ADD COLUMN account_email TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

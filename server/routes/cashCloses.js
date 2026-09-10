@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 
 // Antes del primer cierre no existe un corte anterior del cual partir. Este
@@ -63,6 +64,36 @@ router.get('/', requireOwner, asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
+/**
+ * Descuadres agrupados por quien cerró la caja.
+ *
+ * Es el motivo por el que se guarda la atribución. Un cierre suelto con un
+ * faltante puede ser un vuelto mal dado; el mismo nombre repitiendo faltantes
+ * durante un mes es otra cosa. Ordenado por saldo acumulado, así que el peor
+ * aparece primero.
+ *
+ * Se agrupa por account_id, pero se muestra el email congelado en la fila: si
+ * el dueño borra al cajero, el historial tiene que seguir diciendo quién fue.
+ */
+router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
+  const result = await getDb().execute({
+    sql: `SELECT
+            account_id,
+            account_email,
+            COUNT(*)                        AS closes,
+            COALESCE(SUM(difference), 0)    AS total_difference,
+            COALESCE(MIN(difference), 0)    AS worst_difference,
+            SUM(CASE WHEN difference < -0.5 THEN 1 ELSE 0 END) AS times_short,
+            MAX(closed_at)                  AS last_close_at
+          FROM cash_closes
+          WHERE user_id = ?
+          GROUP BY account_id, account_email
+          ORDER BY total_difference ASC`,
+    args: [req.userId],
+  });
+  res.json(result.rows);
+}));
+
 // Describe el período que está por cerrarse — y NADA MÁS que eso.
 //
 // Deliberadamente no devuelve el efectivo esperado ni la cantidad de ventas.
@@ -107,6 +138,10 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  // Quién está cerrando: es la mitad del valor del arqueo. "Faltaron 220" no
+  // se puede accionar; "faltaron 220 en el cierre de Yamila" sí.
+  const account = await describeAccount(db, req);
+
   // Leer la frontera y escribir el cierre en la misma transacción: si dos
   // cierres se solaparan, ambos leerían el mismo corte anterior y el mismo
   // tramo de ventas quedaría contado dos veces.
@@ -124,12 +159,14 @@ router.post('/', asyncHandler(async (req, res) => {
     const inserted = await tx.execute({
       sql: `INSERT INTO cash_closes
               (user_id, client_close_id, opened_at, opening_float, expected_cash,
-               counted_cash, difference, expected_transfer, sales_count, note)
-            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?)`,
+               counted_cash, difference, expected_transfer, sales_count, note,
+               account_id, account_email)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         req.userId, client_close_id, openedAt, float, expectedCash,
         counted, counted - expectedCash,
         Number(summary.transfer), Number(summary.count), note,
+        account.id, account.email,
       ],
     });
     const closeId = Number(inserted.lastInsertRowid);

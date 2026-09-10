@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronUp, ClipboardList, Banknote, Smartphone } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { formatDayLabel, formatTime } from '../lib/dates'
+import { accountLabel } from '../lib/accountLabel'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -79,6 +80,9 @@ export default function Sales() {
                           <p className="font-semibold text-gray-900 text-sm">Venta #{sale.id}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
                             {formatTime(sale.created_at)}
+                            {accountLabel(sale.account_email) && (
+                              <span className="text-gray-300"> · {accountLabel(sale.account_email)}</span>
+                            )}
                           </p>
                         </div>
                         <div className="flex items-center gap-3">

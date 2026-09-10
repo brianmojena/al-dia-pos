@@ -6,6 +6,7 @@ import {
 import { apiFetch } from '../lib/api'
 import { newId } from '../lib/newId'
 import { formatDateTime } from '../lib/dates'
+import { accountLabel } from '../lib/accountLabel'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -178,7 +179,12 @@ export default function Inventario() {
                 }`}
               >
                 <div className="min-w-0">
-                  <p className="font-semibold text-gray-900 text-sm">{formatDateTime(c.counted_at)}</p>
+                  <p className="font-semibold text-gray-900 text-sm">
+                    {formatDateTime(c.counted_at)}
+                    {accountLabel(c.account_email) && (
+                      <span className="font-normal text-gray-400"> · {accountLabel(c.account_email)}</span>
+                    )}
+                  </p>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {c.lines_count} {c.lines_count === 1 ? 'producto' : 'productos'} contados
                   </p>

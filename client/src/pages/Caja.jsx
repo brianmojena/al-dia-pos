@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import {
-  Calculator, Check, AlertTriangle, ArrowUp, Banknote, Smartphone, Lock, History,
+  Calculator, Check, AlertTriangle, ArrowUp, Banknote, Smartphone, Lock, History, Users,
 } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { newId } from '../lib/newId'
 import { formatDateTime as fmtDateTime } from '../lib/dates'
+import { accountLabel } from '../lib/accountLabel'
 import { useAuth } from '../context/AuthContext'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -14,6 +15,7 @@ export default function Caja() {
   const isOwner = user?.role !== 'cajero'
   const [period,     setPeriod]     = useState(null)
   const [history,    setHistory]    = useState([])
+  const [summary,    setSummary]    = useState([])
   const [loading,    setLoading]    = useState(true)
   const [float,      setFloat]      = useState('')
   const [counted,    setCounted]    = useState('')
@@ -28,12 +30,14 @@ export default function Caja() {
   const load = async () => {
     // El historial lleva el efectivo esperado de cada período: el servidor solo
     // se lo da al dueño (403 para un cajero), así que ni lo pedimos.
-    const [p, h] = await Promise.all([
+    const [p, h, s] = await Promise.all([
       apiFetch('/api/cash-closes/current').then(r => r.json()),
       isOwner ? apiFetch('/api/cash-closes').then(r => r.json()) : Promise.resolve([]),
+      isOwner ? apiFetch('/api/cash-closes/summary').then(r => r.json()) : Promise.resolve([]),
     ])
     setPeriod(p)
-    setHistory(h)
+    setHistory(Array.isArray(h) ? h : [])
+    setSummary(Array.isArray(s) ? s : [])
     setLoading(false)
   }
 
@@ -169,6 +173,58 @@ export default function Caja() {
         </form>
       )}
 
+      {/* Un cierre suelto con un faltante puede ser un vuelto mal dado. El
+          mismo nombre repitiendo faltantes es otra cosa — y eso solo se ve
+          agrupado. Con un solo cajero no aporta nada, así que no se muestra. */}
+      {summary.length > 1 && (
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <Users size={13} className="text-gray-400" />
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Descuadres por cajero</p>
+          </div>
+          <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+            {summary.map((s, idx) => {
+              const saldo = Number(s.total_difference) || 0
+              const falta = Math.round(saldo) < 0
+              return (
+                <div
+                  key={`${s.account_id}-${s.account_email}`}
+                  className={`flex items-center justify-between px-5 py-4 ${
+                    idx < summary.length - 1 ? 'border-b border-gray-50' : ''
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-gray-900 text-sm truncate">
+                      {accountLabel(s.account_email) || 'Sin identificar'}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {s.closes} {Number(s.closes) === 1 ? 'cierre' : 'cierres'}
+                      {Number(s.times_short) > 0 && ` · ${s.times_short} con faltante`}
+                    </p>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <p className={`text-base font-bold ${
+                      falta ? 'text-red-600' : Math.round(saldo) > 0 ? 'text-orange-500' : 'text-green-600'
+                    }`}>
+                      {Math.round(saldo) === 0 ? fmt(0) : (falta ? '−' : '+') + fmt(Math.abs(saldo))}
+                    </p>
+                    {Number(s.worst_difference) < -0.5 && (
+                      <p className="text-[11px] text-gray-400 mt-0.5">
+                        peor: {fmt(Math.abs(s.worst_difference))}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <p className="text-[11px] text-gray-400 mt-2 px-1">
+            Saldo acumulado de todos sus cierres. Un faltante aislado suele ser un vuelto mal
+            dado; lo que dice algo es el patrón.
+          </p>
+        </div>
+      )}
+
       {history.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-2 px-1">
@@ -184,7 +240,12 @@ export default function Caja() {
                 }`}
               >
                 <div className="min-w-0">
-                  <p className="font-semibold text-gray-900 text-sm">{fmtDateTime(c.closed_at)}</p>
+                  <p className="font-semibold text-gray-900 text-sm">
+                    {fmtDateTime(c.closed_at)}
+                    {accountLabel(c.account_email) && (
+                      <span className="font-normal text-gray-400"> · {accountLabel(c.account_email)}</span>
+                    )}
+                  </p>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {c.sales_count} {c.sales_count === 1 ? 'venta' : 'ventas'} · esperado {fmt(c.expected_cash)}
                   </p>

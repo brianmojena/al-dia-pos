@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 
 /**
@@ -93,6 +94,8 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  const account = await describeAccount(db, req);
+
   const tx = await db.transaction('write');
   try {
     const lines = [];
@@ -154,10 +157,10 @@ router.post('/', asyncHandler(async (req, res) => {
     const inserted = await tx.execute({
       sql: `INSERT INTO inventory_counts
               (user_id, client_count_id, lines_count, products_with_difference,
-               units_missing, units_extra, value_missing, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+               units_missing, units_extra, value_missing, note, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [req.userId, client_count_id, lines.length, withDifference,
-             unitsMissing, unitsExtra, valueMissing, note],
+             unitsMissing, unitsExtra, valueMissing, note, account.id, account.email],
     });
     const countId = Number(inserted.lastInsertRowid);
 
