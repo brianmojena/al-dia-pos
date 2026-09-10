@@ -4,15 +4,9 @@ import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
 import { enqueueSale } from '../lib/salesQueue'
+import { newId as newSaleId } from '../lib/newId'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-
-// crypto.randomUUID solo existe en contextos seguros (HTTPS o localhost); el fallback
-// cubre el caso de abrir el dev server por IP en la red local.
-const newSaleId = () =>
-  globalThis.crypto?.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`
 
 export default function POS() {
   const { user } = useAuth()

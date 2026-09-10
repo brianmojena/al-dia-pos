@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
+const { todayBounds, boundsForDate } = require('../lib/businessDay');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -250,9 +251,12 @@ function createSaleLocal({ items, payment_method = 'efectivo' }) {
 
 function listSales({ date } = {}) {
   const db = getLocalDb();
-  return date
-    ? db.prepare(`SELECT * FROM sales WHERE date(created_at) = ? ORDER BY created_at DESC`).all(date)
-    : db.prepare(`SELECT * FROM sales ORDER BY created_at DESC LIMIT 200`).all();
+  if (!date) return db.prepare(`SELECT * FROM sales ORDER BY created_at DESC LIMIT 200`).all();
+  // El día del negocio en Cuba, no el día UTC — ver src/lib/businessDay.js.
+  const { start, end } = boundsForDate(date);
+  return db.prepare(
+    `SELECT * FROM sales WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC`
+  ).all(start, end);
 }
 
 function getSale(id) {
@@ -269,20 +273,22 @@ function getSale(id) {
 
 function getDashboard() {
   const db = getLocalDb();
-  const today = new Date().toISOString().split('T')[0];
+  // Antes se comparaba contra la fecha UTC, así que a las 8:00 pm hora de Cuba
+  // el día del dueño se reiniciaba con la tienda todavía abierta.
+  const { start, end } = todayBounds();
 
   const todayStats = db.prepare(`
     SELECT COALESCE(SUM(total),0) AS sales, COALESCE(SUM(profit),0) AS profit, COUNT(*) AS count
-    FROM sales WHERE date(created_at) = ?
-  `).get(today);
+    FROM sales WHERE created_at >= ? AND created_at < ?
+  `).get(start, end);
 
   const lowStock = db.prepare(`
     SELECT * FROM products WHERE deleted = 0 AND stock <= 5 ORDER BY stock ASC
   `).all();
 
   const recentSales = db.prepare(`
-    SELECT * FROM sales WHERE date(created_at) = ? ORDER BY created_at DESC LIMIT 5
-  `).all(today);
+    SELECT * FROM sales WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC LIMIT 5
+  `).all(start, end);
 
   return { today: todayStats, lowStock, recentSales };
 }

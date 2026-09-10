@@ -2,7 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { requireOwner } = require('../middleware/auth');
 
+// Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
+// Crear, editar y borrar es del dueño — un cajero que pudiera cambiar precios
+// tendría la forma más simple que existe de quedarse con la diferencia.
 router.get('/', asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name ASC',
@@ -11,7 +15,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.post('/', asyncHandler(async (req, res) => {
+router.post('/', requireOwner, asyncHandler(async (req, res) => {
   const { name, purchase_price, sale_price, stock } = req.body;
   if (!name || sale_price === undefined) {
     return res.status(400).json({ error: 'Nombre y precio de venta son requeridos' });
@@ -31,7 +35,7 @@ router.post('/', asyncHandler(async (req, res) => {
   res.status(201).json(result.rows[0]);
 }));
 
-router.put('/:id', asyncHandler(async (req, res) => {
+router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const existingResult = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
@@ -58,7 +62,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
   res.json(result.rows[0]);
 }));
 
-router.delete('/:id', asyncHandler(async (req, res) => {
+router.delete('/:id', requireOwner, asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'DELETE FROM products WHERE id = ? AND user_id = ?',
     args: [req.params.id, req.userId],

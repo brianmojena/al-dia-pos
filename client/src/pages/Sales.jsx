@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronUp, ClipboardList, Banknote, Smartphone } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import { formatDayLabel, formatTime } from '../lib/dates'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -33,9 +34,7 @@ export default function Sales() {
 
   // Group by calendar date
   const grouped = sales.reduce((acc, sale) => {
-    const date = new Date(sale.created_at).toLocaleDateString('es-ES', {
-      weekday: 'long', day: 'numeric', month: 'long',
-    })
+    const date = formatDayLabel(sale.created_at)
     if (!acc[date]) acc[date] = []
     acc[date].push(sale)
     return acc
@@ -79,9 +78,7 @@ export default function Sales() {
                         <div>
                           <p className="font-semibold text-gray-900 text-sm">Venta #{sale.id}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
-                            {new Date(sale.created_at).toLocaleTimeString('es-ES', {
-                              hour: '2-digit', minute: '2-digit',
-                            })}
+                            {formatTime(sale.created_at)}
                           </p>
                         </div>
                         <div className="flex items-center gap-3">

@@ -1,18 +1,31 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, LogOut } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { isElectron } from '../lib/api'
 import SyncStatus from './SyncStatus'
 
+// ownerOnly no es solo cosmética: el servidor devuelve 403 en esas rutas para
+// un cajero (ver middleware/auth.js). Ocultarlas evita que la caja muestre
+// pantallas que solo darían un error.
 const navItems = [
-  { to: '/pos',       icon: ShoppingCart,   label: 'Venta'     },
-  { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio'    },
-  { to: '/products',  icon: Package,         label: 'Productos' },
-  { to: '/sales',     icon: ClipboardList,   label: 'Historial' },
+  { to: '/pos',       icon: ShoppingCart,    label: 'Venta'                        },
+  { to: '/caja',      icon: Calculator,      label: 'Caja',      webOnly:   true   },
+  { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio',    ownerOnly: true   },
+  { to: '/products',  icon: Package,         label: 'Productos', ownerOnly: true   },
+  { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
 ]
 
 export default function Layout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
+  const isOwner = user?.role !== 'cajero'
+  // El router local del escritorio (desktop/src/router.js) todavía no conoce
+  // /api/cash-closes y devolvería 404, así que allí el cierre se esconde en vez
+  // de mostrar una pestaña que no funciona. Quitar este webOnly en cuanto el
+  // escritorio implemente los cierres contra su SQLite local.
+  const visibleNav = navItems.filter(item =>
+    (isOwner || !item.ownerOnly) && !(item.webOnly && isElectron())
+  )
 
   const handleLogout = () => {
     logout()
@@ -31,10 +44,14 @@ export default function Layout() {
         </div>
         <SyncStatus />
         {user && (
+          // Para un cajero, saber en qué cuenta está abierta la caja importa
+          // más que el plan del negocio.
           <span className={`hidden sm:inline text-[11px] font-semibold px-2.5 py-1 rounded-full ${
-            user.plan === 'premium' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+            !isOwner              ? 'bg-gray-200 text-gray-600'
+            : user.plan === 'premium' ? 'bg-blue-100 text-blue-700'
+                                      : 'bg-purple-100 text-purple-700'
           }`}>
-            {user.plan === 'premium' ? 'Premium' : 'Plan Dev'}
+            {!isOwner ? 'Cajero' : user.plan === 'premium' ? 'Premium' : 'Plan Dev'}
           </span>
         )}
         <button
@@ -49,7 +66,7 @@ export default function Layout() {
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar — desktop */}
         <nav className="hidden md:flex flex-col w-56 bg-white border-r border-gray-200 py-5 px-3 gap-1 flex-shrink-0">
-          {navItems.map(({ to, icon: Icon, label }) => (
+          {visibleNav.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
               to={to}
@@ -75,7 +92,7 @@ export default function Layout() {
 
       {/* Bottom nav — mobile/tablet */}
       <nav className="md:hidden flex bg-white border-t border-gray-200 flex-shrink-0 safe-area-bottom">
-        {navItems.map(({ to, icon: Icon, label }) => (
+        {visibleNav.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}

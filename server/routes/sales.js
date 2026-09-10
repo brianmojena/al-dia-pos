@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { boundsForDate } = require('../lib/businessDay');
+const { requireOwner } = require('../middleware/auth');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -14,13 +16,15 @@ const findByClientSaleId = (db, userId, clientSaleId) =>
     args: [userId, clientSaleId],
   });
 
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const { date } = req.query;
-  const result = date
+  // El filtro por fecha usa el día del negocio en Cuba, igual que el dashboard.
+  const dia = date ? boundsForDate(date) : null;
+  const result = dia
     ? await db.execute({
-        sql: 'SELECT * FROM sales WHERE user_id = ? AND date(created_at) = ? ORDER BY created_at DESC',
-        args: [req.userId, date],
+        sql: 'SELECT * FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at DESC',
+        args: [req.userId, dia.start, dia.end],
       })
     : await db.execute({
         sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY created_at DESC LIMIT 200',
@@ -29,7 +33,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.get('/:id', asyncHandler(async (req, res) => {
+router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const saleResult = await db.execute({
     sql: 'SELECT * FROM sales WHERE id = ? AND user_id = ?',

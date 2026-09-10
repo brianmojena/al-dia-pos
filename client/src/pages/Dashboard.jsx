@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
-import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import { formatTime } from '../lib/dates'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -112,7 +114,7 @@ export default function Dashboard() {
                 <div>
                   <p className="text-gray-800 font-medium text-sm">Venta #{sale.id}</p>
                   <p className="text-xs text-gray-400">
-                    {new Date(sale.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
+                    {formatTime(sale.created_at)}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -139,6 +141,22 @@ export default function Dashboard() {
           <p className="text-sm">Sin ventas registradas hoy</p>
         </div>
       )}
+
+      <Link
+        to="/cajeros"
+        className="flex items-center gap-3 bg-white rounded-2xl px-5 py-4 shadow-sm mt-5 hover:bg-gray-50/80 transition-colors"
+      >
+        <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center flex-shrink-0">
+          <Users size={19} className="text-gray-500" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-gray-900 text-sm">Cajeros</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Cuentas que pueden cobrar pero no ver las ventas del día
+          </p>
+        </div>
+        <ChevronRight size={18} className="text-gray-300 flex-shrink-0" />
+      </Link>
     </div>
   )
 }

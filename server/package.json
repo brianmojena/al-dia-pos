@@ -5,7 +5,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "dev:local": "TURSO_DATABASE_URL=file:./db/inventory.db TURSO_AUTH_TOKEN= nodemon index.js",
     "seed": "node db/seed.js",
+    "seed:local": "TURSO_DATABASE_URL=file:./db/inventory.db TURSO_AUTH_TOKEN= node db/seed.js",
     "migrate": "node db/migrate.js",
     "test": "node --test test/*.test.js"
   },

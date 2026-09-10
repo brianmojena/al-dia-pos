@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Plus, Pencil, Trash2, X, Package } from 'lucide-react'
-import { apiFetch } from '../lib/api'
+import { Link } from 'react-router-dom'
+import { Plus, Pencil, Trash2, X, Package, ClipboardCheck } from 'lucide-react'
+import { apiFetch, isElectron } from '../lib/api'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '' }
@@ -72,13 +73,28 @@ export default function Products() {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-2xl font-bold text-gray-900">Productos</h2>
-        <button
-          onClick={openNew}
-          className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"
-        >
-          <Plus size={18} />
-          Nuevo
-        </button>
+        <div className="flex items-center gap-2">
+          {/* El router local del escritorio todavía no conoce
+              /api/inventory-counts, así que allí el botón llevaría a una
+              pantalla rota. Quitar esta condición cuando lo implemente. */}
+          {!isElectron() && (
+            <Link
+              to="/inventario"
+              title="Contar inventario"
+              className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+            >
+              <ClipboardCheck size={17} />
+              <span className="hidden sm:inline">Contar</span>
+            </Link>
+          )}
+          <button
+            onClick={openNew}
+            className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"
+          >
+            <Plus size={18} />
+            Nuevo
+          </button>
+        </div>
       </div>
 
       {/* Search */}

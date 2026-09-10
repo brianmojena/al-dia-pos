@@ -1,10 +1,12 @@
 const express = require('express');
 const cors = require('cors');
-const { requireAuth } = require('./middleware/auth');
+const { requireAuth, requireOwner } = require('./middleware/auth');
 const authRouter      = require('./routes/auth');
 const productsRouter  = require('./routes/products');
 const salesRouter     = require('./routes/sales');
 const dashboardRouter = require('./routes/dashboard');
+const cashClosesRouter = require('./routes/cashCloses');
+const inventoryCountsRouter = require('./routes/inventoryCounts');
 
 const app = express();
 
@@ -15,7 +17,11 @@ app.use('/api/auth', authRouter);
 
 app.use('/api/products',  requireAuth, productsRouter);
 app.use('/api/sales',     requireAuth, salesRouter);
-app.use('/api/dashboard', requireAuth, dashboardRouter);
+// El dashboard dice cuánto se vendió hoy — justo lo que un cajero no puede
+// saber antes de declarar el efectivo contado.
+app.use('/api/dashboard', requireAuth, requireOwner, dashboardRouter);
+app.use('/api/cash-closes', requireAuth, cashClosesRouter);
+app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);
