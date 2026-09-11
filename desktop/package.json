@@ -27,10 +27,20 @@
       "client-dist/**/*"
     ],
     "win": {
-      "target": "portable"
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
     },
     "mac": {
-      "target": "dmg"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ]
     },
     "linux": {
       "target": "AppImage"

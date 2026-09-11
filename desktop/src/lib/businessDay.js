@@ -1,10 +1,19 @@
 /**
- * Copia de server/lib/businessDay.js.
+ * Copia del cálculo de fronteras de día de server/lib/businessDay.js.
  *
  * La duplicación es deliberada: electron-builder solo empaqueta desktop/, así
  * que un require fuera de esta carpeta funcionaría en desarrollo y fallaría en
  * la app instalada. Es la misma razón por la que src/router.js reimplementa la
- * API. Si cambias uno, cambia el otro — los tests del servidor cubren la lógica.
+ * API.
+ *
+ * Lo que tiene que seguir idéntico es el cálculo de fronteras (zoneOffsetMs,
+ * startOfLocalDay, boundsForDate, todayBounds): si el escritorio y el servidor
+ * discreparan sobre dónde empieza el día, las mismas ventas caerían en días
+ * distintos según desde dónde se miren. Los tests del servidor lo cubren.
+ *
+ * El servidor tiene además shopLocalLabel, que aquí NO hace falta: sirve para
+ * mandarle fechas ya formateadas en hora de la tienda a la app del dueño, y
+ * esta caja no le formatea fechas a nadie más que a sí misma.
  *
  * Fronteras del "día del negocio".
  *
