@@ -27,6 +27,7 @@ function initLocalDb(dbPath) {
       token TEXT,
       transfer_limit REAL,
       usd_rate REAL,
+      role TEXT,
       updated_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -66,12 +67,57 @@ function initLocalDb(dbPath) {
       unit_cost REAL NOT NULL DEFAULT 0
     );
 
+    -- Arqueo de caja hecho en ESTA caja. Se calcula y se guarda entero sin
+    -- red: el registro local es la verdad de lo que pasó acá, y el servidor
+    -- recibe después una copia para que el dueño la vea desde su teléfono.
+    CREATE TABLE IF NOT EXISTS cash_closes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER,
+      client_close_id TEXT NOT NULL UNIQUE,
+      opened_at TEXT NOT NULL,
+      closed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      opening_float REAL NOT NULL DEFAULT 0,
+      expected_cash REAL NOT NULL,
+      counted_cash REAL NOT NULL,
+      difference REAL NOT NULL,
+      expected_transfer REAL NOT NULL DEFAULT 0,
+      sales_count INTEGER NOT NULL DEFAULT 0,
+      note TEXT,
+      account_email TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_counts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER,
+      client_count_id TEXT NOT NULL UNIQUE,
+      counted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      lines_count INTEGER NOT NULL DEFAULT 0,
+      products_with_difference INTEGER NOT NULL DEFAULT 0,
+      units_missing INTEGER NOT NULL DEFAULT 0,
+      units_extra INTEGER NOT NULL DEFAULT 0,
+      value_missing REAL NOT NULL DEFAULT 0,
+      note TEXT,
+      account_email TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_count_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      count_id INTEGER NOT NULL REFERENCES inventory_counts(id),
+      product_id INTEGER REFERENCES products(id),
+      product_name TEXT NOT NULL,
+      expected INTEGER NOT NULL,
+      counted INTEGER NOT NULL,
+      difference INTEGER NOT NULL,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      unit_price REAL NOT NULL DEFAULT 0
+    );
+
     -- La cola de sincronización. Cada fila es UNA operación pendiente de subir.
     -- payload guarda ids LOCALES cuando hace falta (p.ej. product_id de una venta);
     -- el sync worker los traduce a server_id recién al armar el POST.
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create'
+      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create' | 'cash_close.create' | 'inventory_count.create'
       client_op_id TEXT NOT NULL UNIQUE,
       local_ref_id INTEGER,
       payload TEXT NOT NULL,
@@ -85,6 +131,8 @@ function initLocalDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_outbox_status  ON outbox(status, id);
     CREATE INDEX IF NOT EXISTS idx_products_server ON products(server_id);
     CREATE INDEX IF NOT EXISTS idx_sales_client_id  ON sales(client_sale_id);
+    CREATE INDEX IF NOT EXISTS idx_cash_closes_closed ON cash_closes(closed_at);
+    CREATE INDEX IF NOT EXISTS idx_inv_items_count    ON inventory_count_items(count_id);
   `);
 
   // Migración aditiva: instalaciones ya existentes tienen una tabla session
@@ -93,6 +141,12 @@ function initLocalDb(dbPath) {
   for (const sql of [
     'ALTER TABLE session ADD COLUMN transfer_limit REAL',
     'ALTER TABLE session ADD COLUMN usd_rate REAL',
+    // Mismo caso que las dos de arriba, y el mismo error que costó la 1.0.1:
+    // el login SÍ recibe el rol del servidor, pero si la sesión local no tiene
+    // dónde guardarlo se descarta antes de tocar disco y /api/auth/me local lo
+    // devuelve siempre undefined. Sin esta columna, un cajero que entre en el
+    // escritorio vería el panel del dueño.
+    'ALTER TABLE session ADD COLUMN role TEXT',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }

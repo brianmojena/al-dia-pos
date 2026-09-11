@@ -89,6 +89,67 @@ async function initDb() {
       unit_cost REAL NOT NULL DEFAULT 0,
       FOREIGN KEY (sale_id) REFERENCES sales(id)
     );
+
+    -- Arqueo de inventario: lo que el sistema cree que hay en el estante contra
+    -- lo que el dueño contó con la mano.
+    --
+    -- Es el complemento del arqueo de caja, y detecta algo que aquel NO puede
+    -- ver: una venta que nunca se registró. Si el producto salió del estante
+    -- pero nadie lo cobró en el POS, la caja cuadra perfecta (no hay venta con
+    -- la cual comparar el efectivo) y la única huella que queda es la unidad
+    -- que falta aquí.
+    CREATE TABLE IF NOT EXISTS inventory_counts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      client_count_id TEXT,
+      counted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      lines_count INTEGER NOT NULL DEFAULT 0,
+      products_with_difference INTEGER NOT NULL DEFAULT 0,
+      units_missing INTEGER NOT NULL DEFAULT 0,
+      units_extra INTEGER NOT NULL DEFAULT 0,
+      value_missing REAL NOT NULL DEFAULT 0,
+      note TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    -- Una línea por producto contado. Guarda el nombre y los precios del
+    -- momento: si mañana borran el producto o le cambian el precio, el arqueo
+    -- tiene que seguir contando la misma historia.
+    CREATE TABLE IF NOT EXISTS inventory_count_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      count_id INTEGER NOT NULL,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      expected INTEGER NOT NULL,
+      counted INTEGER NOT NULL,
+      difference INTEGER NOT NULL,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      unit_price REAL NOT NULL DEFAULT 0,
+      FOREIGN KEY (count_id) REFERENCES inventory_counts(id)
+    );
+
+    -- Arqueo de caja: lo que el sistema dice que debería haber contra lo que el
+    -- cajero contó de verdad. Los cierres son contiguos — cada uno cubre desde
+    -- el corte del anterior — así que ninguna venta queda fuera de un arqueo.
+    CREATE TABLE IF NOT EXISTS cash_closes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      client_close_id TEXT,
+      opened_at TEXT NOT NULL,
+      closed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      opening_float REAL NOT NULL DEFAULT 0,
+      expected_cash REAL NOT NULL,
+      counted_cash REAL NOT NULL,
+      difference REAL NOT NULL,
+      expected_transfer REAL NOT NULL DEFAULT 0,
+      sales_count INTEGER NOT NULL DEFAULT 0,
+      note TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
   `);
 
   // Migraciones aditivas: seguras de reintentar, fallan si la columna ya existe.
@@ -102,6 +163,32 @@ async function initDb() {
     // "sin tasa definida" en vez de mostrar 0, que sería engañoso.
     'ALTER TABLE users ADD COLUMN transfer_limit REAL',
     'ALTER TABLE users ADD COLUMN usd_rate REAL',
+    // Roles. Una fila de users con owner_id es un cajero de esa tienda; sin
+    // owner_id es el dueño, y su propio id ES el identificador de la tienda.
+    // Por eso todas las consultas existentes (que filtran por user_id) siguen
+    // valiendo sin tocar una sola de ellas: el middleware resuelve user_id al
+    // id de la tienda, no al de quien inició sesión.
+    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'dueño'",
+    'ALTER TABLE users ADD COLUMN owner_id INTEGER REFERENCES users(id)',
+    // Atribución: quién hizo cada operación. Sin esto, "faltaron 12.000 pesos
+    // este mes" no se puede accionar; con esto, "los faltantes aparecen en el
+    // turno de la tarde" sí.
+    //
+    // El email va CONGELADO junto al id, igual que sale_items.product_name:
+    // si el dueño borra al cajero que pilló robando, la evidencia no puede
+    // desaparecer con él. El id sirve para agrupar; el email, para mostrar.
+    //
+    // account_id NO lleva REFERENCES a propósito, por la misma razón que
+    // sale_items.product_id tampoco: esto es un hecho histórico, no una
+    // relación viva. Con la clave foránea puesta, la base impide borrar al
+    // cajero que ya vendió — o sea, impide justo la acción que el dueño
+    // necesita tomar cuando descubre el faltante.
+    'ALTER TABLE sales ADD COLUMN account_id INTEGER',
+    'ALTER TABLE sales ADD COLUMN account_email TEXT',
+    'ALTER TABLE cash_closes ADD COLUMN account_id INTEGER',
+    'ALTER TABLE cash_closes ADD COLUMN account_email TEXT',
+    'ALTER TABLE inventory_counts ADD COLUMN account_id INTEGER',
+    'ALTER TABLE inventory_counts ADD COLUMN account_email TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -114,9 +201,23 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id
       ON sales(user_id, client_sale_id) WHERE client_sale_id IS NOT NULL;
 
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_closes_client_close_id
+      ON cash_closes(user_id, client_close_id) WHERE client_close_id IS NOT NULL;
+
     CREATE INDEX IF NOT EXISTS idx_sales_user_created ON sales(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_products_user      ON products(user_id);
     CREATE INDEX IF NOT EXISTS idx_sale_items_sale    ON sale_items(sale_id);
+
+    -- El cierre siempre busca "el último corte" de este usuario.
+    CREATE INDEX IF NOT EXISTS idx_cash_closes_user_closed ON cash_closes(user_id, closed_at);
+
+    CREATE INDEX IF NOT EXISTS idx_users_owner ON users(owner_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
+      ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_inventory_counts_user  ON inventory_counts(user_id, counted_at);
+    CREATE INDEX IF NOT EXISTS idx_inventory_items_count  ON inventory_count_items(count_id);
   `);
 
   console.log('Base de datos lista');

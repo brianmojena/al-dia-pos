@@ -34,6 +34,7 @@ async function routeRequest(method, fullPath, body) {
             user_id: res.data.user.id, email: res.data.user.email,
             store_name: res.data.user.store_name, plan: res.data.user.plan, token: res.data.token,
             transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
+            role: res.data.user.role,
           });
           await auth.pullInitialCatalogIfEmpty(res.data.token).catch(() => {});
         }
@@ -47,6 +48,9 @@ async function routeRequest(method, fullPath, body) {
             id: session.user_id, email: session.email,
             store_name: session.store_name, plan: session.plan,
             transfer_limit: session.transfer_limit, usd_rate: session.usd_rate,
+            // Sin rol guardado son sesiones anteriores a que existieran los
+            // cajeros: eran dueños, así que se interpretan como tales.
+            role: session.role || 'dueño',
           },
         });
       }
@@ -98,6 +102,44 @@ async function routeRequest(method, fullPath, body) {
     // --- dashboard ---
     if (parts[0] === 'api' && parts[1] === 'dashboard' && parts.length === 2 && method === 'GET') {
       return ok(200, queries.getDashboard());
+    }
+
+    // --- cierre de caja ---
+    // Mismo contrato que server/routes/cashCloses.js, incluido lo que NO se
+    // devuelve: /current describe el período pero nunca el efectivo esperado.
+    // Acá el conteo a ciegas lo sostiene este router, porque en modo escritorio
+    // no hay servidor en el medio.
+    if (parts[0] === 'api' && parts[1] === 'cash-closes') {
+      if (parts.length === 3 && parts[2] === 'current' && method === 'GET') {
+        return ok(200, queries.getCurrentCashPeriod());
+      }
+      if (parts.length === 3 && parts[2] === 'summary' && method === 'GET') {
+        return ok(200, queries.cashCloseSummary());
+      }
+      if (parts.length === 2 && method === 'GET') return ok(200, queries.listCashCloses());
+      if (parts.length === 2 && method === 'POST') {
+        try {
+          return ok(201, queries.createCashCloseLocal(body));
+        } catch (err) {
+          return fail(400, err.message);
+        }
+      }
+    }
+
+    // --- arqueo de inventario ---
+    if (parts[0] === 'api' && parts[1] === 'inventory-counts') {
+      if (parts.length === 2 && method === 'GET') return ok(200, queries.listInventoryCounts());
+      if (parts.length === 3 && method === 'GET') {
+        const count = queries.getInventoryCount(Number(parts[2]));
+        return count ? ok(200, count) : fail(404, 'Arqueo no encontrado');
+      }
+      if (parts.length === 2 && method === 'POST') {
+        try {
+          return ok(201, queries.createInventoryCountLocal(body));
+        } catch (err) {
+          return fail(400, err.message);
+        }
+      }
     }
 
     return fail(404, 'Ruta no encontrada');

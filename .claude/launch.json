@@ -9,6 +9,13 @@
       "port": 3001
     },
     {
+      "name": "server:local",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:local"],
+      "cwd": "server",
+      "port": 3001
+    },
+    {
       "name": "client",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],

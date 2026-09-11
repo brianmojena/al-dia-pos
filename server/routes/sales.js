@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { boundsForDate } = require('../lib/businessDay');
+const { describeAccount } = require('../lib/account');
+const { requireOwner } = require('../middleware/auth');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -14,13 +17,15 @@ const findByClientSaleId = (db, userId, clientSaleId) =>
     args: [userId, clientSaleId],
   });
 
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const { date } = req.query;
-  const result = date
+  // El filtro por fecha usa el día del negocio en Cuba, igual que el dashboard.
+  const dia = date ? boundsForDate(date) : null;
+  const result = dia
     ? await db.execute({
-        sql: 'SELECT * FROM sales WHERE user_id = ? AND date(created_at) = ? ORDER BY created_at DESC',
-        args: [req.userId, date],
+        sql: 'SELECT * FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at DESC',
+        args: [req.userId, dia.start, dia.end],
       })
     : await db.execute({
         sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY created_at DESC LIMIT 200',
@@ -29,7 +34,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.get('/:id', asyncHandler(async (req, res) => {
+router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const saleResult = await db.execute({
     sql: 'SELECT * FROM sales WHERE id = ? AND user_id = ?',
@@ -62,6 +67,10 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
     }
   }
+
+  // Fuera de la transacción a propósito: es una lectura por clave primaria y
+  // la cuenta que cobra no cambia a mitad del cobro.
+  const account = await describeAccount(db, req);
 
   const tx = await db.transaction('write');
   try {
@@ -117,8 +126,9 @@ router.post('/', asyncHandler(async (req, res) => {
     }
 
     const saleResult = await tx.execute({
-      sql: 'INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method) VALUES (?, ?, ?, ?, ?)',
-      args: [req.userId, client_sale_id, total, profit, payment_method],
+      sql: `INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_sale_id, total, profit, payment_method, account.id, account.email],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

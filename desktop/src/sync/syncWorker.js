@@ -95,6 +95,63 @@ function buildRequest(db, row) {
       };
     }
 
+    case 'cash_close.create': {
+      // El cierre viaja con los client_sale_id que cubrió, NO con fechas: el
+      // servidor le pone a cada venta sincronizada su propia hora de llegada,
+      // así que un período definido por timestamps no encontraría del otro lado
+      // las ventas que acá ocurrieron horas antes. Con los ids, el servidor
+      // suma exactamente las mismas ventas sin importar cuánto tardó el sync.
+      //
+      // Y se espera a que todas estén arriba: si alguna no sincronizó todavía,
+      // el servidor calcularía el esperado sin ella y el descuadre saldría mal.
+      // El orden FIFO garantiza que se resuelva en una pasada posterior —
+      // mismo mecanismo que ya usan las ventas con sus productos.
+      const ids = payload.client_sale_ids || [];
+      const pendientes = ids.filter((clientSaleId) => {
+        const sale = db.prepare('SELECT server_id FROM sales WHERE client_sale_id = ?').get(clientSaleId);
+        return !sale || sale.server_id == null;
+      });
+      if (pendientes.length > 0) return { skip: true };
+
+      return {
+        method: 'POST',
+        path: '/api/cash-closes',
+        body: {
+          client_close_id: payload.client_close_id,
+          opening_float: payload.opening_float,
+          counted_cash: payload.counted_cash,
+          note: payload.note,
+          client_sale_ids: ids,
+        },
+        onSuccess: (data) => {
+          db.prepare('UPDATE cash_closes SET server_id = ? WHERE client_close_id = ?')
+            .run(data.id, payload.client_close_id);
+        },
+      };
+    }
+
+    case 'inventory_count.create': {
+      const items = [];
+      for (const item of payload.items) {
+        const serverId = getProductServerId(db, item.local_product_id);
+        if (!serverId) return { skip: true };
+        items.push({ product_id: serverId, counted: item.counted });
+      }
+      return {
+        method: 'POST',
+        path: '/api/inventory-counts',
+        body: {
+          client_count_id: payload.client_count_id,
+          note: payload.note,
+          items,
+        },
+        onSuccess: (data) => {
+          db.prepare('UPDATE inventory_counts SET server_id = ? WHERE client_count_id = ?')
+            .run(data.id, payload.client_count_id);
+        },
+      };
+    }
+
     default:
       throw new Error(`Tipo de operación desconocido en outbox: ${row.op_type}`);
   }
@@ -218,4 +275,7 @@ function startSyncLoop({ intervalMs = 30000, onTick } = {}) {
   return () => { stopped = true; };
 }
 
-module.exports = { syncOnce, startSyncLoop };
+// buildRequest se exporta para poder probarlo sin levantar red ni Electron:
+// es donde vive la lógica que decide si una operación puede subir todavía o
+// tiene que esperar a que sus dependencias sincronicen.
+module.exports = { syncOnce, startSyncLoop, buildRequest };
