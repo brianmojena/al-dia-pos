@@ -172,6 +172,68 @@ test('cierre de caja', async (t) => {
     assert.equal(listaB.body[0].id, cierreB.body.id);
   });
 
+  await t.test('un cierre que llega del escritorio se calcula sobre las ventas que él señala', async () => {
+    const ctx2 = await startTestServer();
+    const token = await registerUser(ctx2.api);
+    const productId = await createProduct(ctx2.api, token, { name: 'Ron', stock: 50, sale_price: 100 });
+
+    // Tres ventas ya sincronizadas. El escritorio cerró la caja cuando solo
+    // existían las dos primeras; la tercera es de después del corte.
+    const ids = [];
+    for (let i = 0; i < 3; i++) {
+      const clientSaleId = randomUUID();
+      await ctx2.api('POST', '/api/sales', {
+        token,
+        body: {
+          items: [{ product_id: productId, quantity: 1, unit_price: 100 }],
+          payment_method: 'efectivo',
+          client_sale_id: clientSaleId,
+        },
+      });
+      ids.push(clientSaleId);
+    }
+
+    const cierre = await ctx2.api('POST', '/api/cash-closes', {
+      token,
+      body: {
+        client_close_id: randomUUID(),
+        counted_cash: 200,
+        client_sale_ids: ids.slice(0, 2),
+      },
+    });
+
+    assert.equal(cierre.status, 201);
+    assert.equal(Number(cierre.body.expected_cash), 200, 'solo las dos ventas señaladas, no la tercera');
+    assert.equal(Number(cierre.body.sales_count), 2);
+    assert.equal(Number(cierre.body.difference), 0);
+
+    await ctx2.close();
+  });
+
+  await t.test('el servidor ignora un expected_cash mandado por el cliente', async () => {
+    const ctx2 = await startTestServer();
+    const token = await registerUser(ctx2.api);
+    const productId = await createProduct(ctx2.api, token, { name: 'Café', stock: 20, sale_price: 100 });
+
+    await ctx2.api('POST', '/api/sales', {
+      token,
+      body: { items: [{ product_id: productId, quantity: 3, unit_price: 100 }], payment_method: 'efectivo' },
+    });
+
+    // Si el servidor tomara estos valores como dato, bastaría con mandar
+    // contado y esperado iguales para que la caja cuadre siempre — y el conteo
+    // a ciegas dejaría de significar nada.
+    const cierre = await ctx2.api('POST', '/api/cash-closes', {
+      token,
+      body: { counted_cash: 50, expected_cash: 50, difference: 0 },
+    });
+
+    assert.equal(Number(cierre.body.expected_cash), 300, 'lo recalcula el servidor');
+    assert.equal(Number(cierre.body.difference), -250, 'el faltante aparece igual');
+
+    await ctx2.close();
+  });
+
   await t.test('rechaza un efectivo contado inválido', async () => {
     const token = await registerUser(ctx.api);
 

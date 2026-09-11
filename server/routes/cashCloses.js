@@ -52,6 +52,39 @@ const summarizePeriod = async (executor, userId, periodStart) => {
   return result.rows[0];
 };
 
+/**
+ * Mismo resumen, pero sobre un conjunto EXPLÍCITO de ventas identificadas por
+ * su client_sale_id. Lo usa la app de escritorio al subir un cierre que ya
+ * calculó sin red.
+ *
+ * Por qué por ids y no por fechas: a una venta hecha offline el servidor le
+ * pone su propia hora de llegada al sincronizar, no la hora real del cobro.
+ * Un cierre definido por un rango de fechas no encontraría del otro lado las
+ * ventas que en la caja ocurrieron horas antes.
+ *
+ * Lo que NO se acepta es el expected_cash ya calculado por el cliente: el
+ * servidor siempre lo recalcula. Si lo tomara como dato, cualquiera podría
+ * mandar contado y esperado iguales y hacer que la caja cuadre siempre, que es
+ * justo lo que el conteo a ciegas trata de impedir.
+ */
+const summarizeByClientSaleIds = async (executor, userId, clientSaleIds) => {
+  if (clientSaleIds.length === 0) {
+    return { cash: 0, transfer: 0, count: 0, first_sale_at: null };
+  }
+  const placeholders = clientSaleIds.map(() => '?').join(',');
+  const result = await executor.execute({
+    sql: `SELECT
+            COALESCE(SUM(CASE WHEN payment_method = 'efectivo'      THEN total ELSE 0 END), 0) AS cash,
+            COALESCE(SUM(CASE WHEN payment_method = 'transferencia' THEN total ELSE 0 END), 0) AS transfer,
+            COUNT(*)         AS count,
+            MIN(created_at)  AS first_sale_at
+          FROM sales
+          WHERE user_id = ? AND client_sale_id IN (${placeholders})`,
+    args: [userId, ...clientSaleIds],
+  });
+  return result.rows[0];
+};
+
 // Historial: solo el dueño. Cada fila lleva el efectivo esperado de su
 // período, así que dejarlo abierto le daría al cajero justo el número que el
 // conteo a ciegas le esconde.
@@ -116,7 +149,14 @@ router.get('/current', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { counted_cash, opening_float = 0, note = null, client_close_id = null } = req.body;
+  const {
+    counted_cash, opening_float = 0, note = null, client_close_id = null,
+    client_sale_ids = null,
+  } = req.body;
+
+  if (client_sale_ids != null && !Array.isArray(client_sale_ids)) {
+    return res.status(400).json({ error: 'client_sale_ids debe ser una lista' });
+  }
 
   const counted = Number(counted_cash);
   if (!Number.isFinite(counted) || counted < 0) {
@@ -147,14 +187,22 @@ router.post('/', asyncHandler(async (req, res) => {
   // tramo de ventas quedaría contado dos veces.
   const tx = await db.transaction('write');
   try {
+    // Con client_sale_ids el período lo define el escritorio (las ventas que
+    // ese cierre cubrió); sin ellos, es "desde el corte anterior", que es como
+    // trabaja la web.
+    const desdeEscritorio = Array.isArray(client_sale_ids);
     const periodStart = await getPeriodStart(tx, req.userId);
-    const summary = await summarizePeriod(tx, req.userId, periodStart);
+    const summary = desdeEscritorio
+      ? await summarizeByClientSaleIds(tx, req.userId, client_sale_ids)
+      : await summarizePeriod(tx, req.userId, periodStart);
 
     const expectedCash = float + Number(summary.cash);
     const isFirstClose = periodStart === BEGINNING_OF_TIME;
     // Un primer cierre sin ninguna venta no tiene fecha de apertura natural:
     // COALESCE deja que SQLite ponga la de ahora.
-    const openedAt = isFirstClose ? summary.first_sale_at : periodStart;
+    const openedAt = desdeEscritorio
+      ? summary.first_sale_at
+      : (isFirstClose ? summary.first_sale_at : periodStart);
 
     const inserted = await tx.execute({
       sql: `INSERT INTO cash_closes

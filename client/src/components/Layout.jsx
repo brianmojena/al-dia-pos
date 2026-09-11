@@ -1,7 +1,6 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-import { isElectron } from '../lib/api'
 import SyncStatus from './SyncStatus'
 
 // ownerOnly no es solo cosmética: el servidor devuelve 403 en esas rutas para
@@ -9,7 +8,7 @@ import SyncStatus from './SyncStatus'
 // pantallas que solo darían un error.
 const navItems = [
   { to: '/pos',       icon: ShoppingCart,    label: 'Venta'                        },
-  { to: '/caja',      icon: Calculator,      label: 'Caja',      webOnly:   true   },
+  { to: '/caja',      icon: Calculator,      label: 'Caja'                         },
   { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio',    ownerOnly: true   },
   { to: '/products',  icon: Package,         label: 'Productos', ownerOnly: true   },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
@@ -19,13 +18,7 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const isOwner = user?.role !== 'cajero'
-  // El router local del escritorio (desktop/src/router.js) todavía no conoce
-  // /api/cash-closes y devolvería 404, así que allí el cierre se esconde en vez
-  // de mostrar una pestaña que no funciona. Quitar este webOnly en cuanto el
-  // escritorio implemente los cierres contra su SQLite local.
-  const visibleNav = navItems.filter(item =>
-    (isOwner || !item.ownerOnly) && !(item.webOnly && isElectron())
-  )
+  const visibleNav = navItems.filter(item => isOwner || !item.ownerOnly)
 
   const handleLogout = () => {
     logout()

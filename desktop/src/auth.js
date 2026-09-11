@@ -76,6 +76,7 @@ async function login(email, password) {
     token: res.data.token,
     transfer_limit: res.data.user.transfer_limit,
     usd_rate: res.data.user.usd_rate,
+    role: res.data.user.role,
   });
 
   const pull = await pullInitialCatalogIfEmpty(res.data.token).catch((err) => ({ pulled: false, error: err.message }));
