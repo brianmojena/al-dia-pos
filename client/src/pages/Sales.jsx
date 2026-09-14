@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, ClipboardList, Banknote, Smartphone } from 'luc
 import { apiFetch } from '../lib/api'
 import { formatDayLabel, formatTime } from '../lib/dates'
 import { accountLabel } from '../lib/accountLabel'
+import RejectedSalesPanel from '../components/RejectedSalesPanel'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -51,6 +52,8 @@ export default function Sales() {
           <span className="text-sm text-gray-500">{sales.length} ventas · {fmt(totalAll)}</span>
         )}
       </div>
+
+      <RejectedSalesPanel />
 
       {sales.length === 0 ? (
         <div className="bg-white rounded-2xl py-20 text-center text-gray-400 shadow-sm">

@@ -3,7 +3,9 @@ import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Sm
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
-import { enqueueSale } from '../lib/salesQueue'
+import { enqueueSale, getPendingSales, subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
+import { applyPendingSales } from '../lib/offlineStock'
+import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -21,28 +23,38 @@ export default function POS() {
   const [lastPaymentMethod, setLastPaymentMethod] = useState('efectivo')
   const [error,             setError]             = useState('')
   const [queuedOffline,     setQueuedOffline]     = useState(false)
+  const [rejected,          setRejected]          = useState([])
+  const pendingCountRef = useRef(0)
   const searchRef = useRef(null)
   // Identificador de la venta en curso. Se mantiene entre reintentos para que el
   // servidor reconozca el reintento y no registre la venta dos veces; solo se
   // descarta cuando la venta se cierra con éxito.
   const saleIdRef = useRef(null)
 
-  const loadProducts = () =>
-    apiFetch('/api/products')
-      .then(r => r.json())
-      .then(d => {
-        setProducts(d)
-        setLoading(false)
-        if (!isElectron()) cacheProducts(d) // última foto conocida por si la próxima carga es offline
-      })
-      .catch(() => {
-        // Sin red al abrir la PWA: mejor vender con el catálogo de la última
-        // vez que con una pantalla en blanco. El stock puede estar desfasado
-        // — se corrige solo al sincronizar y volver a pedir /api/products.
-        const cached = !isElectron() && getCachedProducts()
-        if (cached) setProducts(cached)
-        setLoading(false)
-      })
+  // En la web se muestra la última foto del servidor MENOS las ventas cobradas
+  // sin internet que aún no subieron (ver lib/offlineStock.js). Antes el
+  // descuento solo vivía en pantalla: al cerrar y reabrir la app sin conexión,
+  // el stock volvía al último número descargado.
+  //
+  // Las pendientes se leen ANTES de pedir el catálogo: si justo en medio sube
+  // una venta, el error queda del lado de mostrar de menos (nunca vender lo que
+  // no hay) y se corrige en la recarga que dispara la propia cola al vaciarse.
+  const loadProducts = async () => {
+    const pendingSales = isElectron() ? [] : await getPendingSales().catch(() => [])
+    try {
+      const res = await apiFetch('/api/products')
+      const d = await res.json()
+      if (!isElectron() && Array.isArray(d)) cacheProducts(d) // última foto del servidor, sin descuentos
+      setProducts(applyPendingSales(d, pendingSales))
+    } catch (_) {
+      // Sin red al abrir la PWA: mejor vender con el catálogo de la última vez
+      // que con una pantalla en blanco.
+      const cached = !isElectron() && getCachedProducts()
+      if (cached) setProducts(applyPendingSales(cached, pendingSales))
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => { loadProducts() }, [])
 
@@ -54,6 +66,18 @@ export default function POS() {
     if (!isElectron()) return
     return window.electronAPI.onSyncStatus((status) => {
       if (status.catalogChanged) loadProducts()
+    })
+  }, [])
+
+  // Web: estado de la cola. Si bajan las pendientes es que acaban de subir
+  // ventas y el servidor ya las descontó: se vuelve a pedir el catálogo, porque
+  // si no ese stock "reaparecería" en pantalla hasta recargar.
+  useEffect(() => {
+    if (isElectron()) return
+    return subscribeQueue(({ pending, rejected: rechazadas }) => {
+      if (pending < pendingCountRef.current) loadProducts()
+      pendingCountRef.current = pending
+      setRejected(rechazadas)
     })
   }, [])
 
@@ -124,7 +148,11 @@ export default function POS() {
       // porque estamos en la PWA web sin conexión. La venta ya se cobró en
       // caja — no tiene sentido bloquear al cajero, la encolamos y seguimos.
       if (!isElectron()) {
-        const soldItems = cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price }))
+        // product_name viaja solo para poder mostrar la venta si la rechazan al
+        // subirla; /api/sales lo ignora.
+        const soldItems = cart.map(i => ({
+          product_id: i.id, product_name: i.name, quantity: i.quantity, unit_price: i.sale_price,
+        }))
         await enqueueSale({
           items: soldItems,
           payment_method: paymentMethod,
@@ -265,6 +293,7 @@ export default function POS() {
 
       {/* Products panel */}
       <div className="flex-1 flex flex-col p-4 md:p-6 min-w-0">
+        <RejectedSalesBanner rejected={rejected} onAcknowledge={acknowledgeRejected} />
         {/* Barra de referencia: límite de transferencia y tasa del dólar,
             configurados por el dueño desde la app móvil. Siempre visible para
             el cajero, no solo dentro del modal de cobro. */}

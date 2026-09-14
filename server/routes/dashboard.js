@@ -55,6 +55,13 @@ router.get('/', asyncHandler(async (req, res) => {
     args: [req.userId],
   });
 
+  // Ventas cobradas sin internet que no se pudieron registrar y el dueño
+  // todavía no revisó: dinero en la caja que no aparece en ninguna venta.
+  const rejectedResult = await db.execute({
+    sql: 'SELECT COUNT(*) AS n FROM rejected_sales WHERE user_id = ? AND reviewed_at IS NULL',
+    args: [req.userId],
+  });
+
   res.json({
     today: todayStatsResult.rows[0],
     lowStock: lowStockResult.rows,
@@ -69,6 +76,7 @@ router.get('/', asyncHandler(async (req, res) => {
         ? { ...lastInventoryCountResult.rows[0], counted_at_label: shopLocalLabel(lastInventoryCountResult.rows[0].counted_at) }
         : null,
       cashierSummary: cashierSummaryResult.rows.length > 1 ? cashierSummaryResult.rows : [],
+      rejectedSales: Number(rejectedResult.rows[0].n) || 0,
     },
   });
 }));

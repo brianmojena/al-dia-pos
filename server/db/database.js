@@ -90,6 +90,28 @@ async function initDb() {
       FOREIGN KEY (sale_id) REFERENCES sales(id)
     );
 
+    -- Ventas cobradas SIN internet que el servidor rechazó al subirlas (casi
+    -- siempre: ya no quedaba stock porque otra caja vendió las últimas
+    -- unidades). El dinero se cobró, así que no pueden desaparecer: quedan aquí
+    -- para que el dueño las vea y decida. No descuentan stock ni entran en el
+    -- cierre de caja — por eso ese cierre mostrará un sobrante por el mismo
+    -- monto, y esta lista explica de dónde sale.
+    CREATE TABLE IF NOT EXISTS rejected_sales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      client_sale_id TEXT NOT NULL,
+      total REAL NOT NULL DEFAULT 0,
+      payment_method TEXT NOT NULL DEFAULT 'efectivo',
+      items TEXT NOT NULL,
+      error TEXT,
+      sold_at TEXT,
+      reported_at TEXT NOT NULL DEFAULT (datetime('now')),
+      reviewed_at TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
     -- Arqueo de inventario: lo que el sistema cree que hay en el estante contra
     -- lo que el dueño contó con la mano.
     --
@@ -224,6 +246,9 @@ async function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_inventory_counts_user  ON inventory_counts(user_id, counted_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_items_count  ON inventory_count_items(count_id);
+
+    -- El teléfono reintenta el aviso si se corta la conexión: una sola fila por venta.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rejected_sales_client ON rejected_sales(user_id, client_sale_id);
   `);
 
   console.log('Base de datos lista');
