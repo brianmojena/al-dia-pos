@@ -11,6 +11,7 @@ import Sales from './pages/Sales'
 import Caja from './pages/Caja'
 import Cajeros from './pages/Cajeros'
 import Inventario from './pages/Inventario'
+import ImportarProductos from './pages/ImportarProductos'
 import { isElectron } from './lib/api'
 
 // BrowserRouter necesita una URL real de servidor (usa el History API sobre
@@ -39,6 +40,7 @@ export default function App() {
               <Route path="sales"      element={<Sales />} />
               <Route path="cajeros"    element={<Cajeros />} />
               <Route path="inventario" element={<Inventario />} />
+              <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
           </Route>
         </Route>
