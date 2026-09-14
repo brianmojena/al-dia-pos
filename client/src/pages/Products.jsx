@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, X, Package, ClipboardCheck } from 'lucide-react'
-import { apiFetch } from '../lib/api'
+import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload } from 'lucide-react'
+import { apiFetch, isElectron } from '../lib/api'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '' }
@@ -74,6 +74,19 @@ export default function Products() {
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-2xl font-bold text-gray-900">Productos</h2>
         <div className="flex items-center gap-2">
+          {/* Solo web: el router local del escritorio no tiene esta ruta. La
+              caja de escritorio recibe el catálogo al iniciar sesión por
+              primera vez, así que la carga masiva se hace en la web ANTES. */}
+          {!isElectron() && (
+            <Link
+              to="/products/importar"
+              title="Importar desde Excel"
+              className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+            >
+              <Upload size={17} />
+              <span className="hidden sm:inline">Importar</span>
+            </Link>
+          )}
           <Link
             to="/inventario"
             title="Contar inventario"
