@@ -34,6 +34,125 @@ router.get('/', requireOwner, asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
+// --- Ventas rechazadas -------------------------------------------------------
+// Estas rutas van ANTES de /:id: si no, GET /rejected lo capturaría el detalle.
+
+const MAX_REJECTED_ITEMS = 200;
+
+const parseRejected = (row) => {
+  let items = [];
+  try { items = JSON.parse(row.items); } catch (_) { /* fila vieja o dañada */ }
+  return { ...row, items };
+};
+
+/**
+ * La app del empleado avisa de una venta que cobró SIN internet y que este
+ * servidor rechazó al subirla (ver client/src/lib/salesQueue.js). Decisión del
+ * negocio: esas ventas no se descartan — el dinero se cobró — sino que quedan
+ * a la vista del dueño para que las revise.
+ *
+ * La puede reportar cualquier cuenta de la tienda: quien cobró es justo el
+ * empleado. Es idempotente por client_sale_id, porque el teléfono reintenta el
+ * aviso si se corta la conexión. El total se calcula aquí con cantidades y
+ * precios; no se acepta el que mande el teléfono.
+ */
+router.post('/rejected', asyncHandler(async (req, res) => {
+  const { client_sale_id, items, payment_method, error = null, sold_at = null } = req.body;
+
+  if (!client_sale_id || typeof client_sale_id !== 'string') {
+    return res.status(400).json({ error: 'Falta el identificador de la venta' });
+  }
+  if (!Array.isArray(items) || items.length === 0 || items.length > MAX_REJECTED_ITEMS) {
+    return res.status(400).json({ error: 'La venta rechazada no tiene líneas válidas' });
+  }
+
+  const db = getDb();
+
+  // Si la venta sí llegó a registrarse (se reintentó y esa vez hubo stock), no
+  // hay nada que reportar: el teléfono la quita de su lista.
+  const registered = await findByClientSaleId(db, req.userId, client_sale_id);
+  if (registered.rows[0]) {
+    return res.status(200).json({ already_registered: true, sale_id: registered.rows[0].id });
+  }
+
+  const productsResult = await db.execute({
+    sql: 'SELECT id, name FROM products WHERE user_id = ?',
+    args: [req.userId],
+  });
+  const names = new Map(productsResult.rows.map((p) => [Number(p.id), p.name]));
+
+  const lines = [];
+  for (const item of items) {
+    const quantity = Number(item?.quantity);
+    const unitPrice = Number(item?.unit_price);
+    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+      return res.status(400).json({ error: 'Una línea de la venta rechazada no es válida' });
+    }
+    const productId = item.product_id != null ? Number(item.product_id) : null;
+    const givenName = typeof item.product_name === 'string' ? item.product_name.trim().slice(0, 120) : '';
+    lines.push({
+      product_id: productId,
+      product_name: givenName || names.get(productId) || `Producto #${productId ?? '?'}`,
+      quantity,
+      unit_price: unitPrice,
+    });
+  }
+  const total = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+  const account = await describeAccount(db, req);
+
+  try {
+    const inserted = await db.execute({
+      sql: `INSERT INTO rejected_sales
+              (user_id, client_sale_id, total, payment_method, items, error, sold_at, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        req.userId, client_sale_id, total,
+        payment_method === 'transferencia' ? 'transferencia' : 'efectivo',
+        JSON.stringify(lines),
+        typeof error === 'string' ? error.slice(0, 300) : null,
+        typeof sold_at === 'string' ? sold_at.slice(0, 40) : null,
+        account.id, account.email,
+      ],
+    });
+    const row = await db.execute({
+      sql: 'SELECT * FROM rejected_sales WHERE id = ?',
+      args: [Number(inserted.lastInsertRowid)],
+    });
+    return res.status(201).json(parseRejected(row.rows[0]));
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      const existing = await db.execute({
+        sql: 'SELECT * FROM rejected_sales WHERE user_id = ? AND client_sale_id = ?',
+        args: [req.userId, client_sale_id],
+      });
+      if (existing.rows[0]) return res.status(200).json(parseRejected(existing.rows[0]));
+    }
+    throw err;
+  }
+}));
+
+// Solo el dueño: dice cuánto dinero se cobró fuera del sistema.
+router.get('/rejected', requireOwner, asyncHandler(async (req, res) => {
+  const result = await getDb().execute({
+    sql: `SELECT * FROM rejected_sales WHERE user_id = ?
+          ORDER BY (reviewed_at IS NOT NULL) ASC, reported_at DESC LIMIT 100`,
+    args: [req.userId],
+  });
+  res.json(result.rows.map(parseRejected));
+}));
+
+router.post('/rejected/:id/review', requireOwner, asyncHandler(async (req, res) => {
+  const db = getDb();
+  const updated = await db.execute({
+    sql: `UPDATE rejected_sales SET reviewed_at = COALESCE(reviewed_at, datetime('now'))
+          WHERE id = ? AND user_id = ?`,
+    args: [req.params.id, req.userId],
+  });
+  if (updated.rowsAffected === 0) return res.status(404).json({ error: 'Venta rechazada no encontrada' });
+  const row = await db.execute({ sql: 'SELECT * FROM rejected_sales WHERE id = ?', args: [req.params.id] });
+  res.json(parseRejected(row.rows[0]));
+}));
+
 router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const saleResult = await db.execute({

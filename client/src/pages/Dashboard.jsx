@@ -47,6 +47,26 @@ export default function Dashboard() {
         </button>
       </div>
 
+      {data?.audit?.rejectedSales > 0 && (
+        <Link
+          to="/sales"
+          className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-2xl px-5 py-4 mb-5 hover:bg-red-100/60 transition-colors"
+        >
+          <AlertTriangle size={18} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-red-700 text-sm">
+              {data.audit.rejectedSales === 1
+                ? '1 venta rechazada por revisar'
+                : `${data.audit.rejectedSales} ventas rechazadas por revisar`}
+            </p>
+            <p className="text-xs text-red-600 mt-0.5">
+              Se cobraron sin internet y no se pudieron registrar. Míralas en Historial.
+            </p>
+          </div>
+          <ChevronRight size={18} className="text-red-300 flex-shrink-0" />
+        </Link>
+      )}
+
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
         <div className="bg-white rounded-2xl p-5 shadow-sm">
