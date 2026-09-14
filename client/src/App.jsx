@@ -32,11 +32,13 @@ export default function App() {
             <Route index element={<Navigate to="/pos" replace />} />
             <Route path="pos"  element={<POS />} />
             <Route path="caja" element={<Caja />} />
+            {/* El empleado entra para dar de alta productos nuevos; la
+                pantalla le oculta editar, borrar, importar y contar. */}
+            <Route path="products" element={<Products />} />
 
             {/* Un cajero solo cobra y cierra la caja: el resto ni lo ve. */}
             <Route element={<RequireOwner />}>
               <Route path="dashboard" element={<Dashboard />} />
-              <Route path="products"   element={<Products />} />
               <Route path="sales"      element={<Sales />} />
               <Route path="cajeros"    element={<Cajeros />} />
               <Route path="inventario" element={<Inventario />} />

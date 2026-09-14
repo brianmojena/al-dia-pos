@@ -70,8 +70,9 @@ export default function Cajeros() {
       <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-5">
         <ShieldCheck size={16} className="flex-shrink-0 mt-0.5" />
         <p className="text-xs leading-relaxed font-medium">
-          Un cajero puede cobrar y cerrar la caja. <strong>No</strong> ve las ventas del día,
-          el historial ni los precios de compra — por eso el conteo del cierre es a ciegas.
+          Un cajero puede cobrar, cerrar la caja y dar de alta productos nuevos. <strong>No</strong> puede
+          cambiar precios ni borrar productos existentes, y no ve las ventas del día, el historial ni los
+          precios de compra — por eso el conteo del cierre es a ciegas.
         </p>
       </div>
 

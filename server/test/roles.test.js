@@ -40,16 +40,13 @@ test('roles: dueño y cajero', async (t) => {
     }
   });
 
-  await t.test('un cajero no puede crear, editar ni borrar productos', async () => {
+  // Dar de ALTA productos sí puede (el dueño delega la carga de mercancía):
+  // eso lo cubre productCreate.test.js. Lo que sigue prohibido es tocar los
+  // que ya existen.
+  await t.test('un cajero no puede editar ni borrar productos existentes', async () => {
     const dueño = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, dueño, { name: 'Ron', stock: 10, sale_price: 500 });
     const cajero = await crearCajero(ctx.api, dueño, `caja2${Date.now()}@test.local`);
-
-    const crear = await ctx.api('POST', '/api/products', {
-      token: cajero.token,
-      body: { name: 'Inventado', sale_price: 1 },
-    });
-    assert.equal(crear.status, 403);
 
     // El caso que importa: bajarse el precio para quedarse con la diferencia.
     const editar = await ctx.api('PUT', `/api/products/${productId}`, {

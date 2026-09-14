@@ -189,6 +189,12 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN account_email TEXT',
     'ALTER TABLE inventory_counts ADD COLUMN account_id INTEGER',
     'ALTER TABLE inventory_counts ADD COLUMN account_email TEXT',
+    // Quién dio de alta cada producto. Los empleados pueden crear productos
+    // (el dueño delega la carga de mercancía nueva), así que el dueño tiene que
+    // poder ver quién agregó qué. Mismo criterio que el resto de la atribución:
+    // email congelado y sin clave foránea, para que sobreviva a borrar la cuenta.
+    'ALTER TABLE products ADD COLUMN created_by_account_id INTEGER',
+    'ALTER TABLE products ADD COLUMN created_by_email TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

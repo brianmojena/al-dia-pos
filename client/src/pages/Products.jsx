@@ -1,58 +1,103 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTriangle } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
+import { useAuth } from '../context/AuthContext'
+import { accountLabel } from '../lib/accountLabel'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '' }
 
 export default function Products() {
-  const [products, setProducts] = useState([])
-  const [loading,  setLoading]  = useState(true)
-  const [showForm, setShowForm] = useState(false)
-  const [editing,  setEditing]  = useState(null)
-  const [form,     setForm]     = useState(EMPTY)
-  const [saving,   setSaving]   = useState(false)
-  const [search,   setSearch]   = useState('')
+  const { user } = useAuth()
+  // Decisión del negocio: el empleado da de alta productos nuevos (el dueño
+  // delega la carga de mercancía), pero no edita ni borra los que ya existen.
+  // Ocultarlo aquí es comodidad: quien lo impide es el servidor y, en la caja
+  // de escritorio, su router local.
+  const isOwner = user?.role !== 'cajero'
+
+  const [products,  setProducts]  = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [showForm,  setShowForm]  = useState(false)
+  const [editing,   setEditing]   = useState(null)
+  const [form,      setForm]      = useState(EMPTY)
+  const [saving,    setSaving]    = useState(false)
+  const [search,    setSearch]    = useState('')
+  const [formError, setFormError] = useState('')
+  const [notice,    setNotice]    = useState('')
 
   const load = () =>
-    apiFetch('/api/products').then(r => r.json()).then(d => { setProducts(d); setLoading(false) })
+    apiFetch('/api/products').then(r => r.json()).then(d => {
+      setProducts(Array.isArray(d) ? d : [])
+      setLoading(false)
+    })
 
   useEffect(() => { load() }, [])
+
+  // En la caja de escritorio el catálogo puede cambiar desde la web con esta
+  // pantalla abierta: el sync worker avisa y la lista se recarga sola.
+  useEffect(() => {
+    if (!isElectron()) return
+    return window.electronAPI.onSyncStatus((status) => {
+      if (status.catalogChanged) load()
+    })
+  }, [])
 
   const filtered = products.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase())
   )
 
-  const openNew = () => { setEditing(null); setForm(EMPTY); setShowForm(true) }
+  const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
     setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock })
+    setFormError('')
     setShowForm(true)
   }
-  const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY) }
+  const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY); setFormError('') }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
+    setFormError('')
     const body = {
       name: form.name,
       purchase_price: parseFloat(form.purchase_price) || 0,
       sale_price: parseFloat(form.sale_price),
       stock: parseInt(form.stock) || 0,
     }
-    await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
-      method: editing ? 'PUT' : 'POST',
-      body: JSON.stringify(body),
-    })
-    await load()
-    closeForm()
-    setSaving(false)
+    try {
+      const res = await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
+        method: editing ? 'PUT' : 'POST',
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      // Antes la respuesta no se miraba: si el guardado fallaba, el formulario
+      // se cerraba igual y parecía que el producto se había creado.
+      if (!res.ok) {
+        setFormError(data.error || 'No se pudo guardar el producto.')
+        return
+      }
+      if (data.merged) {
+        setNotice(`«${data.name}» ya existía, así que no se creó otro. Se mantienen su precio y su stock.`)
+      }
+      await load()
+      closeForm()
+    } catch (_) {
+      setFormError('Sin conexión. El producto no se guardó.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleDelete = async (id, name) => {
     if (!confirm(`¿Eliminar "${name}"?`)) return
-    await apiFetch(`/api/products/${id}`, { method: 'DELETE' })
+    const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      alert(data.error || 'No se pudo eliminar el producto.')
+      return
+    }
     await load()
   }
 
@@ -74,10 +119,9 @@ export default function Products() {
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-2xl font-bold text-gray-900">Productos</h2>
         <div className="flex items-center gap-2">
-          {/* Solo web: el router local del escritorio no tiene esta ruta. La
-              caja de escritorio recibe el catálogo al iniciar sesión por
-              primera vez, así que la carga masiva se hace en la web ANTES. */}
-          {!isElectron() && (
+          {/* Importar: solo dueño y solo web — el router local del escritorio
+              no tiene esta ruta todavía. */}
+          {isOwner && !isElectron() && (
             <Link
               to="/products/importar"
               title="Importar desde Excel"
@@ -87,14 +131,16 @@ export default function Products() {
               <span className="hidden sm:inline">Importar</span>
             </Link>
           )}
-          <Link
-            to="/inventario"
-            title="Contar inventario"
-            className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
-          >
-            <ClipboardCheck size={17} />
-            <span className="hidden sm:inline">Contar</span>
-          </Link>
+          {isOwner && (
+            <Link
+              to="/inventario"
+              title="Contar inventario"
+              className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+            >
+              <ClipboardCheck size={17} />
+              <span className="hidden sm:inline">Contar</span>
+            </Link>
+          )}
           <button
             onClick={openNew}
             className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"
@@ -104,6 +150,26 @@ export default function Products() {
           </button>
         </div>
       </div>
+
+      {!isOwner && (
+        <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-4">
+          <Info size={16} className="flex-shrink-0 mt-0.5" />
+          <p className="text-xs leading-relaxed font-medium">
+            Puedes dar de alta productos nuevos cuando llega mercancía. Cambiar precios o borrar
+            productos que ya existen lo hace el dueño.
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="flex items-start gap-2.5 bg-orange-50 text-orange-800 rounded-xl px-4 py-3 mb-4">
+          <Info size={16} className="flex-shrink-0 mt-0.5" />
+          <p className="text-sm flex-1">{notice}</p>
+          <button onClick={() => setNotice('')} className="opacity-60 hover:opacity-100">
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       {/* Search */}
       <input
@@ -148,10 +214,18 @@ export default function Products() {
               </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                  Stock
+                  {editing ? 'Stock' : 'Stock inicial'}
                 </label>
                 <input type="number" min="0" placeholder="0" {...field('stock')} />
               </div>
+
+              {formError && (
+                <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium">
+                  <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
               <button
                 type="submit"
                 disabled={saving}
@@ -177,10 +251,12 @@ export default function Products() {
               <thead>
                 <tr className="border-b border-gray-100">
                   <th className="text-left px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Producto</th>
-                  <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider hidden sm:table-cell">Compra</th>
+                  {isOwner && (
+                    <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider hidden sm:table-cell">Compra</th>
+                  )}
                   <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Venta</th>
                   <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Stock</th>
-                  <th className="px-5 py-3 w-24"></th>
+                  {isOwner && <th className="px-5 py-3 w-24"></th>}
                 </tr>
               </thead>
               <tbody>
@@ -188,8 +264,15 @@ export default function Products() {
                   <tr key={p.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors">
                     <td className="px-5 py-4">
                       <span className="font-medium text-gray-900 text-sm">{p.name}</span>
+                      {isOwner && p.created_by_email && p.created_by_email !== user?.email && (
+                        <span className="block text-xs text-gray-400 mt-0.5">
+                          agregado por {accountLabel(p.created_by_email)}
+                        </span>
+                      )}
                     </td>
-                    <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}</td>
+                    {isOwner && (
+                      <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}</td>
+                    )}
                     <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">{fmt(p.sale_price)}</td>
                     <td className="px-5 py-4 text-right">
                       <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
@@ -200,22 +283,24 @@ export default function Products() {
                         {p.stock}
                       </span>
                     </td>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          onClick={() => openEdit(p)}
-                          className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700 transition-colors"
-                        >
-                          <Pencil size={15} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(p.id, p.name)}
-                          className="p-2 hover:bg-red-50 rounded-xl text-gray-300 hover:text-red-500 transition-colors"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                    </td>
+                    {isOwner && (
+                      <td className="px-5 py-4">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => openEdit(p)}
+                            className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700 transition-colors"
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(p.id, p.name)}
+                            className="p-2 hover:bg-red-50 rounded-xl text-gray-300 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

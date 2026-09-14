@@ -1,5 +1,7 @@
 const { getLocalDb } = require('../db/localDb');
-const { getPendingOutbox, getSession, updateSessionSettings } = require('../db/queries');
+const {
+  getPendingOutbox, getSession, updateSessionSettings, applyServerCatalog, resetStuckSyncing,
+} = require('../db/queries');
 const { apiRequest } = require('./apiClient');
 
 // ---------------------------------------------------------------------------
@@ -53,7 +55,16 @@ function buildRequest(db, row) {
           stock: payload.stock,
         },
         onSuccess: (data) => {
-          db.prepare('UPDATE products SET server_id = ? WHERE id = ?').run(data.id, payload.local_product_id);
+          // Si el servidor lo unió con un producto que ya existía (mismo
+          // nombre), esta caja puede tener ya ese producto, bajado del
+          // catálogo. Dos filas visibles con el mismo server_id se verían como
+          // dos productos iguales, así que esta copia se oculta. Conserva el
+          // server_id: las ventas hechas con ella lo necesitan para subir.
+          const other = db.prepare(
+            'SELECT id FROM products WHERE server_id = ? AND id != ? AND deleted = 0'
+          ).get(data.id, payload.local_product_id);
+          db.prepare('UPDATE products SET server_id = ?, deleted = MAX(deleted, ?) WHERE id = ?')
+            .run(data.id, other ? 1 : 0, payload.local_product_id);
         },
       };
 
@@ -168,6 +179,10 @@ async function syncOnce() {
 
   if (!session?.token) return summary; // sin sesión, nada que sincronizar
 
+  // Operaciones que una pasada anterior dejó a medio subir (la app se cerró
+  // en plena petición). Sin esto no se reintentaban nunca.
+  summary.recovered = resetStuckSyncing();
+
   const pending = getPendingOutbox();
 
   for (const row of pending) {
@@ -224,9 +239,11 @@ async function syncOnce() {
       continue;
     }
 
-    if (res.status === 409 || res.status === 400) {
-      // Conflicto real (p. ej. stock insuficiente en el servidor) — no es un
+    if (res.status === 409 || res.status === 400 || res.status === 403) {
+      // Conflicto real (p. ej. stock insuficiente en el servidor, o una
+      // operación que esta cuenta no tiene permiso para hacer) — no es un
       // problema de red, reintentar solo no lo arregla. Requiere revisión.
+      // Antes un 403 caía en "transitorio" y se reintentaba para siempre.
       markConflict(db, row.id, res.data?.error || `HTTP ${res.status}`);
       summary.conflicts++;
       continue;
@@ -234,6 +251,22 @@ async function syncOnce() {
 
     // 5xx u otro código inesperado: tratamos como transitorio.
     markRetry(db, row.id, res.data?.error || `HTTP ${res.status}`);
+  }
+
+  // Catálogo: lo que el dueño cargó o cambió en la web baja a esta caja.
+  // Va DESPUÉS de subir la cola a propósito: así las ventas y altas hechas aquí
+  // ya están arriba y quedan menos productos con cambios pendientes que haya
+  // que saltarse (ver applyServerCatalog). Sin red se ignora: la caja sigue
+  // vendiendo con el catálogo que ya tiene.
+  if (!summary.authExpired) {
+    try {
+      const catalog = await apiRequest('GET', '/api/products', { token: session.token });
+      if (catalog.ok && Array.isArray(catalog.data)) {
+        const stats = applyServerCatalog(catalog.data);
+        summary.catalog = stats;
+        summary.catalogChanged = stats.changed;
+      }
+    } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
   }
 
   // El límite de transferencia y la tasa del dólar los cambia el dueño desde

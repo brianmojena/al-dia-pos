@@ -36,7 +36,7 @@ async function routeRequest(method, fullPath, body) {
             transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
             role: res.data.user.role,
           });
-          await auth.pullInitialCatalogIfEmpty(res.data.token).catch(() => {});
+          await auth.pullCatalog(res.data.token).catch(() => {});
         }
         return { ok: res.ok, status: res.status, data: res.data };
       }
@@ -61,13 +61,24 @@ async function routeRequest(method, fullPath, body) {
     if (!session) return fail(401, 'No autenticado');
 
     // --- products ---
+    // Mismas reglas que el servidor: un empleado puede dar de ALTA productos
+    // nuevos, pero editar o borrar los que ya existen es del dueño. Si la caja
+    // no las aplicara, el cambio quedaría hecho aquí, el servidor lo rechazaría
+    // al sincronizar, y la caja y la web contarían historias distintas.
     if (parts[0] === 'api' && parts[1] === 'products') {
       if (parts.length === 2 && method === 'GET') return ok(200, queries.listProducts());
       if (parts.length === 2 && method === 'POST') {
-        if (!body.name || body.sale_price === undefined) {
+        if (!body.name || !String(body.name).trim() || body.sale_price === undefined || body.sale_price === null) {
           return fail(400, 'Nombre y precio de venta son requeridos');
         }
-        return ok(201, queries.createProduct(body));
+        try {
+          return ok(201, queries.createProduct(body));
+        } catch (err) {
+          return fail(err.code === 'DUPLICATE_NAME' ? 409 : 400, err.message);
+        }
+      }
+      if (parts.length === 3 && (method === 'PUT' || method === 'DELETE') && session.role === 'cajero') {
+        return fail(403, 'Solo el dueño puede cambiar o borrar productos que ya existen');
       }
       if (parts.length === 3 && method === 'PUT') {
         try {

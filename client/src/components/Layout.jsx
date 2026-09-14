@@ -10,7 +10,9 @@ const navItems = [
   { to: '/pos',       icon: ShoppingCart,    label: 'Venta'                        },
   { to: '/caja',      icon: Calculator,      label: 'Caja'                         },
   { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio',    ownerOnly: true   },
-  { to: '/products',  icon: Package,         label: 'Productos', ownerOnly: true   },
+  // Productos lo ve también el empleado: puede dar de alta mercancía nueva.
+  // Editar y borrar sigue siendo del dueño (lo decide el servidor y la caja).
+  { to: '/products',  icon: Package,         label: 'Productos'                    },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
 ]
 
