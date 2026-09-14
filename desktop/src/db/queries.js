@@ -79,21 +79,45 @@ function listProducts() {
     .all();
 }
 
+/** "  Arroz   (1 LB) " y "arroz (1 lb)" son el mismo producto — misma regla que el servidor. */
+const normalizeName = (name) =>
+  String(name ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/\s+/g, ' ').trim();
+
+const findProductByName = (db, name) => {
+  const key = normalizeName(name);
+  return db.prepare('SELECT * FROM products WHERE deleted = 0').all()
+    .find((p) => normalizeName(p.name) === key) || null;
+};
+
 function createProduct({ name, purchase_price = 0, sale_price, stock = 0 }) {
   const db = getLocalDb();
   const clientOpId = crypto.randomUUID();
+  const cleanName = String(name ?? '').trim().replace(/\s+/g, ' ');
+
+  // Si esta caja ya tiene el producto (lo bajó del catálogo o lo creó antes),
+  // se avisa en vez de duplicarlo. El caso en que la caja NO lo tiene todavía
+  // —el dueño lo cargó en la web mientras no había internet— lo resuelve el
+  // servidor al sincronizar, uniéndolos (ver onSuccess de product.create).
+  const existing = findProductByName(db, cleanName);
+  if (existing) {
+    throw Object.assign(
+      new Error(`Ya existe «${existing.name}». Búscalo en la lista en vez de crearlo otra vez.`),
+      { code: 'DUPLICATE_NAME', product: existing }
+    );
+  }
 
   const insert = db.transaction(() => {
     const result = db.prepare(`
       INSERT INTO products (name, purchase_price, sale_price, stock) VALUES (?, ?, ?, ?)
-    `).run(name, purchase_price, sale_price, stock);
+    `).run(cleanName, purchase_price, sale_price, stock);
     const localId = result.lastInsertRowid;
 
     enqueueOutbox(db, {
       op_type: 'product.create',
       client_op_id: clientOpId,
       local_ref_id: localId,
-      payload: { local_product_id: localId, name, purchase_price, sale_price, stock },
+      payload: { local_product_id: localId, name: cleanName, purchase_price, sale_price, stock },
     });
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(localId);
@@ -110,28 +134,34 @@ function updateProduct(id, { name, purchase_price, sale_price, stock }) {
     throw new Error('El stock debe ser un número entero mayor o igual a 0');
   }
 
+  const next = {
+    name: name ?? existing.name,
+    purchase_price: purchase_price ?? existing.purchase_price,
+    sale_price: sale_price ?? existing.sale_price,
+    stock: stock ?? existing.stock,
+  };
+
+  // Solo viaja al servidor lo que de verdad cambió. El formulario manda todos
+  // los campos siempre; si se reenviara el stock al corregir un precio, el
+  // stock que tenía ESTA caja en ese momento pisaría en el servidor las ventas
+  // que entraron entretanto desde la web u otra caja.
+  const changed = {};
+  if (String(next.name) !== String(existing.name)) changed.name = next.name;
+  for (const key of ['purchase_price', 'sale_price', 'stock']) {
+    if (Number(next[key]) !== Number(existing[key])) changed[key] = next[key];
+  }
+  if (Object.keys(changed).length === 0) return existing;
+
   const update = db.transaction(() => {
     db.prepare(`
       UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ? WHERE id = ?
-    `).run(
-      name ?? existing.name,
-      purchase_price ?? existing.purchase_price,
-      sale_price ?? existing.sale_price,
-      stock ?? existing.stock,
-      id
-    );
+    `).run(next.name, next.purchase_price, next.sale_price, next.stock, id);
 
     enqueueOutbox(db, {
       op_type: 'product.update',
       client_op_id: crypto.randomUUID(),
       local_ref_id: id,
-      payload: {
-        local_product_id: id,
-        name: name ?? existing.name,
-        purchase_price: purchase_price ?? existing.purchase_price,
-        sale_price: sale_price ?? existing.sale_price,
-        stock: stock ?? existing.stock,
-      },
+      payload: { local_product_id: id, ...changed },
     });
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(id);
@@ -555,10 +585,141 @@ function getInventoryCount(id) {
   return { ...count, items };
 }
 
+// ---------------------------------------------------------------------------
+// Catálogo recibido del servidor
+// ---------------------------------------------------------------------------
+
+/**
+ * Productos locales con cambios propios que todavía no subieron: los que
+ * aparecen en una operación pendiente del outbox (su alta, una edición, un
+ * borrado, o una línea de una venta o de un arqueo).
+ *
+ * 'conflict' NO cuenta a propósito: una operación que el servidor ya rechazó
+ * no va a cambiar el stock de allá, así que la verdad es la del servidor. Si
+ * contara, un solo rechazo dejaría ese producto sin actualizarse para siempre.
+ */
+function productsWithPendingChanges(db) {
+  const ids = new Set();
+  const rows = db.prepare(`SELECT payload FROM outbox WHERE status IN ('pending', 'syncing')`).all();
+  for (const row of rows) {
+    let payload;
+    try { payload = JSON.parse(row.payload); } catch (_) { continue; }
+    if (payload.local_product_id != null) ids.add(Number(payload.local_product_id));
+    for (const item of payload.items || []) {
+      if (item.local_product_id != null) ids.add(Number(item.local_product_id));
+    }
+  }
+  return ids;
+}
+
+/**
+ * Aplica el catálogo del servidor a esta caja: altas, cambios de precio y de
+ * stock, y productos borrados en la web.
+ *
+ * La regla que evita perder ventas: un producto con cambios locales que todavía
+ * no subieron NO se toca en esta pasada. Si la caja vendió 2 sin internet, el
+ * servidor sigue diciendo "10"; copiar ese número borraría la venta del stock
+ * local y se podría vender lo que ya no hay. Cuando esas operaciones suben, la
+ * pasada siguiente lo actualiza con el número que ya las incluye.
+ *
+ * Los productos creados aquí que aún no tienen server_id tampoco se tocan: el
+ * servidor todavía no sabe que existen.
+ *
+ * Si el servidor devuelve la lista vacía no se borra nada. Un dueño que borre
+ * todo su catálogo es rarísimo; una caja que se queda sin productos en medio
+ * de la jornada por una respuesta anómala es un desastre.
+ */
+function applyServerCatalog(serverProducts) {
+  if (!Array.isArray(serverProducts)) throw new Error('El catálogo del servidor no es una lista');
+
+  const db = getLocalDb();
+  const stats = { created: 0, updated: 0, removed: 0, skipped: 0 };
+
+  const apply = db.transaction(() => {
+    const pending = productsWithPendingChanges(db);
+    // Primero las filas visibles: si hay una copia oculta con el mismo
+    // server_id (un duplicado que se unió al sincronizar), manda la visible.
+    const locals = db.prepare(
+      'SELECT * FROM products WHERE server_id IS NOT NULL ORDER BY deleted ASC, id ASC'
+    ).all();
+    const byServerId = new Map();
+    for (const p of locals) if (!byServerId.has(p.server_id)) byServerId.set(p.server_id, p);
+
+    const insert = db.prepare(`
+      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const update = db.prepare(`
+      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, deleted = 0 WHERE id = ?
+    `);
+
+    const seen = new Set();
+    for (const s of serverProducts) {
+      const serverId = Number(s.id);
+      seen.add(serverId);
+      const values = [
+        String(s.name),
+        Number(s.purchase_price) || 0,
+        Number(s.sale_price) || 0,
+        Math.max(0, Math.trunc(Number(s.stock) || 0)),
+      ];
+
+      const local = byServerId.get(serverId);
+      if (!local) {
+        const createdAt = s.created_at || new Date().toISOString().replace('T', ' ').slice(0, 19);
+        insert.run(serverId, ...values, createdAt);
+        stats.created++;
+        continue;
+      }
+      if (pending.has(local.id)) { stats.skipped++; continue; }
+
+      const differs =
+        local.deleted === 1 ||
+        local.name !== values[0] ||
+        local.purchase_price !== values[1] ||
+        local.sale_price !== values[2] ||
+        local.stock !== values[3];
+      if (differs) {
+        update.run(...values, local.id);
+        stats.updated++;
+      }
+    }
+
+    if (serverProducts.length > 0) {
+      const remove = db.prepare('UPDATE products SET deleted = 1 WHERE id = ?');
+      for (const local of locals) {
+        if (local.deleted || seen.has(local.server_id) || pending.has(local.id)) continue;
+        remove.run(local.id);
+        stats.removed++;
+      }
+    }
+  });
+
+  apply();
+  stats.changed = stats.created + stats.updated + stats.removed > 0;
+  return stats;
+}
+
+/**
+ * Devuelve a 'pending' las operaciones que quedaron en 'syncing'.
+ *
+ * Una pasada del sync worker nunca empieza con otra en curso (el loop espera a
+ * que termine para programar la siguiente), así que cualquier 'syncing' al
+ * empezar es de una pasada que se cortó: la app se cerró o se colgó a mitad de
+ * una petición. Antes quedaban así para siempre, porque getPendingOutbox solo
+ * lee 'pending' y 'conflict'.
+ *
+ * Reintentarlas es seguro: ventas, cierres y arqueos llevan su id de
+ * idempotencia, y un alta de producto repetida la une el servidor por nombre.
+ */
+function resetStuckSyncing() {
+  return getLocalDb().prepare(`UPDATE outbox SET status = 'pending' WHERE status = 'syncing'`).run().changes;
+}
+
 module.exports = {
   getSession, setSession, updateSessionSettings, clearSession,
-  getPendingOutbox, countPendingOutbox, enqueueOutbox,
-  listProducts, createProduct, updateProduct, deleteProduct,
+  getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
+  listProducts, createProduct, updateProduct, deleteProduct, applyServerCatalog,
   createSaleLocal, listSales, getSale,
   getDashboard,
   getCurrentCashPeriod, createCashCloseLocal, listCashCloses, cashCloseSummary,

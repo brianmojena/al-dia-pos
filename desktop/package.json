@@ -1,6 +1,6 @@
 {
   "name": "mypimes-desktop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MYPIMES Inventario — app de escritorio offline-first",
   "main": "main.js",
   "scripts": {

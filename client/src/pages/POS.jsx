@@ -46,6 +46,17 @@ export default function POS() {
 
   useEffect(() => { loadProducts() }, [])
 
+  // En la caja de escritorio el catálogo puede cambiar desde la web mientras
+  // se vende (un producto nuevo, un precio): el sync worker avisa y la
+  // cuadrícula se recarga sin salir de la pantalla. El carrito no se toca —
+  // cada línea conserva el precio con el que se agregó.
+  useEffect(() => {
+    if (!isElectron()) return
+    return window.electronAPI.onSyncStatus((status) => {
+      if (status.catalogChanged) loadProducts()
+    })
+  }, [])
+
   const filtered = products.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase()) && p.stock > 0
   )

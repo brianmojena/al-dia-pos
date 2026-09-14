@@ -1,5 +1,4 @@
-const { getLocalDb } = require('./db/localDb');
-const { getSession, setSession, clearSession, listProducts } = require('./db/queries');
+const { getSession, setSession, clearSession, listProducts, applyServerCatalog } = require('./db/queries');
 const { apiRequest } = require('./sync/apiClient');
 
 /** Decodifica el payload del JWT sin verificar firma — alcanza para saber si
@@ -21,31 +20,16 @@ function isSessionTokenValid(session) {
 }
 
 /**
- * Trae el catálogo actual desde el servidor y siembra la base local — solo
- * tiene sentido la primera vez (instalación nueva, sin productos todavía).
- * Requiere red; si falla, no es grave: la tienda puede cargar sus productos
- * a mano y de todas formas van a subir por el outbox normal.
+ * Trae el catálogo del servidor y lo aplica a esta caja. Antes solo se hacía
+ * con la base vacía (instalación nueva); ahora es la misma operación que corre
+ * el sync worker en cada pasada, así que al iniciar sesión la caja queda al día
+ * aunque ya tuviera productos — sin esperar a la próxima pasada.
+ * Requiere red; si falla no es grave: la siguiente pasada lo vuelve a intentar.
  */
-async function pullInitialCatalogIfEmpty(token) {
-  const db = getLocalDb();
-  const existing = listProducts();
-  if (existing.length > 0) return { pulled: false };
-
+async function pullCatalog(token) {
   const res = await apiRequest('GET', '/api/products', { token });
   if (!res.ok || !Array.isArray(res.data)) return { pulled: false, error: res.data?.error };
-
-  const insert = db.transaction((products) => {
-    const stmt = db.prepare(`
-      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    for (const p of products) {
-      stmt.run(p.id, p.name, p.purchase_price, p.sale_price, p.stock, p.created_at);
-    }
-  });
-  insert(res.data);
-
-  return { pulled: true, count: res.data.length };
+  return { pulled: true, ...applyServerCatalog(res.data) };
 }
 
 /**
@@ -79,7 +63,7 @@ async function login(email, password) {
     role: res.data.user.role,
   });
 
-  const pull = await pullInitialCatalogIfEmpty(res.data.token).catch((err) => ({ pulled: false, error: err.message }));
+  const pull = await pullCatalog(res.data.token).catch((err) => ({ pulled: false, error: err.message }));
 
   return { user: res.data.user, initialPull: pull };
 }
@@ -96,4 +80,4 @@ function logout() {
   clearSession();
 }
 
-module.exports = { login, logout, getLocalSession, isSessionTokenValid, pullInitialCatalogIfEmpty };
+module.exports = { login, logout, getLocalSession, isSessionTokenValid, pullCatalog };

@@ -3,10 +3,14 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
+const { describeAccount } = require('../lib/account');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
-// Crear, editar y borrar es del dueño — un cajero que pudiera cambiar precios
-// tendría la forma más simple que existe de quedarse con la diferencia.
+//
+// DAR DE ALTA un producto nuevo también lo puede hacer un empleado: muchos
+// dueños delegan la carga de la mercancía que llega. Lo que queda para el
+// dueño es EDITAR y BORRAR los que ya existen — un empleado que pudiera bajar
+// un precio tendría la forma más simple de quedarse con la diferencia.
 router.get('/', asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name ASC',
@@ -15,18 +19,62 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.post('/', requireOwner, asyncHandler(async (req, res) => {
-  const { name, purchase_price, sale_price, stock } = req.body;
-  if (!name || sale_price === undefined) {
+/**
+ * Alta de un producto. Si ya existe uno con el mismo nombre —sin distinguir
+ * mayúsculas, acentos ni espacios, igual que la importación— NO se crea otro:
+ * se devuelve el existente con `merged: true` y sin tocar su precio ni su stock.
+ *
+ * Eso cubre tres casos reales:
+ *   - la cajera, sin internet, crea "arroz (1 lb)" que el dueño ya había cargado;
+ *   - la caja reintenta un alta cuya respuesta se perdió (sin id de
+ *     idempotencia, antes eso creaba un duplicado en el servidor);
+ *   - un empleado que intentara "cambiar" un precio creando el producto de nuevo.
+ * El precio y el stock del existente mandan: lo decidido para el negocio es que
+ * gane lo que ya cargó el dueño.
+ *
+ * Límite conocido: dos altas simultáneas con el mismo nombre pueden colarse
+ * ambas (la comparación normalizada no se puede expresar como índice UNIQUE en
+ * SQLite). En una tienda con una o dos cajas es muy improbable.
+ */
+router.post('/', asyncHandler(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ') : '';
+  const { purchase_price, sale_price, stock } = req.body;
+
+  if (!name || sale_price === undefined || sale_price === null || sale_price === '') {
     return res.status(400).json({ error: 'Nombre y precio de venta son requeridos' });
   }
-  if (stock !== undefined && (!Number.isInteger(Number(stock)) || Number(stock) < 0)) {
+  const sale = Number(sale_price);
+  if (!Number.isFinite(sale) || sale < 0) {
+    return res.status(400).json({ error: 'El precio de venta no es válido' });
+  }
+  const hasPurchase = purchase_price !== undefined && purchase_price !== null && purchase_price !== '';
+  const purchase = hasPurchase ? Number(purchase_price) : 0;
+  if (!Number.isFinite(purchase) || purchase < 0) {
+    return res.status(400).json({ error: 'El precio de compra no es válido' });
+  }
+  if (stock !== undefined && stock !== null && (!Number.isInteger(Number(stock)) || Number(stock) < 0)) {
     return res.status(400).json({ error: 'El stock debe ser un número entero mayor o igual a 0' });
   }
+
   const db = getDb();
+
+  // normalizeName se define más abajo, junto a la importación: misma regla.
+  const key = normalizeName(name);
+  const existingResult = await db.execute({
+    sql: 'SELECT * FROM products WHERE user_id = ?',
+    args: [req.userId],
+  });
+  const existing = existingResult.rows.find((p) => normalizeName(p.name) === key);
+  if (existing) {
+    return res.status(200).json({ ...existing, merged: true });
+  }
+
+  const account = await describeAccount(db, req);
   const insertResult = await db.execute({
-    sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock) VALUES (?, ?, ?, ?, ?)',
-    args: [req.userId, name, purchase_price || 0, sale_price, stock || 0],
+    sql: `INSERT INTO products
+            (user_id, name, purchase_price, sale_price, stock, created_by_account_id, created_by_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [req.userId, name, purchase, sale, Number(stock) || 0, account.id, account.email],
   });
   const result = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ?',
