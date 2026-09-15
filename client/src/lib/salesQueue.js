@@ -13,8 +13,13 @@
 // había cobrado y la venta no quedaba en ningún lado. Decisión del negocio: se
 // guarda aparte como "rechazada", el empleado la ve en su pantalla y se le avisa
 // al servidor para que el dueño la revise.
-import { get, set, update } from 'idb-keyval'
-import { apiFetch, isElectron } from './api'
+//
+// Cada venta guarda la cuenta que la cobró y solo la sube esa misma cuenta
+// (ver lib/queueOwnership.js): la cola es del teléfono, no de la sesión.
+import { get, update } from 'idb-keyval'
+import { apiFetch, getToken, isElectron } from './api'
+import { accountKeyFromToken, splitByAccount, logoutBlockers } from './queueOwnership'
+import { requestPersistentStorage } from './storagePersistence'
 
 const QUEUE_KEY = 'mypimes_sales_queue'
 const REJECTED_KEY = 'mypimes_rejected_sales'
@@ -28,26 +33,46 @@ const listeners = new Set()
 // para siempre todas las que venían detrás.
 const DEFINITIVE_REJECTIONS = new Set([400, 403, 409])
 
-async function getQueue() {
-  return (await get(QUEUE_KEY)) || []
-}
+const currentAccountKey = () => accountKeyFromToken(getToken())
 
-/** Ventas cobradas sin internet que todavía no subieron. */
+// Listas completas del teléfono, de todas las cuentas.
+const getQueue = async () => (await get(QUEUE_KEY)) || []
+const getAllRejected = async () => (await get(REJECTED_KEY)) || []
+
+/** Ventas cobradas sin internet por la cuenta abierta que todavía no subieron. */
 export async function getPendingSales() {
   if (isElectron()) return []
-  return getQueue()
+  return splitByAccount(await getQueue(), currentAccountKey()).mine
 }
 
-/** Ventas que el servidor rechazó, con `reported` = ya se le avisó al servidor. */
+/** Ventas de la cuenta abierta que el servidor rechazó, con `reported` = ya se le avisó al servidor. */
 export async function getRejected() {
   if (isElectron()) return []
-  return (await get(REJECTED_KEY)) || []
+  return splitByAccount(await getAllRejected(), currentAccountKey()).mine
+}
+
+/**
+ * Lo que impide cerrar sesión ahora mismo. En escritorio nunca bloquea: allí las
+ * ventas viven en la base local de la caja, no dependen de la sesión.
+ */
+export async function getLogoutBlockers() {
+  if (isElectron()) return { pending: 0, unreported: 0, total: 0 }
+  const [queue, rejected] = await Promise.all([getQueue(), getAllRejected()])
+  return logoutBlockers(queue, rejected, currentAccountKey())
 }
 
 async function snapshot() {
-  if (isElectron()) return { pending: 0, rejected: [] }
-  const [queue, rejected] = await Promise.all([getQueue(), getRejected()])
-  return { pending: queue.length, rejected }
+  if (isElectron()) return { pending: 0, rejected: [], otherAccounts: 0 }
+  const [queue, rejected] = await Promise.all([getQueue(), getAllRejected()])
+  const key = currentAccountKey()
+  const ownQueue = splitByAccount(queue, key)
+  const ownRejected = splitByAccount(rejected, key)
+  return {
+    pending: ownQueue.mine.length,
+    rejected: ownRejected.mine,
+    // Ventas de otra cuenta que esperan en este teléfono a que esa cuenta entre.
+    otherAccounts: ownQueue.others.length + ownRejected.others.filter((r) => !r.reported).length,
+  }
 }
 
 const notify = async () => {
@@ -55,7 +80,10 @@ const notify = async () => {
   listeners.forEach((fn) => fn(state))
 }
 
-/** El callback recibe `{ pending: número, rejected: [ventas rechazadas] }`. */
+/** Vuelve a leer el estado: al entrar o salir cambia qué ventas son "mías". */
+export const refreshQueueStatus = notify
+
+/** El callback recibe `{ pending, rejected: [ventas rechazadas], otherAccounts }`. */
 export function subscribe(fn) {
   listeners.add(fn)
   snapshot().then(fn)
@@ -66,19 +94,26 @@ export function subscribe(fn) {
 // El client_sale_id viaja intacto — cuando el servidor por fin la reciba, la
 // misma garantía de idempotencia que ya existe en el backend evita duplicados.
 export async function enqueueSale(payload) {
-  await update(QUEUE_KEY, (queue = []) => [...queue, { ...payload, queued_at: Date.now() }])
+  const sale = { ...payload, account_key: currentAccountKey(), queued_at: Date.now() }
+  await update(QUEUE_KEY, (queue = []) => [...queue, sale])
+  requestPersistentStorage()
   await notify()
 }
 
 const removeFromQueue = (clientSaleId) =>
   update(QUEUE_KEY, (queue = []) => queue.filter((s) => s.client_sale_id !== clientSaleId))
 
+const markRejected = (clientSaleId, changes) =>
+  update(REJECTED_KEY, (list = []) =>
+    list.map((r) => (r.client_sale_id === clientSaleId ? { ...r, ...changes } : r))
+  )
+
 /**
  * Avisa al servidor de las ventas rechazadas que todavía no se reportaron.
  * Sin red se detiene y lo reintenta en el próximo intento.
  */
-async function reportRejected() {
-  const rejected = await getRejected()
+async function reportRejected(accountKey) {
+  const rejected = splitByAccount(await getAllRejected(), accountKey).mine
   for (const sale of rejected.filter((r) => !r.reported)) {
     let res
     try {
@@ -99,33 +134,43 @@ async function reportRejected() {
     if (res.ok) {
       const data = await res.json().catch(() => ({}))
       // Si resulta que sí se había registrado, no hay nada que mostrar.
-      await update(REJECTED_KEY, (list = []) =>
-        data.already_registered
-          ? list.filter((r) => r.client_sale_id !== sale.client_sale_id)
-          : list.map((r) => (r.client_sale_id === sale.client_sale_id ? { ...r, reported: true } : r))
-      )
+      if (data.already_registered) {
+        await update(REJECTED_KEY, (list = []) => list.filter((r) => r.client_sale_id !== sale.client_sale_id))
+      } else {
+        await markRejected(sale.client_sale_id, { reported: true, report_failed: false })
+      }
     } else if (res.status === 401 || res.status >= 500) {
       return // sesión vencida o servidor caído: se reintenta después
+    } else {
+      // Otro 4xx: el servidor no acepta el aviso y reintentar no lo arregla.
+      // Queda a la vista del empleado, pero ya no le impide cerrar sesión.
+      await markRejected(sale.client_sale_id, { report_failed: true })
     }
-    // Otro 4xx: queda sin marcar y a la vista del empleado; seguimos con las demás.
   }
 }
 
 // Evita dos subidas a la vez (el evento 'online' y el intervalo pueden coincidir).
 let flushing = false
 
-// Intenta subir todas las ventas pendientes, en orden. Se detiene ante un
-// problema pasajero (sin red, sesión vencida, servidor caído); una venta
+// Intenta subir las ventas pendientes de la cuenta abierta, en orden. Se detiene
+// ante un problema pasajero (sin red, sesión vencida, servidor caído); una venta
 // rechazada de forma definitiva pasa a la lista de rechazadas y la cola sigue.
+// Las ventas de otras cuentas no se tocan: esperan a que esa cuenta entre.
 export async function flushQueue() {
   if (isElectron() || flushing) return
   flushing = true
   try {
-    const queue = await getQueue()
+    const accountKey = currentAccountKey()
+    const queue = splitByAccount(await getQueue(), accountKey).mine
     for (const sale of queue) {
+      // Si la sesión cambió a mitad de la subida, lo que queda ya no es de esta cuenta.
+      if (currentAccountKey() !== accountKey) break
+
+      // account_key y queued_at son datos del teléfono; /api/sales los ignora.
+      const { account_key, queued_at, ...body } = sale
       let res
       try {
-        res = await apiFetch('/api/sales', { method: 'POST', body: JSON.stringify(sale) })
+        res = await apiFetch('/api/sales', { method: 'POST', body: JSON.stringify(body) })
       } catch (_) {
         break // sigue sin red — paramos y probamos en el próximo intento
       }
@@ -157,7 +202,7 @@ export async function flushQueue() {
       break // 401, 5xx u otro problema pasajero: reintentar luego
     }
 
-    await reportRejected()
+    if (accountKey && currentAccountKey() === accountKey) await reportRejected(accountKey)
   } finally {
     flushing = false
     await notify()
@@ -173,7 +218,8 @@ export async function acknowledgeRejected(clientSaleId) {
   const rejected = await getRejected()
   const sale = rejected.find((r) => r.client_sale_id === clientSaleId)
   if (!sale || !sale.reported) return false
-  await set(REJECTED_KEY, rejected.filter((r) => r.client_sale_id !== clientSaleId))
+  // update sobre la lista completa: las rechazadas de otras cuentas se quedan.
+  await update(REJECTED_KEY, (list = []) => list.filter((r) => r.client_sale_id !== clientSaleId))
   await notify()
   return true
 }
@@ -183,6 +229,10 @@ export function startAutoFlush() {
   if (isElectron() || flushTimer) return
   window.addEventListener('online', flushQueue)
   flushTimer = setInterval(flushQueue, 20_000)
+  // Si al abrir ya hay ventas guardadas, que el teléfono no las borre por falta de espacio.
+  Promise.all([getQueue(), getAllRejected()])
+    .then(([queue, rejected]) => { if (queue.length || rejected.length) requestPersistentStorage() })
+    .catch(() => {})
   flushQueue()
   return () => {
     window.removeEventListener('online', flushQueue)

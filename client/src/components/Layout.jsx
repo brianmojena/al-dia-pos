@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut, CloudOff } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import SyncStatus from './SyncStatus'
 
 // ownerOnly no es solo cosmética: el servidor devuelve 403 en esas rutas para
@@ -22,9 +24,41 @@ export default function Layout() {
   const isOwner = user?.role !== 'cajero'
   const visibleNav = navItems.filter(item => isOwner || !item.ownerOnly)
 
-  const handleLogout = () => {
+  // Cerrar sesión con ventas sin subir no las borra, pero las deja esperando
+  // hasta que ESTA cuenta vuelva a entrar en este teléfono — y mientras, el
+  // dueño no las ve. Por eso no se deja salir hasta que suban.
+  const [blockers, setBlockers] = useState(null)
+  const [uploading, setUploading] = useState(false)
+  const [stillOffline, setStillOffline] = useState(false)
+
+  const doLogout = () => {
+    setBlockers(null)
     logout()
     navigate('/login')
+  }
+
+  const handleLogout = async () => {
+    const found = await getLogoutBlockers().catch(() => ({ total: 0 }))
+    if (found.total > 0) {
+      setStillOffline(false)
+      setBlockers(found)
+      return
+    }
+    doLogout()
+  }
+
+  const uploadNow = async () => {
+    setUploading(true)
+    setStillOffline(false)
+    try {
+      await flushQueue()
+      const found = await getLogoutBlockers().catch(() => ({ total: 0 }))
+      if (found.total === 0) return doLogout()
+      setBlockers(found)
+      setStillOffline(true)
+    } finally {
+      setUploading(false)
+    }
   }
 
   return (
@@ -102,6 +136,50 @@ export default function Layout() {
           </NavLink>
         ))}
       </nav>
+
+      {blockers && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="logout-blocked-title"
+               className="bg-white rounded-3xl shadow-xl w-full max-w-sm p-6">
+            <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mb-4">
+              <CloudOff size={24} />
+            </div>
+            <h2 id="logout-blocked-title" className="text-lg font-bold text-gray-900">
+              {blockers.pending > 0
+                ? `${blockers.pending === 1 ? 'Queda 1 venta' : `Quedan ${blockers.pending} ventas`} sin subir`
+                : 'Hay ventas rechazadas sin avisar al dueño'}
+            </h2>
+            <p className="text-sm text-gray-600 mt-2">
+              Todavía no puedes cerrar sesión. Las ventas están guardadas en este teléfono,
+              pero el dueño no las verá hasta que se suban.
+            </p>
+            <p className="text-sm text-gray-600 mt-2">
+              Conéctate a internet y toca <strong>Subir ahora</strong>.
+            </p>
+            {stillOffline && (
+              <p className="text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2 mt-3">
+                No se pudieron subir todas. Revisa la conexión y vuelve a intentarlo.
+              </p>
+            )}
+            <div className="flex flex-col gap-2 mt-5">
+              <button
+                onClick={uploadNow}
+                disabled={uploading}
+                className="w-full py-3 rounded-2xl bg-[#007AFF] text-white font-semibold disabled:opacity-60"
+              >
+                {uploading ? 'Subiendo…' : 'Subir ahora'}
+              </button>
+              <button
+                onClick={() => setBlockers(null)}
+                disabled={uploading}
+                className="w-full py-3 rounded-2xl bg-gray-100 text-gray-700 font-semibold"
+              >
+                Seguir en la app
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
