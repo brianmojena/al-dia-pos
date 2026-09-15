@@ -18,8 +18,8 @@ export default function SyncStatus() {
     if (isElectron()) {
       return window.electronAPI.onSyncStatus(setStatus)
     }
-    return subscribeQueue(({ pending, rejected }) =>
-      setStatus({ pending, conflicts: 0, rejected: rejected.length })
+    return subscribeQueue(({ pending, rejected, otherAccounts }) =>
+      setStatus({ pending, conflicts: 0, rejected: rejected.length, otherAccounts })
     )
   }, [])
 
@@ -27,10 +27,22 @@ export default function SyncStatus() {
   const pending = status.pending || 0
   const rejected = status.rejected || 0
   const conflicts = status.conflicts || 0
-  if (!pending && !rejected) return null
+  const otherAccounts = status.otherAccounts || 0
+  if (!pending && !rejected && !otherAccounts) return null
 
   return (
     <div className="flex items-center gap-1.5 flex-shrink-0">
+      {otherAccounts > 0 && (
+        // No se suben con esta sesión: se esperan a que entre la cuenta que las
+        // cobró. Visible para que nadie crea que se perdieron.
+        <span
+          title="Ventas guardadas en este teléfono por otra cuenta. Se subirán cuando esa cuenta inicie sesión aquí."
+          className="flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full bg-amber-100 text-amber-800"
+        >
+          <CloudOff size={12} />
+          {otherAccounts} <span className="hidden min-[400px]:inline">de otra cuenta</span>
+        </span>
+      )}
       {rejected > 0 && (
         <span
           title="Ventas cobradas que el sistema rechazó al subirlas — revisa la pantalla de Venta"

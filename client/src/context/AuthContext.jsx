@@ -1,6 +1,15 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { apiFetch, getToken, setToken, clearToken, isElectron } from '../lib/api'
 import { cacheUser, getCachedUser } from '../lib/offlineCache'
+import { flushQueue, refreshQueueStatus } from '../lib/salesQueue'
+
+// Al cambiar de sesión cambia qué ventas guardadas en el teléfono son de quien
+// está dentro: se recalcula el contador y, al entrar, se suben las suyas ya.
+const onSessionChanged = ({ signedIn }) => {
+  if (isElectron()) return
+  refreshQueueStatus().catch(() => {})
+  if (signedIn) flushQueue()
+}
 
 const AuthContext = createContext(null)
 
@@ -36,7 +45,10 @@ export function AuthProvider({ children }) {
   useEffect(() => { loadMe() }, [loadMe])
 
   useEffect(() => {
-    const onUnauthorized = () => setUser(null)
+    const onUnauthorized = () => {
+      setUser(null)
+      onSessionChanged({ signedIn: false })
+    }
     window.addEventListener('auth:unauthorized', onUnauthorized)
     return () => window.removeEventListener('auth:unauthorized', onUnauthorized)
   }, [])
@@ -66,6 +78,7 @@ export function AuthProvider({ children }) {
     setToken(data.token)
     setUser(data.user)
     cacheUser(data.user)
+    onSessionChanged({ signedIn: true })
     return data.user
   }
 
@@ -79,12 +92,16 @@ export function AuthProvider({ children }) {
     setToken(data.token)
     setUser(data.user)
     cacheUser(data.user)
+    onSessionChanged({ signedIn: true })
     return data.user
   }
 
+  // Quien llama es responsable de comprobar antes que no queden ventas sin
+  // subir (ver getLogoutBlockers en Layout.jsx).
   const logout = () => {
     clearToken()
     setUser(null)
+    onSessionChanged({ signedIn: false })
   }
 
   return (
