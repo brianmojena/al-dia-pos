@@ -47,6 +47,9 @@ async function startTestServer() {
 
   return {
     api,
+    // Para descargas binarias (el Excel de /api/reports/export), que `api()`
+    // no puede devolver porque siempre intenta parsear JSON.
+    baseUrl,
     db: getDb(),
     async close() {
       await new Promise((resolve) => server.close(resolve));

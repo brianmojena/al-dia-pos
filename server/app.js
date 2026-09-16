@@ -7,6 +7,7 @@ const salesRouter     = require('./routes/sales');
 const dashboardRouter = require('./routes/dashboard');
 const cashClosesRouter = require('./routes/cashCloses');
 const inventoryCountsRouter = require('./routes/inventoryCounts');
+const reportsRouter = require('./routes/reports');
 
 const app = express();
 
@@ -22,6 +23,9 @@ app.use('/api/sales',     requireAuth, salesRouter);
 app.use('/api/dashboard', requireAuth, requireOwner, dashboardRouter);
 app.use('/api/cash-closes', requireAuth, cashClosesRouter);
 app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
+// Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner
+// vive dentro de cada ruta, igual que en /api/sales y /api/cash-closes).
+app.use('/api/reports', requireAuth, reportsRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);
