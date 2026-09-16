@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { boundsForDate, startOfLocalDay } = require('../lib/businessDay');
+const { boundsForDate, startOfLocalDay, shopLocalDate, shopLocalTime } = require('../lib/businessDay');
 
 /**
  * "Hoy" tiene que significar el día del dueño en Cuba, no el día UTC. Antes de
@@ -78,6 +78,25 @@ test('día del negocio', async (t) => {
     assert.equal(boundsForDate('2026-12-31').end, boundsForDate('2027-01-01').start);
     // 29 de febrero de un año bisiesto.
     assert.equal(boundsForDate('2028-02-28').end, boundsForDate('2028-02-29').start);
+  });
+
+  await t.test('lee las fechas guardadas vengan como vengan', async () => {
+    // Lo normal: lo que escribe datetime('now'), UTC sin decirlo.
+    assert.equal(shopLocalDate('2026-07-14 09:10:00'), '2026-07-14');
+    assert.equal(shopLocalTime('2026-07-14 09:10:00'), '05:10', 'Cuba en julio es UTC-4');
+
+    // Filas viejas y datos de demostración: traen la 'T' de ISO y tampoco
+    // dicen la zona. Si se leyeran como hora local, la misma venta saldría a
+    // una hora en el Excel y a otra en la pantalla.
+    assert.equal(shopLocalTime('2026-07-14T09:10:00'), '05:10');
+
+    // Si el texto ya trae la zona, se respeta — y no se le pega una segunda Z,
+    // que dejaba la fecha inválida y la fila fuera del reporte.
+    assert.equal(shopLocalDate('2026-07-14T02:10:00Z'), '2026-07-13', 'de madrugada en UTC todavía es el día anterior en Cuba');
+    assert.equal(shopLocalTime('2026-07-14T05:10:00-04:00'), '05:10');
+
+    assert.equal(shopLocalDate(null), null);
+    assert.equal(shopLocalDate('no es una fecha'), null);
   });
 
   await t.test('otra zona horaria da otras fronteras', async () => {
