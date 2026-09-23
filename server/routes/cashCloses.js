@@ -4,11 +4,26 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
+const { resolveRegisterId } = require('../lib/register');
+
+/**
+ * Arqueo de caja por CAJA, no por tienda.
+ *
+ * Cada gaveta física se cuadra contra sus propias ventas: si Yamila y Pedro
+ * cobran en dos cajas, cada uno cuenta su efectivo contra lo que vendió él.
+ * La cobertura vive en la venta (`sales.cash_close_id`), no en un rango de
+ * fechas: una venta queda cerrada por exactamente un arqueo y dos cierres no
+ * pueden llevarse la misma.
+ *
+ * Tres formas de pedir un cierre, según quién lo manda:
+ *   - escritorio: trae la lista de client_sale_ids que ya cerró sin red;
+ *   - web: trae register_id y cubre las ventas abiertas de esa caja;
+ *   - legado (clientes sin register_id): cubre las ventas abiertas sin caja.
+ */
 
 // Antes del primer cierre no existe un corte anterior del cual partir. Este
 // centinela ordena por debajo de cualquier fecha real ('0000-...' < '2026-...'
-// como texto), así que el primer arqueo barre todas las ventas que nunca se
-// han contado, sin depender de la zona horaria del servidor.
+// como texto). Hoy solo lo usa el modo legado para describir el período.
 const BEGINNING_OF_TIME = '0000-01-01 00:00:00';
 
 const isUniqueViolation = (err) => {
@@ -22,7 +37,9 @@ const findByClientCloseId = (db, userId, clientCloseId) =>
     args: [userId, clientCloseId],
   });
 
-// Frontera del período abierto: el corte del último cierre.
+// Frontera global: el corte del último cierre de la tienda. Solo la necesita
+// el modo legado para mostrar desde cuándo va el período; qué ventas entran ya
+// no depende de fechas sino de `cash_close_id`.
 const getPeriodStart = async (executor, userId) => {
   const result = await executor.execute({
     sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? ORDER BY closed_at DESC LIMIT 1',
@@ -31,31 +48,59 @@ const getPeriodStart = async (executor, userId) => {
   return result.rows[0]?.closed_at || BEGINNING_OF_TIME;
 };
 
-// Ventas del período abierto, separadas por forma de cobro: solo el efectivo
-// tiene que aparecer físicamente en la gaveta; las transferencias se muestran
-// aparte como referencia.
-//
-// `created_at > periodStart` (estricto, no >=) para que una venta registrada
-// exactamente en el segundo del corte anterior caiga en el período siguiente.
-// En el peor caso se cuenta un período más tarde; nunca se cuenta dos veces.
-const summarizePeriod = async (executor, userId, periodStart) => {
+// El último corte de ESTA caja: es donde empieza su período, aunque otra caja
+// haya cerrado después.
+const getLastCloseForRegister = async (executor, userId, registerId) => {
+  const result = registerId
+    ? await executor.execute({
+        sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1',
+        args: [userId, registerId],
+      })
+    : await executor.execute({
+        sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id IS NULL ORDER BY closed_at DESC LIMIT 1',
+        args: [userId],
+      });
+  return result.rows[0]?.closed_at || null;
+};
+
+// Separado por forma de cobro: solo el efectivo tiene que aparecer físicamente
+// en la gaveta; las transferencias se muestran aparte como referencia.
+const summarize = (rows) => ({
+  cash: rows.reduce((sum, row) => sum + (row.payment_method === 'efectivo' ? Number(row.total) : 0), 0),
+  transfer: rows.reduce((sum, row) => sum + (row.payment_method === 'transferencia' ? Number(row.total) : 0), 0),
+  count: rows.length,
+  first_sale_at: rows[0]?.created_at || null,
+});
+
+/**
+ * Ventas todavía sin arqueo que le tocan a esta caja.
+ *
+ * La caja web también se lleva las ventas abiertas SIN caja (register_id NULL):
+ * son las cobradas antes de este despliegue, o desde un escritorio viejo que
+ * todavía no manda su identidad. Si nadie las tomara quedarían fuera de todo
+ * arqueo para siempre. Si después ese escritorio viejo las cierra por ids, el
+ * cierre lo deja anotado en `overlap_sales` (ver el POST).
+ */
+const openSales = async (executor, userId, mode, registerId) => {
+  if (mode === 'web') {
+    const result = await executor.execute({
+      sql: `SELECT * FROM sales WHERE user_id = ? AND cash_close_id IS NULL
+            AND (register_id = ? OR register_id IS NULL) ORDER BY created_at ASC, id ASC`,
+      args: [userId, registerId],
+    });
+    return result.rows;
+  }
   const result = await executor.execute({
-    sql: `SELECT
-            COALESCE(SUM(CASE WHEN payment_method = 'efectivo'      THEN total ELSE 0 END), 0) AS cash,
-            COALESCE(SUM(CASE WHEN payment_method = 'transferencia' THEN total ELSE 0 END), 0) AS transfer,
-            COUNT(*)         AS count,
-            MIN(created_at)  AS first_sale_at
-          FROM sales
-          WHERE user_id = ? AND created_at > ?`,
-    args: [userId, periodStart],
+    sql: `SELECT * FROM sales WHERE user_id = ? AND register_id IS NULL
+          AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
+    args: [userId],
   });
-  return result.rows[0];
+  return result.rows;
 };
 
 /**
- * Mismo resumen, pero sobre un conjunto EXPLÍCITO de ventas identificadas por
- * su client_sale_id. Lo usa la app de escritorio al subir un cierre que ya
- * calculó sin red.
+ * Las ventas de un conjunto EXPLÍCITO de client_sale_id. Lo usa la app de
+ * escritorio al subir un cierre que ya calculó sin red.
  *
  * Por qué por ids y no por fechas: a una venta hecha offline el servidor le
  * pone su propia hora de llegada al sincronizar, no la hora real del cobro.
@@ -67,22 +112,43 @@ const summarizePeriod = async (executor, userId, periodStart) => {
  * mandar contado y esperado iguales y hacer que la caja cuadre siempre, que es
  * justo lo que el conteo a ciegas trata de impedir.
  */
-const summarizeByClientSaleIds = async (executor, userId, clientSaleIds) => {
-  if (clientSaleIds.length === 0) {
-    return { cash: 0, transfer: 0, count: 0, first_sale_at: null };
-  }
-  const placeholders = clientSaleIds.map(() => '?').join(',');
+const salesByClientIds = async (executor, userId, ids) => {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
   const result = await executor.execute({
-    sql: `SELECT
-            COALESCE(SUM(CASE WHEN payment_method = 'efectivo'      THEN total ELSE 0 END), 0) AS cash,
-            COALESCE(SUM(CASE WHEN payment_method = 'transferencia' THEN total ELSE 0 END), 0) AS transfer,
-            COUNT(*)         AS count,
-            MIN(created_at)  AS first_sale_at
-          FROM sales
-          WHERE user_id = ? AND client_sale_id IN (${placeholders})`,
-    args: [userId, ...clientSaleIds],
+    sql: `SELECT * FROM sales WHERE user_id = ? AND client_sale_id IN (${placeholders})
+          ORDER BY created_at ASC, id ASC`,
+    args: [userId, ...ids],
   });
-  return result.rows[0];
+  return result.rows;
+};
+
+const modeFor = (req, clientSaleIds, requestedRegisterId) => {
+  if (Array.isArray(clientSaleIds)) return 'desktop';
+  return requestedRegisterId != null && resolveRegisterId(req, requestedRegisterId) ? 'web' : 'legacy';
+};
+
+const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
+  const registerId = resolveRegisterId(req, requestedRegisterId);
+  const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
+  const sales = await openSales(executor, req.userId, mode, registerId);
+
+  if (mode === 'web') {
+    const lastClose = await getLastCloseForRegister(executor, req.userId, registerId);
+    return {
+      sales,
+      openedAt: lastClose || sales[0]?.created_at || null,
+      isFirstClose: !lastClose,
+    };
+  }
+
+  const periodStart = await getPeriodStart(executor, req.userId);
+  const isFirstClose = periodStart === BEGINNING_OF_TIME;
+  return {
+    sales,
+    openedAt: isFirstClose ? (sales[0]?.created_at || null) : periodStart,
+    isFirstClose,
+  };
 };
 
 // Historial: solo el dueño. Cada fila lleva el efectivo esperado de su
@@ -136,22 +202,18 @@ router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
 // verlo antes de declarar, y la garantía se caería. El cálculo vive del lado
 // del servidor y solo se revela junto con el resultado del arqueo.
 router.get('/current', asyncHandler(async (req, res) => {
-  const db = getDb();
-  const periodStart = await getPeriodStart(db, req.userId);
-  const summary = await summarizePeriod(db, req.userId, periodStart);
-  const isFirstClose = periodStart === BEGINNING_OF_TIME;
-
+  const period = await describeOpenPeriod(getDb(), req, req.query.register_id);
   res.json({
-    opened_at: isFirstClose ? summary.first_sale_at : periodStart,
-    is_first_close: isFirstClose,
-    has_sales: Number(summary.count) > 0,
+    opened_at: period.openedAt,
+    is_first_close: period.isFirstClose,
+    has_sales: period.sales.length > 0,
   });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
   const {
     counted_cash, opening_float = 0, note = null, client_close_id = null,
-    client_sale_ids = null,
+    client_sale_ids = null, register_id: requestedRegisterId = null,
   } = req.body;
 
   if (client_sale_ids != null && !Array.isArray(client_sale_ids)) {
@@ -178,46 +240,67 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  const registerId = resolveRegisterId(req, requestedRegisterId);
+  const mode = modeFor(req, client_sale_ids, requestedRegisterId);
+
   // Quién está cerrando: es la mitad del valor del arqueo. "Faltaron 220" no
   // se puede accionar; "faltaron 220 en el cierre de Yamila" sí.
   const account = await describeAccount(db, req);
 
-  // Leer la frontera y escribir el cierre en la misma transacción: si dos
-  // cierres se solaparan, ambos leerían el mismo corte anterior y el mismo
-  // tramo de ventas quedaría contado dos veces.
+  // Leer las ventas abiertas y marcarlas como cerradas en la misma
+  // transacción: si dos cierres de la misma caja llegaran a la vez, el segundo
+  // encuentra las ventas ya marcadas y no las vuelve a contar.
   const tx = await db.transaction('write');
   try {
-    // Con client_sale_ids el período lo define el escritorio (las ventas que
-    // ese cierre cubrió); sin ellos, es "desde el corte anterior", que es como
-    // trabaja la web.
-    const desdeEscritorio = Array.isArray(client_sale_ids);
-    const periodStart = await getPeriodStart(tx, req.userId);
-    const summary = desdeEscritorio
-      ? await summarizeByClientSaleIds(tx, req.userId, client_sale_ids)
-      : await summarizePeriod(tx, req.userId, periodStart);
+    const covered = mode === 'desktop'
+      ? await salesByClientIds(tx, req.userId, client_sale_ids)
+      : await openSales(tx, req.userId, mode, registerId);
+    const summary = summarize(covered);
 
-    const expectedCash = float + Number(summary.cash);
-    const isFirstClose = periodStart === BEGINNING_OF_TIME;
+    // Solo pasa en la transición: un escritorio viejo cierra por ids ventas
+    // que la web ya se había llevado. Se suman igual —ese dinero está en esa
+    // gaveta y el cierre local ya es un hecho— pero queda anotado para que el
+    // dueño vea de dónde sale el sobrante en la otra caja.
+    const overlapSales = mode === 'desktop'
+      ? covered.filter((sale) => sale.cash_close_id != null).length
+      : 0;
+
+    let openedAt;
+    if (mode === 'legacy') {
+      const periodStart = await getPeriodStart(tx, req.userId);
+      openedAt = periodStart === BEGINNING_OF_TIME ? summary.first_sale_at : periodStart;
+    } else {
+      const priorClose = await getLastCloseForRegister(tx, req.userId, registerId);
+      openedAt = priorClose || summary.first_sale_at;
+    }
+
+    const expectedCash = float + summary.cash;
+
     // Un primer cierre sin ninguna venta no tiene fecha de apertura natural:
     // COALESCE deja que SQLite ponga la de ahora.
-    const openedAt = desdeEscritorio
-      ? summary.first_sale_at
-      : (isFirstClose ? summary.first_sale_at : periodStart);
-
     const inserted = await tx.execute({
       sql: `INSERT INTO cash_closes
               (user_id, client_close_id, opened_at, opening_float, expected_cash,
                counted_cash, difference, expected_transfer, sales_count, note,
-               account_id, account_email)
-            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               register_id, overlap_sales, account_id, account_email)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         req.userId, client_close_id, openedAt, float, expectedCash,
         counted, counted - expectedCash,
-        Number(summary.transfer), Number(summary.count), note,
-        account.id, account.email,
+        summary.transfer, summary.count, note,
+        registerId, overlapSales, account.id, account.email,
       ],
     });
     const closeId = Number(inserted.lastInsertRowid);
+
+    if (covered.length > 0) {
+      const placeholders = covered.map(() => '?').join(',');
+      await tx.execute({
+        sql: `UPDATE sales SET cash_close_id = ?
+              WHERE id IN (${placeholders}) AND cash_close_id IS NULL`,
+        args: [closeId, ...covered.map((sale) => sale.id)],
+      });
+    }
 
     await tx.commit();
 

@@ -5,6 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
+const { resolveRegisterId } = require('../lib/register');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -169,7 +170,10 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { items, payment_method = 'efectivo', client_sale_id = null } = req.body;
+  const {
+    items, payment_method = 'efectivo', client_sale_id = null,
+    register_id: requestedRegisterId = null,
+  } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'La venta debe tener al menos un producto' });
@@ -205,6 +209,7 @@ router.post('/', asyncHandler(async (req, res) => {
   // Fuera de la transacción a propósito: es una lectura por clave primaria y
   // la cuenta que cobra no cambia a mitad del cobro.
   const account = await describeAccount(db, req);
+  const registerId = resolveRegisterId(req, requestedRegisterId);
 
   const tx = await db.transaction('write');
   try {
@@ -269,9 +274,10 @@ router.post('/', asyncHandler(async (req, res) => {
     }
 
     const saleResult = await tx.execute({
-      sql: `INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      args: [req.userId, client_sale_id, total, profit, payment_method, account.id, account.email],
+      sql: `INSERT INTO sales
+              (user_id, client_sale_id, total, profit, payment_method, register_id, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_sale_id, total, profit, payment_method, registerId, account.id, account.email],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

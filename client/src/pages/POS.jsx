@@ -125,6 +125,7 @@ export default function POS() {
           items: cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price })),
           payment_method: paymentMethod,
           client_sale_id: saleIdRef.current,
+          register_id: 'web',
         }),
       })
 
@@ -158,6 +159,7 @@ export default function POS() {
           items: soldItems,
           payment_method: paymentMethod,
           client_sale_id: saleIdRef.current,
+          register_id: 'web',
         })
         // Descuento optimista del stock local para que el siguiente cliente
         // no compre algo que ya no queda — se corrige solo al re-sincronizar.
