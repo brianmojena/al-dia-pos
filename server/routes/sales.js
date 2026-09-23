@@ -5,6 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
+const { resolveRegisterId } = require('../lib/register');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -169,10 +170,19 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { items, payment_method = 'efectivo', client_sale_id = null } = req.body;
+  const {
+    items, payment_method = 'efectivo', client_sale_id = null,
+    register_id: requestedRegisterId = null,
+  } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'La venta debe tener al menos un producto' });
+  }
+
+  // La forma de cobro solo puede ser efectivo o transferencia: el techo del
+  // dueño y el desglose de la caja dependen de este valor.
+  if (payment_method !== 'efectivo' && payment_method !== 'transferencia') {
+    return res.status(400).json({ error: 'Forma de pago inválida' });
   }
 
   const db = getDb();
@@ -187,9 +197,19 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  // El techo de transferencia lo fija el dueño (PUT /api/auth/settings) y se
+  // valida aquí, no solo en la pantalla del POS: la cola offline y la app de
+  // escritorio también cobran por esta vía.
+  const shopResult = await db.execute({
+    sql: 'SELECT transfer_limit FROM users WHERE id = ?',
+    args: [req.userId],
+  });
+  const transferLimit = shopResult.rows[0]?.transfer_limit ?? null;
+
   // Fuera de la transacción a propósito: es una lectura por clave primaria y
   // la cuenta que cobra no cambia a mitad del cobro.
   const account = await describeAccount(db, req);
+  const registerId = resolveRegisterId(req, requestedRegisterId);
 
   const tx = await db.transaction('write');
   try {
@@ -244,10 +264,20 @@ router.post('/', asyncHandler(async (req, res) => {
       });
     }
 
+    // Techo de transferencia (inclusivo): el total exacto pasa, por encima se
+    // bloquea sin descontar stock — la transacción se revierte completa.
+    if (payment_method === 'transferencia'
+        && transferLimit !== null && transferLimit !== undefined
+        && total > transferLimit) {
+      await tx.rollback();
+      return res.status(403).json({ error: `Transferencia por encima del límite ($${transferLimit})` });
+    }
+
     const saleResult = await tx.execute({
-      sql: `INSERT INTO sales (user_id, client_sale_id, total, profit, payment_method, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      args: [req.userId, client_sale_id, total, profit, payment_method, account.id, account.email],
+      sql: `INSERT INTO sales
+              (user_id, client_sale_id, total, profit, payment_method, register_id, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_sale_id, total, profit, payment_method, registerId, account.id, account.email],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

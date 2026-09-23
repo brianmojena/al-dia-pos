@@ -96,8 +96,12 @@ async function routeRequest(method, fullPath, body) {
 
     // --- sales ---
     if (parts[0] === 'api' && parts[1] === 'sales') {
-      if (parts.length === 2 && method === 'GET') return ok(200, queries.listSales({ date: query.date }));
+      if (parts.length === 2 && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listSales({ date: query.date }));
+      }
       if (parts.length === 3 && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
         const sale = queries.getSale(Number(parts[2]));
         return sale ? ok(200, sale) : fail(404, 'Venta no encontrada');
       }
@@ -112,6 +116,7 @@ async function routeRequest(method, fullPath, body) {
 
     // --- dashboard ---
     if (parts[0] === 'api' && parts[1] === 'dashboard' && parts.length === 2 && method === 'GET') {
+      if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
       return ok(200, queries.getDashboard());
     }
 
@@ -125,9 +130,13 @@ async function routeRequest(method, fullPath, body) {
         return ok(200, queries.getCurrentCashPeriod());
       }
       if (parts.length === 3 && parts[2] === 'summary' && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
         return ok(200, queries.cashCloseSummary());
       }
-      if (parts.length === 2 && method === 'GET') return ok(200, queries.listCashCloses());
+      if (parts.length === 2 && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listCashCloses());
+      }
       if (parts.length === 2 && method === 'POST') {
         try {
           return ok(201, queries.createCashCloseLocal(body));
@@ -139,8 +148,12 @@ async function routeRequest(method, fullPath, body) {
 
     // --- arqueo de inventario ---
     if (parts[0] === 'api' && parts[1] === 'inventory-counts') {
-      if (parts.length === 2 && method === 'GET') return ok(200, queries.listInventoryCounts());
+      if (parts.length === 2 && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listInventoryCounts());
+      }
       if (parts.length === 3 && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
         const count = queries.getInventoryCount(Number(parts[2]));
         return count ? ok(200, count) : fail(404, 'Arqueo no encontrado');
       }

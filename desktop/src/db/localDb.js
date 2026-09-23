@@ -1,4 +1,5 @@
 const Database = require('better-sqlite3');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -51,6 +52,10 @@ function initLocalDb(dbPath) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       server_id INTEGER,
       client_sale_id TEXT NOT NULL UNIQUE,
+      origin TEXT NOT NULL DEFAULT 'local',
+      register_id TEXT,
+      cash_close_id INTEGER,
+      account_email TEXT,
       total REAL NOT NULL,
       profit REAL NOT NULL DEFAULT 0,
       payment_method TEXT NOT NULL DEFAULT 'efectivo',
@@ -83,6 +88,8 @@ function initLocalDb(dbPath) {
       expected_transfer REAL NOT NULL DEFAULT 0,
       sales_count INTEGER NOT NULL DEFAULT 0,
       note TEXT,
+      origin TEXT NOT NULL DEFAULT 'local',
+      register_id TEXT,
       account_email TEXT
     );
 
@@ -97,6 +104,7 @@ function initLocalDb(dbPath) {
       units_extra INTEGER NOT NULL DEFAULT 0,
       value_missing REAL NOT NULL DEFAULT 0,
       note TEXT,
+      origin TEXT NOT NULL DEFAULT 'local',
       account_email TEXT
     );
 
@@ -128,6 +136,11 @@ function initLocalDb(dbPath) {
       last_attempt_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS sync_state (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_outbox_status  ON outbox(status, id);
     CREATE INDEX IF NOT EXISTS idx_products_server ON products(server_id);
     CREATE INDEX IF NOT EXISTS idx_sales_client_id  ON sales(client_sale_id);
@@ -147,8 +160,47 @@ function initLocalDb(dbPath) {
     // devuelve siempre undefined. Sin esta columna, un cajero que entre en el
     // escritorio vería el panel del dueño.
     'ALTER TABLE session ADD COLUMN role TEXT',
+    "ALTER TABLE sales ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
+    'ALTER TABLE sales ADD COLUMN register_id TEXT',
+    'ALTER TABLE sales ADD COLUMN cash_close_id INTEGER',
+    'ALTER TABLE sales ADD COLUMN account_email TEXT',
+    "ALTER TABLE cash_closes ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
+    'ALTER TABLE cash_closes ADD COLUMN register_id TEXT',
+    "ALTER TABLE inventory_counts ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_server_id
+      ON sales(server_id) WHERE server_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_closes_server_id
+      ON cash_closes(server_id) WHERE server_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_counts_server_id
+      ON inventory_counts(server_id) WHERE server_id IS NOT NULL;
+  `);
+
+  const register = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('register_id');
+  if (!register) {
+    db.prepare('INSERT INTO sync_state (key, value) VALUES (?, ?)')
+      .run('register_id', `desk-${crypto.randomUUID()}`);
+  }
+
+  // Una instalación 1.2.1 no tenía ni origen ni vínculo de cierre. Se marca
+  // una sola vez para conservar exactamente el período abierto que ya veía la
+  // caja, y el identificador de instalación no se borra al cerrar sesión.
+  const backfill = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('local_backfill_v1');
+  if (!backfill) {
+    const registerId = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('register_id').value;
+    db.prepare(`UPDATE sales SET register_id = ? WHERE origin = 'local' AND register_id IS NULL`).run(registerId);
+    db.exec(`
+      UPDATE sales SET cash_close_id = (
+        SELECT c.id FROM cash_closes c
+        WHERE c.origin = 'local' AND c.closed_at >= sales.created_at
+        ORDER BY c.closed_at ASC LIMIT 1
+      ) WHERE origin = 'local' AND cash_close_id IS NULL
+    `);
+    db.prepare('INSERT INTO sync_state (key, value) VALUES (?, ?)').run('local_backfill_v1', '1');
   }
 
   return db;

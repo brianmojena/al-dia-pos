@@ -1,8 +1,10 @@
 const { getLocalDb } = require('../db/localDb');
 const {
   getPendingOutbox, getSession, updateSessionSettings, applyServerCatalog, resetStuckSyncing,
+  getRegisterId, prepareDeltaSession, applyServerDelta,
 } = require('../db/queries');
 const { apiRequest } = require('./apiClient');
+const { businessToday } = require('../lib/businessDay');
 
 // ---------------------------------------------------------------------------
 // Transiciones de estado del outbox
@@ -42,6 +44,7 @@ const getProductServerId = (db, localId) => {
  */
 function buildRequest(db, row) {
   const payload = JSON.parse(row.payload);
+  const registerId = getRegisterId();
 
   switch (row.op_type) {
     case 'product.create':
@@ -99,7 +102,10 @@ function buildRequest(db, row) {
       return {
         method: 'POST',
         path: '/api/sales',
-        body: { items, payment_method: payload.payment_method, client_sale_id: payload.client_sale_id },
+        body: {
+          items, payment_method: payload.payment_method, client_sale_id: payload.client_sale_id,
+          register_id: registerId,
+        },
         onSuccess: (data) => {
           db.prepare('UPDATE sales SET server_id = ? WHERE client_sale_id = ?').run(data.id, payload.client_sale_id);
         },
@@ -133,6 +139,7 @@ function buildRequest(db, row) {
           counted_cash: payload.counted_cash,
           note: payload.note,
           client_sale_ids: ids,
+          register_id: registerId,
         },
         onSuccess: (data) => {
           db.prepare('UPDATE cash_closes SET server_id = ? WHERE client_close_id = ?')
@@ -166,6 +173,62 @@ function buildRequest(db, row) {
     default:
       throw new Error(`Tipo de operación desconocido en outbox: ${row.op_type}`);
   }
+}
+
+const sinceLast60Days = () => {
+  const [year, month, day] = businessToday().split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() - 60);
+  return date.toISOString().slice(0, 10);
+};
+
+/**
+ * Baja lo que vendieron, cerraron o contaron las otras cajas y la web.
+ *
+ * Solo con sesión de dueño: son los mismos datos que el servidor le niega a un
+ * cajero (requireOwner), y bajarlos a su máquina los dejaría a la vista.
+ *
+ * Máximo 10 páginas por pasada para que la primera sincronización de una
+ * tienda con mucho historial no deje la pasada colgada; el resto sigue en la
+ * siguiente, porque cada página guarda su cursor junto con sus filas.
+ */
+async function pullDelta(session, summary) {
+  if (session.role === 'cajero') return;
+  let cursors = prepareDeltaSession(session.user_id);
+  let pages = 0;
+  let more = false;
+  let error = null;
+  const totals = { sales: 0, closes: 0, counts: 0 };
+  try {
+    do {
+      const query = new URLSearchParams({
+        after_sale: String(cursors.sale), after_close: String(cursors.close),
+        after_count: String(cursors.count), since: sinceLast60Days(), limit: '500',
+      });
+      const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
+      if (!res.ok) {
+        error = res.data?.error || `HTTP ${res.status}`;
+        break;
+      }
+      const stats = applyServerDelta(res.data);
+      totals.sales += stats.sales;
+      totals.closes += stats.closes;
+      totals.counts += stats.counts;
+      cursors = prepareDeltaSession(session.user_id);
+      more = res.data.has_more === true;
+      pages++;
+    } while (more && pages < 10);
+  } catch (err) {
+    // Sin red es lo normal y no es un error: la próxima pasada retoma desde el
+    // último cursor guardado. Cualquier otra cosa (una página que la base local
+    // rechaza, una respuesta rota) se repetiría en cada pasada sin que nadie se
+    // entere, así que se informa en el resumen.
+    if (!err?.isNetworkError) {
+      error = err?.message || String(err);
+      console.error('[sync] no se pudo aplicar el delta:', err);
+    }
+  }
+  summary.downSync = { ...totals, more, error };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +331,8 @@ async function syncOnce() {
       }
     } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
   }
+
+  if (!summary.authExpired) await pullDelta(session, summary);
 
   // El límite de transferencia y la tasa del dólar los cambia el dueño desde
   // su teléfono, no desde esta caja — así que la única forma de que la caja

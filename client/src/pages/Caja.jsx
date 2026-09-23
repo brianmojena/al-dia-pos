@@ -31,7 +31,7 @@ export default function Caja() {
     // El historial lleva el efectivo esperado de cada período: el servidor solo
     // se lo da al dueño (403 para un cajero), así que ni lo pedimos.
     const [p, h, s] = await Promise.all([
-      apiFetch('/api/cash-closes/current').then(r => r.json()),
+      apiFetch('/api/cash-closes/current?register_id=web').then(r => r.json()),
       isOwner ? apiFetch('/api/cash-closes').then(r => r.json()) : Promise.resolve([]),
       isOwner ? apiFetch('/api/cash-closes/summary').then(r => r.json()) : Promise.resolve([]),
     ])
@@ -59,6 +59,7 @@ export default function Caja() {
           opening_float: parseFloat(float) || 0,
           note: note.trim() || null,
           client_close_id: closeIdRef.current,
+          register_id: 'web',
         }),
       })
       const data = await res.json()

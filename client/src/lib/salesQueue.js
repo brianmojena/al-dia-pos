@@ -168,6 +168,7 @@ export async function flushQueue() {
 
       // account_key y queued_at son datos del teléfono; /api/sales los ignora.
       const { account_key, queued_at, ...body } = sale
+      body.register_id = 'web'
       let res
       try {
         res = await apiFetch('/api/sales', { method: 'POST', body: JSON.stringify(body) })

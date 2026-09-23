@@ -203,11 +203,10 @@ test('arqueos en la caja de escritorio', async (t) => {
       assert.equal(cierre.data.difference, -50);
 
       const historial = await routeRequest('GET', '/api/cash-closes');
-      assert.equal(historial.data.length, 1);
+      assert.equal(historial.status, 403, 'el historial completo de cierres es solo del dueño');
 
       const resumen = await routeRequest('GET', '/api/cash-closes/summary');
-      assert.equal(resumen.data[0].account_email, 'cajera@mitienda.cu');
-      assert.equal(resumen.data[0].times_short, 1);
+      assert.equal(resumen.status, 403, 'el resumen de cierres es solo del dueño');
 
       const arqueo = await routeRequest('POST', '/api/inventory-counts', {
         items: [{ product_id: producto.id, counted: 6 }],
@@ -216,7 +215,7 @@ test('arqueos en la caja de escritorio', async (t) => {
       assert.equal(arqueo.data.units_missing, 2);
 
       const detalle = await routeRequest('GET', `/api/inventory-counts/${arqueo.data.id}`);
-      assert.equal(detalle.data.items.length, 1);
+      assert.equal(detalle.status, 403, 'el detalle de arqueos es solo del dueño');
 
       const me = await routeRequest('GET', '/api/auth/me');
       assert.equal(me.data.user.role, 'cajero', 'la caja sabe que quien entró es un cajero');

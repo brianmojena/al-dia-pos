@@ -81,4 +81,42 @@ async function createProduct(api, token, { name = 'Producto', stock = 0, sale_pr
   return Number(res.body.id);
 }
 
-module.exports = { startTestServer, registerUser, createProduct };
+/** Crea un cajero en la tienda del token dueño y devuelve su token. */
+async function createCashier(api, ownerToken, { email, password = 'caja1234' } = {}) {
+  const inbox = email || `cajero${Date.now()}${Math.random().toString(36).slice(2)}@test.local`;
+  const res = await api('POST', '/api/auth/cashiers', {
+    token: ownerToken,
+    body: { email: inbox, password },
+  });
+  if (res.status !== 201) {
+    throw new Error(`No se pudo crear el cajero: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+  const login = await api('POST', '/api/auth/login', { body: { email: inbox, password } });
+  if (!login.body?.token) {
+    throw new Error(`No se pudo loguear el cajero: ${login.status} ${JSON.stringify(login.body)}`);
+  }
+  return { token: login.body.token, id: res.body.id, email: inbox };
+}
+
+/**
+ * Monta la tienda de una jornada diaria completa: dueño + cajero + catálogo.
+ * Devuelve tokens y ids listos para vender, cerrar caja y conciliar.
+ */
+async function jornadaFixtures(api, suffix = Math.random().toString(36).slice(2)) {
+  const ownerToken = await registerUser(api, `dueno${suffix}@test.local`);
+  const { token: cashierToken } = await createCashier(api, ownerToken, {
+    email: `cajero${suffix}@test.local`,
+  });
+  const panId = await createProduct(api, ownerToken, {
+    name: 'Pan', stock: 10, sale_price: 100, purchase_price: 60,
+  });
+  const lecheId = await createProduct(api, ownerToken, {
+    name: 'Leche', stock: 5, sale_price: 200, purchase_price: 120,
+  });
+  const agotadoId = await createProduct(api, ownerToken, {
+    name: 'Agotado', stock: 0, sale_price: 50, purchase_price: 30,
+  });
+  return { ownerToken, cashierToken, panId, lecheId, agotadoId };
+}
+
+module.exports = { startTestServer, registerUser, createProduct, createCashier, jornadaFixtures };

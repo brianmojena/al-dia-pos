@@ -172,6 +172,11 @@ async function initDb() {
       account_email TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      key TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Migraciones aditivas: seguras de reintentar, fallan si la columna ya existe.
@@ -211,6 +216,10 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN account_email TEXT',
     'ALTER TABLE inventory_counts ADD COLUMN account_id INTEGER',
     'ALTER TABLE inventory_counts ADD COLUMN account_email TEXT',
+    'ALTER TABLE sales ADD COLUMN register_id TEXT',
+    'ALTER TABLE sales ADD COLUMN cash_close_id INTEGER',
+    'ALTER TABLE cash_closes ADD COLUMN register_id TEXT',
+    'ALTER TABLE cash_closes ADD COLUMN overlap_sales INTEGER NOT NULL DEFAULT 0',
     // Quién dio de alta cada producto. Los empleados pueden crear productos
     // (el dueño delega la carga de mercancía nueva), así que el dueño tiene que
     // poder ver quién agregó qué. Mismo criterio que el resto de la atribución:
@@ -220,6 +229,34 @@ async function initDb() {
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
+  }
+
+  // Las migraciones de datos no se pueden repetir al arrancar cada instancia
+  // serverless. Primero se agregan las columnas de forma aditiva y recién
+  // después se marca el backfill como aplicado, para que un arranque que falle
+  // pueda reintentarlo sin dejar una base a medias.
+  const backfillKey = 'sales_cash_close_id_v1';
+  const alreadyBackfilled = await db.execute({
+    sql: 'SELECT key FROM schema_migrations WHERE key = ?',
+    args: [backfillKey],
+  });
+  if (alreadyBackfilled.rows.length === 0) {
+    await db.execute(`
+      UPDATE sales SET cash_close_id = (
+        SELECT c.id FROM cash_closes c
+        WHERE c.user_id = sales.user_id AND c.closed_at >= sales.created_at
+        ORDER BY c.closed_at ASC LIMIT 1
+      ) WHERE cash_close_id IS NULL
+    `);
+    // OR IGNORE: dos instancias que arrancan en frío a la vez corren ambas el
+    // backfill (es idempotente: solo toca ventas sin cierre). Sin esto la
+    // segunda fallaría contra la PRIMARY KEY, y como api/index.js memoiza la
+    // promesa de initDb, esa instancia quedaría respondiendo error a todo
+    // hasta que Vercel la recicle.
+    await db.execute({
+      sql: 'INSERT OR IGNORE INTO schema_migrations (key) VALUES (?)',
+      args: [backfillKey],
+    });
   }
 
   // El índice UNIQUE es lo que garantiza la idempotencia incluso si dos peticiones
@@ -233,6 +270,7 @@ async function initDb() {
       ON cash_closes(user_id, client_close_id) WHERE client_close_id IS NOT NULL;
 
     CREATE INDEX IF NOT EXISTS idx_sales_user_created ON sales(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_sales_open ON sales(user_id, register_id, cash_close_id);
     CREATE INDEX IF NOT EXISTS idx_products_user      ON products(user_id);
     CREATE INDEX IF NOT EXISTS idx_sale_items_sale    ON sale_items(sale_id);
 

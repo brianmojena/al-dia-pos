@@ -45,6 +45,40 @@ function clearSession() {
   getLocalDb().prepare('DELETE FROM session WHERE id = 1').run();
 }
 
+function getSyncState(key) {
+  return getLocalDb().prepare('SELECT value FROM sync_state WHERE key = ?').get(key)?.value ?? null;
+}
+
+function setSyncState(key, value) {
+  getLocalDb().prepare(`
+    INSERT INTO sync_state (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value == null ? null : String(value));
+}
+
+function getRegisterId() {
+  return getSyncState('register_id');
+}
+
+function prepareDeltaSession(userId) {
+  const db = getLocalDb();
+  const current = getSyncState('delta_user_id');
+  if (current !== String(userId)) {
+    const reset = db.transaction(() => {
+      setSyncState('delta_user_id', userId);
+      setSyncState('delta_after_sale', 0);
+      setSyncState('delta_after_close', 0);
+      setSyncState('delta_after_count', 0);
+    });
+    reset();
+  }
+  return {
+    sale: Number(getSyncState('delta_after_sale') || 0),
+    close: Number(getSyncState('delta_after_close') || 0),
+    count: Number(getSyncState('delta_after_count') || 0),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Outbox — helpers compartidos por queries.js (encolar) y syncWorker.js (leer)
 // ---------------------------------------------------------------------------
@@ -208,6 +242,8 @@ function createSaleLocal({ items, payment_method = 'efectivo' }) {
 
   const db = getLocalDb();
   const clientSaleId = crypto.randomUUID();
+  const registerId = getRegisterId();
+  const accountEmail = getSession()?.email ?? null;
 
   const create = db.transaction(() => {
     let total = 0;
@@ -251,8 +287,10 @@ function createSaleLocal({ items, payment_method = 'efectivo' }) {
     }
 
     const saleResult = db.prepare(`
-      INSERT INTO sales (client_sale_id, total, profit, payment_method) VALUES (?, ?, ?, ?)
-    `).run(clientSaleId, total, profit, payment_method);
+      INSERT INTO sales
+        (client_sale_id, origin, register_id, account_email, total, profit, payment_method)
+      VALUES (?, 'local', ?, ?, ?, ?, ?)
+    `).run(clientSaleId, registerId, accountEmail, total, profit, payment_method);
     const saleId = saleResult.lastInsertRowid;
 
     for (const line of lines) {
@@ -337,7 +375,7 @@ function getDashboard() {
 const BEGINNING_OF_TIME = '0000-01-01 00:00:00';
 
 const getPeriodStart = (db) => {
-  const row = db.prepare('SELECT closed_at FROM cash_closes ORDER BY closed_at DESC LIMIT 1').get();
+  const row = db.prepare("SELECT closed_at FROM cash_closes WHERE origin = 'local' ORDER BY closed_at DESC LIMIT 1").get();
   return row ? row.closed_at : BEGINNING_OF_TIME;
 };
 
@@ -347,8 +385,8 @@ const getPeriodStart = (db) => {
 const periodSales = (db, periodStart) =>
   db.prepare(
     `SELECT client_sale_id, total, payment_method, created_at
-     FROM sales WHERE created_at > ? ORDER BY created_at ASC`
-  ).all(periodStart);
+     FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all();
 
 /**
  * Describe el período abierto SIN revelar cuánto debería haber.
@@ -393,6 +431,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
   const db = getLocalDb();
   const clientCloseId = crypto.randomUUID();
   const email = getSession()?.email ?? null;
+  const registerId = getRegisterId();
 
   const create = db.transaction(() => {
     const periodStart = getPeriodStart(db);
@@ -412,14 +451,22 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
 
     const result = db.prepare(`
       INSERT INTO cash_closes
-        (client_close_id, opened_at, opening_float, expected_cash, counted_cash,
+        (client_close_id, origin, register_id, opened_at, opening_float, expected_cash, counted_cash,
          difference, expected_transfer, sales_count, note, account_email)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      clientCloseId, openedAt, float, expectedCash, counted,
+      clientCloseId, registerId, openedAt, float, expectedCash, counted,
       counted - expectedCash, transfer, sales.length, note, email
     );
     const closeId = result.lastInsertRowid;
+
+    // El vínculo vive en la venta y se escribe junto con el cierre: así una
+    // segunda apertura no puede volver a incluir las mismas ventas locales.
+    if (sales.length > 0) {
+      const placeholders = sales.map(() => '?').join(',');
+      db.prepare(`UPDATE sales SET cash_close_id = ? WHERE client_sale_id IN (${placeholders}) AND cash_close_id IS NULL`)
+        .run(closeId, ...sales.map((sale) => sale.client_sale_id));
+    }
 
     enqueueOutbox(db, {
       op_type: 'cash_close.create',
@@ -535,9 +582,9 @@ function createInventoryCountLocal({ items, note = null }) {
 
     const result = db.prepare(`
       INSERT INTO inventory_counts
-        (client_count_id, lines_count, products_with_difference,
+        (client_count_id, origin, lines_count, products_with_difference,
          units_missing, units_extra, value_missing, note, account_email)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?)
     `).run(clientCountId, lines.length, withDifference, unitsMissing, unitsExtra, valueMissing, note, email);
     const countId = result.lastInsertRowid;
 
@@ -583,6 +630,126 @@ function getInventoryCount(id) {
     'SELECT * FROM inventory_count_items WHERE count_id = ? ORDER BY difference ASC, product_name ASC'
   ).all(id);
   return { ...count, items };
+}
+
+// ---------------------------------------------------------------------------
+// Delta recibido del servidor
+// ---------------------------------------------------------------------------
+
+const localProductForServerId = (db, serverId) => {
+  if (serverId == null) return null;
+  return db.prepare('SELECT id FROM products WHERE server_id = ? ORDER BY deleted ASC, id ASC LIMIT 1')
+    .get(Number(serverId))?.id ?? null;
+};
+
+/**
+ * Aplica una página completa en una sola transacción. Las filas remotas son
+ * solo historial: no descuentan stock, no generan outbox y los cierres remotos
+ * nunca reciben el vínculo local `sales.cash_close_id`.
+ */
+function applyServerDelta(page) {
+  if (!page || !Array.isArray(page.sales) || !Array.isArray(page.cash_closes)
+      || !Array.isArray(page.inventory_counts) || !page.cursors) {
+    throw new Error('Delta del servidor inválido');
+  }
+  const db = getLocalDb();
+  const stats = { sales: 0, closes: 0, counts: 0 };
+  const apply = db.transaction(() => {
+    const insertSale = db.prepare(`
+      INSERT INTO sales
+        (server_id, client_sale_id, origin, register_id, account_email, total, profit, payment_method, created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?)
+    `);
+    const insertSaleItem = db.prepare(`
+      INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const sale of page.sales) {
+      const clientSaleId = sale.client_sale_id || `srv-${sale.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM sales WHERE client_sale_id = ?').get(clientSaleId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE sales SET server_id = ? WHERE id = ?').run(Number(sale.id), existing.id);
+        continue;
+      }
+      const result = insertSale.run(
+        Number(sale.id), clientSaleId, sale.register_id ?? null, sale.account_email ?? null,
+        Number(sale.total) || 0, Number(sale.profit) || 0, sale.payment_method || 'efectivo', sale.created_at,
+      );
+      const saleId = Number(result.lastInsertRowid);
+      for (const item of sale.items || []) {
+        insertSaleItem.run(
+          saleId, localProductForServerId(db, item.product_id), String(item.product_name || ''),
+          Number(item.quantity) || 0, Number(item.unit_price) || 0, Number(item.unit_cost) || 0,
+        );
+      }
+      stats.sales++;
+    }
+
+    const insertClose = db.prepare(`
+      INSERT INTO cash_closes
+        (server_id, client_close_id, origin, register_id, opened_at, closed_at,
+         opening_float, expected_cash, counted_cash, difference, expected_transfer,
+         sales_count, note, account_email)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const close of page.cash_closes) {
+      const clientCloseId = close.client_close_id || `srv-${close.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM cash_closes WHERE client_close_id = ?').get(clientCloseId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE cash_closes SET server_id = ? WHERE id = ?').run(Number(close.id), existing.id);
+        continue;
+      }
+      insertClose.run(
+        Number(close.id), clientCloseId, close.register_id ?? null, close.opened_at,
+        close.closed_at, Number(close.opening_float) || 0, Number(close.expected_cash) || 0,
+        Number(close.counted_cash) || 0, Number(close.difference) || 0,
+        Number(close.expected_transfer) || 0, Number(close.sales_count) || 0,
+        close.note ?? null, close.account_email ?? null,
+      );
+      stats.closes++;
+    }
+
+    const insertCount = db.prepare(`
+      INSERT INTO inventory_counts
+        (server_id, client_count_id, origin, counted_at, lines_count,
+         products_with_difference, units_missing, units_extra, value_missing, note, account_email)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertCountItem = db.prepare(`
+      INSERT INTO inventory_count_items
+        (count_id, product_id, product_name, expected, counted, difference, unit_cost, unit_price)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const count of page.inventory_counts) {
+      const clientCountId = count.client_count_id || `srv-${count.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM inventory_counts WHERE client_count_id = ?').get(clientCountId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE inventory_counts SET server_id = ? WHERE id = ?').run(Number(count.id), existing.id);
+        continue;
+      }
+      const result = insertCount.run(
+        Number(count.id), clientCountId, count.counted_at, Number(count.lines_count) || 0,
+        Number(count.products_with_difference) || 0, Number(count.units_missing) || 0,
+        Number(count.units_extra) || 0, Number(count.value_missing) || 0, count.note ?? null,
+        count.account_email ?? null,
+      );
+      const countId = Number(result.lastInsertRowid);
+      for (const item of count.items || []) {
+        insertCountItem.run(
+          countId, localProductForServerId(db, item.product_id), String(item.product_name || ''),
+          Number(item.expected) || 0, Number(item.counted) || 0, Number(item.difference) || 0,
+          Number(item.unit_cost) || 0, Number(item.unit_price) || 0,
+        );
+      }
+      stats.counts++;
+    }
+
+    setSyncState('delta_after_sale', page.cursors.sale);
+    setSyncState('delta_after_close', page.cursors.close);
+    setSyncState('delta_after_count', page.cursors.count);
+  });
+  apply();
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +885,7 @@ function resetStuckSyncing() {
 
 module.exports = {
   getSession, setSession, updateSessionSettings, clearSession,
+  getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta,
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
   listProducts, createProduct, updateProduct, deleteProduct, applyServerCatalog,
   createSaleLocal, listSales, getSale,

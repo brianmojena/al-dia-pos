@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
 import { enqueueSale, getPendingSales, subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
 import { applyPendingSales } from '../lib/offlineStock'
+import { isTransferBlocked } from '../lib/transferGuard'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 
@@ -105,9 +106,9 @@ export default function POS() {
   const itemCount = cart.reduce((s, i) => s + i.quantity, 0)
 
   // El límite lo configura el dueño desde la app móvil (PUT /api/auth/settings).
-  // Es una política del negocio, no un control de seguridad — alcanza con
-  // bloquearlo en la UI, no hace falta que el servidor lo valide también.
-  const transferOverLimit = user?.transfer_limit != null && total > user.transfer_limit
+  // La UI lo bloquea por adelantado, pero la validación definitiva está en el
+  // servidor (POST /api/sales responde 403): la cola offline también cobra.
+  const transferOverLimit = isTransferBlocked(total, user?.transfer_limit)
 
   const handleCheckout = async (paymentMethod) => {
     if (cart.length === 0 || completing) return
@@ -124,6 +125,7 @@ export default function POS() {
           items: cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price })),
           payment_method: paymentMethod,
           client_sale_id: saleIdRef.current,
+          register_id: 'web',
         }),
       })
 
@@ -157,6 +159,7 @@ export default function POS() {
           items: soldItems,
           payment_method: paymentMethod,
           client_sale_id: saleIdRef.current,
+          register_id: 'web',
         })
         // Descuento optimista del stock local para que el siguiente cliente
         // no compre algo que ya no queda — se corrige solo al re-sincronizar.
