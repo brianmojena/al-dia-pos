@@ -6,6 +6,8 @@ import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
 import { enqueueSale, getPendingSales, subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
 import { applyPendingSales } from '../lib/offlineStock'
 import { isTransferBlocked } from '../lib/transferGuard'
+import { maxTransfer, paymentLabel } from '../lib/payment'
+import MixedPayment from '../components/MixedPayment'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 
@@ -21,6 +23,7 @@ export default function POS() {
   const [success,           setSuccess]           = useState(false)
   const [showCart,          setShowCart]          = useState(false)
   const [showPaymentModal,  setShowPaymentModal]  = useState(false)
+  const [mixedOpen,         setMixedOpen]         = useState(false)
   const [lastPaymentMethod, setLastPaymentMethod] = useState('efectivo')
   const [error,             setError]             = useState('')
   const [queuedOffline,     setQueuedOffline]     = useState(false)
@@ -109,12 +112,25 @@ export default function POS() {
   // La UI lo bloquea por adelantado, pero la validación definitiva está en el
   // servidor (POST /api/sales responde 403): la cola offline también cobra.
   const transferOverLimit = isTransferBlocked(total, user?.transfer_limit)
+  // El cobro mixto necesita poder transferir al menos un peso y dejar al menos
+  // uno en efectivo; con un techo en 0 no hay nada que repartir.
+  const canSplit = total >= 2 && maxTransfer(total, user?.transfer_limit) >= 1
 
-  const handleCheckout = async (paymentMethod) => {
+  // El modal siempre abre en la lista de formas de pago, y el cobro mixto
+  // siempre arranca en 50/50 (MixedPayment se monta de nuevo cada vez).
+  const openPayment = () => { setMixedOpen(false); setShowPaymentModal(true) }
+  const closePayment = () => { setShowPaymentModal(false); setMixedOpen(false) }
+
+  // transferAmount solo en un cobro mixto: la parte transferida. El efectivo
+  // es el resto y lo calcula el servidor.
+  const handleCheckout = async (paymentMethod, transferAmount = null) => {
     if (cart.length === 0 || completing) return
     setCompleting(true)
-    setShowPaymentModal(false)
+    closePayment()
     setError('')
+    const payment = paymentMethod === 'mixto'
+      ? { payment_method: 'mixto', transfer_amount: transferAmount }
+      : { payment_method: paymentMethod }
 
     if (!saleIdRef.current) saleIdRef.current = newSaleId()
 
@@ -123,7 +139,7 @@ export default function POS() {
         method: 'POST',
         body: JSON.stringify({
           items: cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price })),
-          payment_method: paymentMethod,
+          ...payment,
           client_sale_id: saleIdRef.current,
           register_id: 'web',
         }),
@@ -157,7 +173,7 @@ export default function POS() {
         }))
         await enqueueSale({
           items: soldItems,
-          payment_method: paymentMethod,
+          ...payment,
           client_sale_id: saleIdRef.current,
           register_id: 'web',
         })
@@ -228,7 +244,7 @@ export default function POS() {
         }`}>
           {queuedOffline ? <CloudOff size={18} /> : <CheckCircle size={18} />}
           {queuedOffline ? 'Venta guardada, sincroniza al volver la red · ' : '¡Venta registrada! · '}
-          {lastPaymentMethod === 'efectivo' ? 'Efectivo' : 'Transferencia'}
+          {paymentLabel({ payment_method: lastPaymentMethod })}
         </div>
       )}
 
@@ -248,7 +264,7 @@ export default function POS() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={() => setShowPaymentModal(false)}
+            onClick={closePayment}
           />
           <div className="relative bg-white rounded-3xl p-6 shadow-2xl w-80 mx-4">
             <h3 className="text-lg font-bold text-gray-900 text-center mb-1">Forma de pago</h3>
@@ -259,6 +275,16 @@ export default function POS() {
               </p>
             )}
             {user?.usd_rate == null && <div className="mb-6" />}
+            {mixedOpen ? (
+              <MixedPayment
+                total={total}
+                transferLimit={user?.transfer_limit}
+                fmt={fmt}
+                disabled={completing}
+                onConfirm={({ payment_method, transfer_amount }) => handleCheckout(payment_method, transfer_amount)}
+                onBack={() => setMixedOpen(false)}
+              />
+            ) : (<>
             <div className="space-y-3">
               <button
                 onClick={() => handleCheckout('efectivo')}
@@ -279,17 +305,30 @@ export default function POS() {
                 </button>
                 {transferOverLimit && (
                   <p className="text-xs text-red-500 text-center mt-2">
-                    Supera el límite de transferencia ({fmt(user.transfer_limit)}). Cobra en efectivo o reduce el monto.
+                    Supera el límite de transferencia ({fmt(user.transfer_limit)}).
+                    {canSplit ? ' Combina transferencia y efectivo, o cobra en efectivo.' : ' Cobra en efectivo o reduce el monto.'}
                   </p>
                 )}
               </div>
+              {canSplit && (
+                <button
+                  onClick={() => setMixedOpen(true)}
+                  disabled={completing}
+                  className="w-full bg-white text-gray-900 border-2 border-gray-200 py-3.5 rounded-2xl font-bold text-base flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+                >
+                  <Smartphone size={18} className="text-[#007AFF]" />
+                  Transferencia + efectivo
+                  <Banknote size={18} className="text-green-600" />
+                </button>
+              )}
             </div>
             <button
-              onClick={() => setShowPaymentModal(false)}
+              onClick={closePayment}
               className="w-full text-gray-400 py-3 text-sm hover:text-gray-600 transition-colors mt-2"
             >
               Cancelar
             </button>
+            </>)}
           </div>
         </div>
       )}
@@ -403,7 +442,7 @@ export default function POS() {
             <span className="text-3xl font-bold text-gray-900">{fmt(total)}</span>
           </div>
           <button
-            onClick={() => setShowPaymentModal(true)}
+            onClick={openPayment}
             disabled={cart.length === 0 || completing}
             className="w-full bg-[#007AFF] text-white py-4 rounded-2xl font-bold text-lg hover:bg-blue-600 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-blue-200"
           >
@@ -452,7 +491,7 @@ export default function POS() {
                 <span className="text-3xl font-bold text-gray-900">{fmt(total)}</span>
               </div>
               <button
-                onClick={() => setShowPaymentModal(true)}
+                onClick={openPayment}
                 disabled={completing}
                 className="w-full bg-[#007AFF] text-white py-4 rounded-2xl font-bold text-xl active:scale-95 transition-all shadow-lg shadow-blue-200"
               >

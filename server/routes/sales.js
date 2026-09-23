@@ -6,6 +6,7 @@ const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
+const { PAYMENT_METHODS, paymentSplit, round2 } = require('../lib/payment');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -58,7 +59,9 @@ const parseRejected = (row) => {
  * precios; no se acepta el que mande el teléfono.
  */
 router.post('/rejected', asyncHandler(async (req, res) => {
-  const { client_sale_id, items, payment_method, error = null, sold_at = null } = req.body;
+  const {
+    client_sale_id, items, payment_method, transfer_amount = null, error = null, sold_at = null,
+  } = req.body;
 
   if (!client_sale_id || typeof client_sale_id !== 'string') {
     return res.status(400).json({ error: 'Falta el identificador de la venta' });
@@ -104,11 +107,15 @@ router.post('/rejected', asyncHandler(async (req, res) => {
   try {
     const inserted = await db.execute({
       sql: `INSERT INTO rejected_sales
-              (user_id, client_sale_id, total, payment_method, items, error, sold_at, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (user_id, client_sale_id, total, payment_method, transfer_amount,
+               items, error, sold_at, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         req.userId, client_sale_id, total,
-        payment_method === 'transferencia' ? 'transferencia' : 'efectivo',
+        PAYMENT_METHODS.includes(payment_method) ? payment_method : 'efectivo',
+        // El dinero ya se cobró: el aviso guarda lo que diga el teléfono, sin
+        // rechazarlo por un monto raro. Solo tiene sentido en un cobro mixto.
+        payment_method === 'mixto' && Number.isFinite(Number(transfer_amount)) ? round2(transfer_amount) : null,
         JSON.stringify(lines),
         typeof error === 'string' ? error.slice(0, 300) : null,
         typeof sold_at === 'string' ? sold_at.slice(0, 40) : null,
@@ -172,17 +179,26 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   const {
     items, payment_method = 'efectivo', client_sale_id = null,
-    register_id: requestedRegisterId = null,
+    register_id: requestedRegisterId = null, transfer_amount = null,
   } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'La venta debe tener al menos un producto' });
   }
 
-  // La forma de cobro solo puede ser efectivo o transferencia: el techo del
-  // dueño y el desglose de la caja dependen de este valor.
-  if (payment_method !== 'efectivo' && payment_method !== 'transferencia') {
+  // La forma de cobro solo puede ser efectivo, transferencia o mixto: el techo
+  // del dueño y el desglose de la caja dependen de este valor.
+  if (!PAYMENT_METHODS.includes(payment_method)) {
     return res.status(400).json({ error: 'Forma de pago inválida' });
+  }
+
+  // En un cobro mixto el teléfono manda cuánto se transfirió; el efectivo es el
+  // resto. Que quede dentro del total se comprueba más abajo, cuando el total
+  // ya está calculado con los precios de cada línea.
+  const transferAmount = payment_method === 'mixto' ? round2(transfer_amount) : null;
+  if (payment_method === 'mixto'
+      && (transfer_amount === null || !Number.isFinite(Number(transfer_amount)) || transferAmount <= 0)) {
+    return res.status(400).json({ error: 'Falta el monto transferido del cobro mixto' });
   }
 
   const db = getDb();
@@ -264,20 +280,35 @@ router.post('/', asyncHandler(async (req, res) => {
       });
     }
 
-    // Techo de transferencia (inclusivo): el total exacto pasa, por encima se
-    // bloquea sin descontar stock — la transacción se revierte completa.
-    if (payment_method === 'transferencia'
-        && transferLimit !== null && transferLimit !== undefined
-        && total > transferLimit) {
+    // Un cobro mixto con 0 en una de las partes no es mixto: el POS lo manda
+    // como efectivo o transferencia puro. Si llega así es un cliente roto o un
+    // precio que cambió por el camino, y aceptarlo dejaría efectivo negativo.
+    if (payment_method === 'mixto' && transferAmount >= total) {
       await tx.rollback();
-      return res.status(403).json({ error: `Transferencia por encima del límite ($${transferLimit})` });
+      return res.status(400).json({ error: 'El monto transferido tiene que ser menor que el total' });
+    }
+
+    // Techo de transferencia (inclusivo): el total exacto pasa, por encima se
+    // bloquea sin descontar stock — la transacción se revierte completa. En un
+    // cobro mixto el techo mira solo la parte transferida: el efectivo no pasa
+    // por el banco.
+    const transferPart = paymentSplit({ payment_method, total, transfer_amount: transferAmount }).transfer;
+    if (transferLimit !== null && transferLimit !== undefined && transferPart > transferLimit) {
+      await tx.rollback();
+      return res.status(403).json({
+        error: payment_method === 'mixto'
+          ? `La parte en transferencia supera el límite ($${transferLimit})`
+          : `Transferencia por encima del límite ($${transferLimit})`,
+      });
     }
 
     const saleResult = await tx.execute({
       sql: `INSERT INTO sales
-              (user_id, client_sale_id, total, profit, payment_method, register_id, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [req.userId, client_sale_id, total, profit, payment_method, registerId, account.id, account.email],
+              (user_id, client_sale_id, total, profit, payment_method, transfer_amount,
+               register_id, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_sale_id, total, profit, payment_method, transferAmount,
+             registerId, account.id, account.email],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

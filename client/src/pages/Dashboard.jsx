@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import PaymentBadge from '../components/PaymentBadge'
 import { formatTime } from '../lib/dates'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -138,15 +139,7 @@ export default function Dashboard() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                    sale.payment_method === 'transferencia'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'bg-green-100 text-green-700'
-                  }`}>
-                    {sale.payment_method === 'transferencia'
-                      ? <><Smartphone size={11} /> Transfer</>
-                      : <><Banknote size={11} /> Efectivo</>}
-                  </span>
+                  <PaymentBadge sale={sale} short />
                   <span className="font-semibold text-gray-900">{fmt(sale.total)}</span>
                 </div>
               </div>

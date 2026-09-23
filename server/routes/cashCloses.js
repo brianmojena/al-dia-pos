@@ -5,6 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
+const { paymentSplit } = require('../lib/payment');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -64,10 +65,11 @@ const getLastCloseForRegister = async (executor, userId, registerId) => {
 };
 
 // Separado por forma de cobro: solo el efectivo tiene que aparecer físicamente
-// en la gaveta; las transferencias se muestran aparte como referencia.
+// en la gaveta; las transferencias se muestran aparte como referencia. Una
+// venta mixta aporta a los dos lados.
 const summarize = (rows) => ({
-  cash: rows.reduce((sum, row) => sum + (row.payment_method === 'efectivo' ? Number(row.total) : 0), 0),
-  transfer: rows.reduce((sum, row) => sum + (row.payment_method === 'transferencia' ? Number(row.total) : 0), 0),
+  cash: rows.reduce((sum, row) => sum + paymentSplit(row).cash, 0),
+  transfer: rows.reduce((sum, row) => sum + paymentSplit(row).transfer, 0),
   count: rows.length,
   first_sale_at: rows[0]?.created_at || null,
 });

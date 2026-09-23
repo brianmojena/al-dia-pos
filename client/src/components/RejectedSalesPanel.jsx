@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { AlertTriangle, Check } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
 import { formatDateTime } from '../lib/dates'
+import { paymentLabel } from '../lib/payment'
 import { accountLabel } from '../lib/accountLabel'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -53,7 +54,7 @@ export default function RejectedSalesPanel() {
               <div className="flex justify-between items-start gap-3">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-gray-900">
-                    {fmt(sale.total)} · {sale.payment_method === 'transferencia' ? 'Transferencia' : 'Efectivo'}
+                    {fmt(sale.total)} · {paymentLabel(sale)}
                   </p>
                   <p className="text-xs text-gray-500 mt-0.5">
                     {formatDateTime(sale.sold_at || sale.reported_at)}

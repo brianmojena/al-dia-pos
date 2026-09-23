@@ -4,6 +4,7 @@ import {
   Banknote, Smartphone, Check, AlertTriangle, ArrowUp, Download, WifiOff,
 } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
+import PaymentBadge from '../components/PaymentBadge'
 import { formatDayLabel, formatTime } from '../lib/dates'
 import { shiftMonth, monthLabel, dayLabel, closeStatus } from '../lib/months'
 import { accountLabel } from '../lib/accountLabel'
@@ -354,15 +355,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                    sale.payment_method === 'transferencia'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'bg-green-100 text-green-700'
-                  }`}>
-                    {sale.payment_method === 'transferencia'
-                      ? <><Smartphone size={11} /> Transferencia</>
-                      : <><Banknote size={11} /> Efectivo</>}
-                  </span>
+                  <PaymentBadge sale={sale} />
                   <span className="font-bold text-gray-900">{fmt(sale.total)}</span>
                   {expandedId === sale.id
                     ? <ChevronUp size={16} className="text-gray-400" />
@@ -511,15 +504,7 @@ function ElectronHistorial() {
                           </p>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                            sale.payment_method === 'transferencia'
-                              ? 'bg-blue-100 text-blue-700'
-                              : 'bg-green-100 text-green-700'
-                          }`}>
-                            {sale.payment_method === 'transferencia'
-                              ? <><Smartphone size={11} /> Transferencia</>
-                              : <><Banknote size={11} /> Efectivo</>}
-                          </span>
+                          <PaymentBadge sale={sale} />
                           <span className="font-bold text-gray-900">{fmt(sale.total)}</span>
                           {expandedId === sale.id
                             ? <ChevronUp size={16} className="text-gray-400" />

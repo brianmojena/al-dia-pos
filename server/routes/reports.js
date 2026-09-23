@@ -5,6 +5,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { monthBounds, businessCurrentMonth, shopLocalDate, shopLocalTime } = require('../lib/businessDay');
+const { paymentSplit, paymentLabel } = require('../lib/payment');
 
 /**
  * El histórico de ventas (esta carpeta) es para el "económico" — quien revisa
@@ -18,6 +19,17 @@ const { monthBounds, businessCurrentMonth, shopLocalDate, shopLocalTime } = requ
 // punto flotante (0.1 + 0.2 en JS), y un total de mes con ".00000000004" se
 // ve roto en la pantalla del dueño aunque matemáticamente esté bien.
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// La hoja de ventas va por línea de producto, así que el reparto de un cobro
+// mixto no cabe en una columna numérica sin repetirse en cada línea (y sumar
+// esa columna daría de más). Va como texto en la columna "Pago"; los totales
+// por forma de cobro están en la hoja de días.
+const money = (n) => '$' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(n);
+const paymentDescription = (sale) => {
+  if (sale.payment_method !== 'mixto') return paymentLabel(sale);
+  const { cash, transfer } = paymentSplit(sale);
+  return `Mixto (transf. ${money(transfer)} + efect. ${money(cash)})`;
+};
 
 // 'YYYY-MM' del query, o el mes actual del negocio si no lo mandan. Lanza si
 // viene con forma inválida — lo capturan las rutas para responder 400.
@@ -40,7 +52,7 @@ const resolveMonth = (monthParam) => {
  */
 async function daySummaries(db, userId, bounds) {
   const salesResult = await db.execute({
-    sql: `SELECT created_at, total, profit, payment_method
+    sql: `SELECT created_at, total, profit, payment_method, transfer_amount
           FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ?`,
     args: [userId, bounds.start, bounds.end],
   });
@@ -69,9 +81,11 @@ async function daySummaries(db, userId, bounds) {
     d.sales_count += 1;
     d.total += total;
     d.profit += Number(row.profit) || 0;
-    // Solo el efectivo pesa en la gaveta; el resto son transferencias.
-    if (row.payment_method === 'transferencia') d.transfer_total += total;
-    else d.cash_total += total;
+    // Solo el efectivo pesa en la gaveta; el resto son transferencias. Una
+    // venta mixta reparte su total entre las dos columnas.
+    const split = paymentSplit(row);
+    d.cash_total += split.cash;
+    d.transfer_total += split.transfer;
   }
 
   for (const row of closesResult.rows) {
@@ -188,7 +202,7 @@ async function buildVentasSheet(workbook, db, userId, bounds) {
   styleHeaderRow(sheet.getRow(1));
 
   const result = await db.execute({
-    sql: `SELECT s.id AS sale_id, s.created_at, s.payment_method, s.account_email,
+    sql: `SELECT s.id AS sale_id, s.created_at, s.payment_method, s.transfer_amount, s.total, s.account_email,
                  si.product_name, si.quantity, si.unit_price
           FROM sales s
           JOIN sale_items si ON si.sale_id = s.id
@@ -208,7 +222,7 @@ async function buildVentasSheet(workbook, db, userId, bounds) {
       cantidad: quantity,
       precio: unitPrice,
       importe: round2(quantity * unitPrice),
-      pago: row.payment_method === 'transferencia' ? 'Transferencia' : 'Efectivo',
+      pago: paymentDescription(row),
       cobro: row.account_email || '',
     });
   }
