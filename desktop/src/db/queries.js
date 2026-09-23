@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
 const { todayBounds, boundsForDate } = require('../lib/businessDay');
+const { PAYMENT_METHODS, paymentSplit, round2 } = require('../lib/payment');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -235,9 +236,19 @@ function deleteProduct(id) {
  * arreglamos en el servidor) y todo ocurre en una sola transacción con el
  * encolado del outbox — o se guarda todo, o no se guarda nada.
  */
-function createSaleLocal({ items, payment_method = 'efectivo' }) {
+function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount = null }) {
   if (!Array.isArray(items) || items.length === 0) {
     throw Object.assign(new Error('La venta debe tener al menos un producto'), { code: 'EMPTY_SALE' });
+  }
+  // Mismas reglas que POST /api/sales: si la caja aceptara algo que el
+  // servidor rechaza, la venta quedaría cobrada aquí y en conflicto allá.
+  if (!PAYMENT_METHODS.includes(payment_method)) {
+    throw Object.assign(new Error('Forma de pago inválida'), { code: 'BAD_PAYMENT' });
+  }
+  const transferAmount = payment_method === 'mixto' ? round2(transfer_amount) : null;
+  if (payment_method === 'mixto'
+      && (transfer_amount === null || !Number.isFinite(Number(transfer_amount)) || transferAmount <= 0)) {
+    throw Object.assign(new Error('Falta el monto transferido del cobro mixto'), { code: 'BAD_PAYMENT' });
   }
 
   const db = getLocalDb();
@@ -286,11 +297,20 @@ function createSaleLocal({ items, payment_method = 'efectivo' }) {
       });
     }
 
+    // El total recién se conoce aquí: un mixto que no deja efectivo no es
+    // mixto, y aceptarlo pondría efectivo negativo en el arqueo.
+    if (payment_method === 'mixto' && transferAmount >= total) {
+      throw Object.assign(
+        new Error('El monto transferido tiene que ser menor que el total'),
+        { code: 'BAD_PAYMENT' }
+      );
+    }
+
     const saleResult = db.prepare(`
       INSERT INTO sales
-        (client_sale_id, origin, register_id, account_email, total, profit, payment_method)
-      VALUES (?, 'local', ?, ?, ?, ?, ?)
-    `).run(clientSaleId, registerId, accountEmail, total, profit, payment_method);
+        (client_sale_id, origin, register_id, account_email, total, profit, payment_method, transfer_amount)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?)
+    `).run(clientSaleId, registerId, accountEmail, total, profit, payment_method, transferAmount);
     const saleId = saleResult.lastInsertRowid;
 
     for (const line of lines) {
@@ -307,6 +327,7 @@ function createSaleLocal({ items, payment_method = 'efectivo' }) {
       payload: {
         client_sale_id: clientSaleId,
         payment_method,
+        transfer_amount: transferAmount,
         items: lines.map(l => ({
           local_product_id: l.product_id,
           quantity: l.quantity,
@@ -384,7 +405,7 @@ const getPeriodStart = (db) => {
 // período más tarde; nunca dos veces.
 const periodSales = (db, periodStart) =>
   db.prepare(
-    `SELECT client_sale_id, total, payment_method, created_at
+    `SELECT client_sale_id, total, payment_method, transfer_amount, created_at
      FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
@@ -437,12 +458,9 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
     const periodStart = getPeriodStart(db);
     const sales = periodSales(db, periodStart);
 
-    const cash = sales
-      .filter(s => s.payment_method === 'efectivo')
-      .reduce((sum, s) => sum + s.total, 0);
-    const transfer = sales
-      .filter(s => s.payment_method === 'transferencia')
-      .reduce((sum, s) => sum + s.total, 0);
+    // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
+    const cash = sales.reduce((sum, s) => sum + paymentSplit(s).cash, 0);
+    const transfer = sales.reduce((sum, s) => sum + paymentSplit(s).transfer, 0);
 
     const expectedCash = float + cash;
     const openedAt = periodStart === BEGINNING_OF_TIME
@@ -657,8 +675,9 @@ function applyServerDelta(page) {
   const apply = db.transaction(() => {
     const insertSale = db.prepare(`
       INSERT INTO sales
-        (server_id, client_sale_id, origin, register_id, account_email, total, profit, payment_method, created_at)
-      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?)
+        (server_id, client_sale_id, origin, register_id, account_email, total, profit,
+         payment_method, transfer_amount, created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertSaleItem = db.prepare(`
       INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost)
@@ -673,7 +692,8 @@ function applyServerDelta(page) {
       }
       const result = insertSale.run(
         Number(sale.id), clientSaleId, sale.register_id ?? null, sale.account_email ?? null,
-        Number(sale.total) || 0, Number(sale.profit) || 0, sale.payment_method || 'efectivo', sale.created_at,
+        Number(sale.total) || 0, Number(sale.profit) || 0, sale.payment_method || 'efectivo',
+        sale.transfer_amount ?? null, sale.created_at,
       );
       const saleId = Number(result.lastInsertRowid);
       for (const item of sale.items || []) {

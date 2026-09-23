@@ -123,6 +123,7 @@ async function reportRejected(accountKey) {
           client_sale_id: sale.client_sale_id,
           items: sale.items,
           payment_method: sale.payment_method,
+          transfer_amount: sale.transfer_amount ?? null,
           error: sale.error,
           sold_at: sale.queued_at ? new Date(sale.queued_at).toISOString() : null,
         }),

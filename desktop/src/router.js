@@ -8,7 +8,7 @@ function ok(status, data) { return { ok: true, status, data }; }
 function fail(status, error) { return { ok: false, status, data: { error } }; }
 
 const SALE_ERROR_STATUS = {
-  EMPTY_SALE: 400, BAD_QUANTITY: 400, BAD_PRICE: 400, NO_PRODUCT: 400, NO_STOCK: 409,
+  EMPTY_SALE: 400, BAD_QUANTITY: 400, BAD_PRICE: 400, NO_PRODUCT: 400, NO_STOCK: 409, BAD_PAYMENT: 400,
 };
 
 async function routeRequest(method, fullPath, body) {

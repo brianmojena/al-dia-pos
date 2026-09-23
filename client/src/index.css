@@ -19,3 +19,35 @@ body {
 .safe-area-bottom {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* Slider del cobro mixto: el fondo lo pinta el componente (azul lo que se
+   transfiere, verde lo que va en efectivo); aquí solo la forma. Sin
+   appearance: none el navegador dibuja su propia pista encima del degradado. */
+.split-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 10px;
+  border-radius: 9999px;
+  outline: none;
+  touch-action: pan-y;
+}
+.split-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 3px solid #111827;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: grab;
+}
+.split-slider::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 3px solid #111827;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: grab;
+}

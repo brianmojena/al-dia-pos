@@ -1,5 +1,6 @@
 import { AlertTriangle, Check } from 'lucide-react'
 import { formatDateTime } from '../lib/dates'
+import { paymentLabel } from '../lib/payment'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -34,7 +35,7 @@ export default function RejectedSalesBanner({ rejected, onAcknowledge }) {
               <div className="flex justify-between items-start gap-3">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-gray-900">
-                    {fmt(total)} · {sale.payment_method === 'transferencia' ? 'Transferencia' : 'Efectivo'}
+                    {fmt(total)} · {paymentLabel(sale)}
                   </p>
                   <p className="text-xs text-gray-500 mt-0.5">
                     {sale.queued_at ? formatDateTime(new Date(sale.queued_at).toISOString()) : ''}

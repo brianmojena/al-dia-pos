@@ -59,6 +59,7 @@ function initLocalDb(dbPath) {
       total REAL NOT NULL,
       profit REAL NOT NULL DEFAULT 0,
       payment_method TEXT NOT NULL DEFAULT 'efectivo',
+      transfer_amount REAL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -164,6 +165,8 @@ function initLocalDb(dbPath) {
     'ALTER TABLE sales ADD COLUMN register_id TEXT',
     'ALTER TABLE sales ADD COLUMN cash_close_id INTEGER',
     'ALTER TABLE sales ADD COLUMN account_email TEXT',
+    // Cobro mixto: la parte transferida; el efectivo es el resto del total.
+    'ALTER TABLE sales ADD COLUMN transfer_amount REAL',
     "ALTER TABLE cash_closes ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
     'ALTER TABLE cash_closes ADD COLUMN register_id TEXT',
     "ALTER TABLE inventory_counts ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",

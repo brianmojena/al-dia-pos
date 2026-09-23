@@ -217,6 +217,10 @@ async function initDb() {
     'ALTER TABLE inventory_counts ADD COLUMN account_id INTEGER',
     'ALTER TABLE inventory_counts ADD COLUMN account_email TEXT',
     'ALTER TABLE sales ADD COLUMN register_id TEXT',
+    // Cobro mixto: la parte que se transfirió. El efectivo es el resto del
+    // total — ver server/lib/payment.js. NULL en cualquier otra forma de cobro.
+    'ALTER TABLE sales ADD COLUMN transfer_amount REAL',
+    'ALTER TABLE rejected_sales ADD COLUMN transfer_amount REAL',
     'ALTER TABLE sales ADD COLUMN cash_close_id INTEGER',
     'ALTER TABLE cash_closes ADD COLUMN register_id TEXT',
     'ALTER TABLE cash_closes ADD COLUMN overlap_sales INTEGER NOT NULL DEFAULT 0',

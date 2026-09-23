@@ -104,6 +104,7 @@ function buildRequest(db, row) {
         path: '/api/sales',
         body: {
           items, payment_method: payload.payment_method, client_sale_id: payload.client_sale_id,
+          transfer_amount: payload.transfer_amount ?? null,
           register_id: registerId,
         },
         onSuccess: (data) => {
