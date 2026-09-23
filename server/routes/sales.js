@@ -175,6 +175,12 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'La venta debe tener al menos un producto' });
   }
 
+  // La forma de cobro solo puede ser efectivo o transferencia: el techo del
+  // dueño y el desglose de la caja dependen de este valor.
+  if (payment_method !== 'efectivo' && payment_method !== 'transferencia') {
+    return res.status(400).json({ error: 'Forma de pago inválida' });
+  }
+
   const db = getDb();
 
   // Idempotencia (camino rápido): si el POS reintenta una venta que sí llegó a
@@ -186,6 +192,15 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
     }
   }
+
+  // El techo de transferencia lo fija el dueño (PUT /api/auth/settings) y se
+  // valida aquí, no solo en la pantalla del POS: la cola offline y la app de
+  // escritorio también cobran por esta vía.
+  const shopResult = await db.execute({
+    sql: 'SELECT transfer_limit FROM users WHERE id = ?',
+    args: [req.userId],
+  });
+  const transferLimit = shopResult.rows[0]?.transfer_limit ?? null;
 
   // Fuera de la transacción a propósito: es una lectura por clave primaria y
   // la cuenta que cobra no cambia a mitad del cobro.
@@ -242,6 +257,15 @@ router.post('/', asyncHandler(async (req, res) => {
         unit_price: unitPrice,
         unit_cost: product.purchase_price || 0,
       });
+    }
+
+    // Techo de transferencia (inclusivo): el total exacto pasa, por encima se
+    // bloquea sin descontar stock — la transacción se revierte completa.
+    if (payment_method === 'transferencia'
+        && transferLimit !== null && transferLimit !== undefined
+        && total > transferLimit) {
+      await tx.rollback();
+      return res.status(403).json({ error: `Transferencia por encima del límite ($${transferLimit})` });
     }
 
     const saleResult = await tx.execute({
