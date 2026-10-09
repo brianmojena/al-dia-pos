@@ -173,6 +173,14 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS pwa_product_operations (
+      user_id INTEGER NOT NULL,
+      account_id INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      response TEXT NOT NULL,
+      PRIMARY KEY (user_id, account_id, operation_id)
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))

@@ -1,14 +1,15 @@
+import { syncOffline } from '../lib/offlineClient.js'
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { apiFetch, getToken, setToken, clearToken, isElectron } from '../lib/api'
 import { cacheUser, getCachedUser } from '../lib/offlineCache'
-import { flushQueue, refreshQueueStatus } from '../lib/salesQueue'
+import { refreshQueueStatus } from '../lib/salesQueue'
 
 // Al cambiar de sesión cambia qué ventas guardadas en el teléfono son de quien
 // está dentro: se recalcula el contador y, al entrar, se suben las suyas ya.
 const onSessionChanged = ({ signedIn }) => {
   if (isElectron()) return
   refreshQueueStatus().catch(() => {})
-  if (signedIn) flushQueue()
+  if (signedIn) void syncOffline()
 }
 
 const AuthContext = createContext(null)
@@ -22,13 +23,24 @@ export function AuthProvider({ children }) {
     // IPC) — siempre vale la pena preguntarle, en vez de confiar en localStorage,
     // que podría haberse limpiado sin que la sesión local realmente se perdiera.
     if (!isElectron() && !getToken()) { setLoading(false); return }
+    const sessionToken = getToken()
+    const cached = !isElectron() && getCachedUser()
+    if (cached) {
+      setUser(cached)
+      setLoading(false)
+      void syncOffline()
+      if (navigator.onLine === false) return
+    }
     try {
-      const res = await apiFetch('/api/auth/me')
+      const res = await apiFetch('/api/auth/me', { preserveSession: !!cached })
+      if (!isElectron() && getToken() !== sessionToken) { setLoading(false); return }
       if (res.ok) {
         const data = await res.json()
+        if (!isElectron() && getToken() !== sessionToken) { setLoading(false); return }
         setUser(data.user)
         cacheUser(data.user)
-      } else {
+        if (!isElectron()) void syncOffline()
+      } else if (!cached) {
         // 401/403 reales: la sesión no vale, no hay nada que rescatar del cache.
         clearToken()
         setUser(null)
@@ -77,6 +89,7 @@ export function AuthProvider({ children }) {
     if (!res.ok) throw new Error(data.error || 'No se pudo iniciar sesión')
     setToken(data.token)
     setUser(data.user)
+    setLoading(false)
     cacheUser(data.user)
     onSessionChanged({ signedIn: true })
     return data.user
@@ -91,6 +104,7 @@ export function AuthProvider({ children }) {
     if (!res.ok) throw new Error(data.error || 'No se pudo crear la cuenta')
     setToken(data.token)
     setUser(data.user)
+    setLoading(false)
     cacheUser(data.user)
     onSessionChanged({ signedIn: true })
     return data.user

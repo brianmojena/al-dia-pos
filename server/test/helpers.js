@@ -25,11 +25,12 @@ async function startTestServer() {
   await initDb();
 
   const app = require('../app');
-  const server = await new Promise((resolve) => {
+  const inProcess = process.env.MYPIMES_TEST_TRANSPORT === 'in-process'
+    ? require('./inProcessTransport').inProcessTransport(app) : null;
+  const server = inProcess ? null : await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
-
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = inProcess?.baseUrl || `http://127.0.0.1:${server.address().port}`;
 
   const api = async (method, path, { token, body } = {}) => {
     const res = await fetch(`${baseUrl}${path}`, {
@@ -52,7 +53,8 @@ async function startTestServer() {
     baseUrl,
     db: getDb(),
     async close() {
-      await new Promise((resolve) => server.close(resolve));
+      if (inProcess) inProcess.close();
+      else await new Promise((resolve) => server.close(resolve));
       fs.rmSync(path.dirname(dbFile), { recursive: true, force: true });
     },
   };

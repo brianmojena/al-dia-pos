@@ -87,7 +87,7 @@ export default function ImportarProductos() {
       if (!res.ok) setServerErr(data)
       else setDone(data)
     } catch (_) {
-      setServerErr({ error: 'Sin conexión. No se importó nada — vuelve a intentar cuando tengas red.' })
+      setServerErr({ error: 'No se pudo guardar la importación en este dispositivo. Vuelve a intentar.' })
     } finally {
       setImporting(false)
     }
@@ -102,6 +102,7 @@ export default function ImportarProductos() {
           {done.created} nuevos · {done.updated} actualizados
         </p>
       </div>
+      {done.pending && <p className="text-sm text-amber-700 mb-4">Importación guardada en este dispositivo. Se subirá al recuperar la conexión.</p>}
       {invalid.length > 0 && (
         <p className="text-sm text-orange-700 bg-orange-50 rounded-xl px-4 py-3 mb-4">
           Quedaron fuera {invalid.length} filas con errores. Corrígelas en la hoja y vuelve a subir

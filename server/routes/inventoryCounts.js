@@ -1,3 +1,4 @@
+const { operationTime } = require('../lib/operationTime');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -64,6 +65,9 @@ router.get('/:id', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
+  let operationDate;
+  try { operationDate = operationTime(req.body.counted_at); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
   const { items, note = null, client_count_id = null } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -157,10 +161,10 @@ router.post('/', asyncHandler(async (req, res) => {
     const inserted = await tx.execute({
       sql: `INSERT INTO inventory_counts
               (user_id, client_count_id, lines_count, products_with_difference,
-               units_missing, units_extra, value_missing, note, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               units_missing, units_extra, value_missing, note, account_id, account_email, counted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [req.userId, client_count_id, lines.length, withDifference,
-             unitsMissing, unitsExtra, valueMissing, note, account.id, account.email],
+             unitsMissing, unitsExtra, valueMissing, note, account.id, account.email, operationDate],
     });
     const countId = Number(inserted.lastInsertRowid);
 

@@ -1,3 +1,4 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
 import {
   Calculator, Check, AlertTriangle, ArrowUp, Banknote, Smartphone, Lock, History, Users,
@@ -30,18 +31,21 @@ export default function Caja() {
   const load = async () => {
     // El historial lleva el efectivo esperado de cada período: el servidor solo
     // se lo da al dueño (403 para un cajero), así que ni lo pedimos.
-    const [p, h, s] = await Promise.all([
-      apiFetch('/api/cash-closes/current?register_id=web').then(r => r.json()),
-      isOwner ? apiFetch('/api/cash-closes').then(r => r.json()) : Promise.resolve([]),
-      isOwner ? apiFetch('/api/cash-closes/summary').then(r => r.json()) : Promise.resolve([]),
-    ])
-    setPeriod(p)
-    setHistory(Array.isArray(h) ? h : [])
-    setSummary(Array.isArray(s) ? s : [])
-    setLoading(false)
+    try {
+      const [p, h, s] = await Promise.all([
+        apiFetch('/api/cash-closes/current?register_id=web').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
+        isOwner ? apiFetch('/api/cash-closes').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }) : Promise.resolve([]),
+        isOwner ? apiFetch('/api/cash-closes/summary').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }) : Promise.resolve([]),
+      ])
+      setPeriod(p)
+      setHistory(Array.isArray(h) ? h : [])
+      setSummary(Array.isArray(s) ? s : [])
+    } catch (error) { setError(error.message || 'No se pudieron leer los datos locales') }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [])
+  useLocalRefresh(load)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -72,7 +76,7 @@ export default function Caja() {
         await load()
       }
     } catch (_) {
-      setError('Sin conexión. El cierre no se registró — vuelve a intentar cuando tengas red.')
+      setError('No se pudo guardar el cierre en este dispositivo. Vuelve a intentar.')
     } finally {
       setSubmitting(false)
     }
@@ -98,7 +102,10 @@ export default function Caja() {
       </div>
 
       {result ? (
-        <ResultCard result={result} onNew={startNew} />
+        <div>
+          {result.pending && <p className="text-xs text-amber-700 mb-3">Cierre guardado en este dispositivo. El resultado se confirmará al sincronizar con la nube.</p>}
+          <ResultCard result={result} onNew={startNew} />
+        </div>
       ) : (
         <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm p-6 mb-6">
           {/* El aviso de conteo a ciegas es parte del producto, no decoración:

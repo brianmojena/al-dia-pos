@@ -1,10 +1,9 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
 import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle, CloudOff } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
-import { cacheProducts, getCachedProducts } from '../lib/offlineCache'
-import { enqueueSale, getPendingSales, subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
-import { applyPendingSales } from '../lib/offlineStock'
+import { subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
 import { isTransferBlocked } from '../lib/transferGuard'
 import { maxTransfer, paymentLabel } from '../lib/payment'
 import MixedPayment from '../components/MixedPayment'
@@ -35,32 +34,18 @@ export default function POS() {
   // descarta cuando la venta se cierra con éxito.
   const saleIdRef = useRef(null)
 
-  // En la web se muestra la última foto del servidor MENOS las ventas cobradas
-  // sin internet que aún no subieron (ver lib/offlineStock.js). Antes el
-  // descuento solo vivía en pantalla: al cerrar y reabrir la app sin conexión,
-  // el stock volvía al último número descargado.
-  //
-  // Las pendientes se leen ANTES de pedir el catálogo: si justo en medio sube
-  // una venta, el error queda del lado de mostrar de menos (nunca vender lo que
-  // no hay) y se corrige en la recarga que dispara la propia cola al vaciarse.
   const loadProducts = async () => {
-    const pendingSales = isElectron() ? [] : await getPendingSales().catch(() => [])
     try {
       const res = await apiFetch('/api/products')
-      const d = await res.json()
-      if (!isElectron() && Array.isArray(d)) cacheProducts(d) // última foto del servidor, sin descuentos
-      setProducts(applyPendingSales(d, pendingSales))
-    } catch (_) {
-      // Sin red al abrir la PWA: mejor vender con el catálogo de la última vez
-      // que con una pantalla en blanco.
-      const cached = !isElectron() && getCachedProducts()
-      if (cached) setProducts(applyPendingSales(cached, pendingSales))
-    } finally {
-      setLoading(false)
-    }
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo cargar el catálogo')
+      setProducts(Array.isArray(data) ? data : [])
+    } catch (error) { setError(error.message) }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { loadProducts() }, [])
+  useLocalRefresh(loadProducts)
 
   // En la caja de escritorio el catálogo puede cambiar desde la web mientras
   // se vende (un producto nuevo, un precio): el sync worker avisa y la
@@ -150,7 +135,8 @@ export default function POS() {
         setCart([])
         setShowCart(false)
         setLastPaymentMethod(paymentMethod)
-        setQueuedOffline(false)
+        const saved = await res.json()
+        setQueuedOffline(!!saved.pending)
         setSuccess(true)
         await loadProducts()
         setTimeout(() => setSuccess(false), 2500)
@@ -160,39 +146,8 @@ export default function POS() {
         // El stock pudo cambiar por otra venta; refrescamos para mostrar el real.
         await loadProducts().catch(() => {})
       }
-    } catch (_) {
-      // Sin red (típico en Cuba, no un caso raro): en Electron esto no debería
-      // pasar nunca (apiFetch va por IPC local), así que si llegamos aquí es
-      // porque estamos en la PWA web sin conexión. La venta ya se cobró en
-      // caja — no tiene sentido bloquear al cajero, la encolamos y seguimos.
-      if (!isElectron()) {
-        // product_name viaja solo para poder mostrar la venta si la rechazan al
-        // subirla; /api/sales lo ignora.
-        const soldItems = cart.map(i => ({
-          product_id: i.id, product_name: i.name, quantity: i.quantity, unit_price: i.sale_price,
-        }))
-        await enqueueSale({
-          items: soldItems,
-          ...payment,
-          client_sale_id: saleIdRef.current,
-          register_id: 'web',
-        })
-        // Descuento optimista del stock local para que el siguiente cliente
-        // no compre algo que ya no queda — se corrige solo al re-sincronizar.
-        setProducts(prev => prev.map(p => {
-          const sold = soldItems.find(i => i.product_id === p.id)
-          return sold ? { ...p, stock: Math.max(0, p.stock - sold.quantity) } : p
-        }))
-        saleIdRef.current = null
-        setCart([])
-        setShowCart(false)
-        setLastPaymentMethod(paymentMethod)
-        setQueuedOffline(true)
-        setSuccess(true)
-        setTimeout(() => setSuccess(false), 3500)
-      } else {
-        setError('Sin conexión. Revisa tu Internet y vuelve a intentar — no se cobrará dos veces.')
-      }
+    } catch (error) {
+      setError(error.message || 'No se pudo guardar la venta. Vuelve a intentar.')
     } finally {
       setCompleting(false)
     }
@@ -243,7 +198,7 @@ export default function POS() {
           queuedOffline ? 'bg-gray-700' : 'bg-green-500'
         }`}>
           {queuedOffline ? <CloudOff size={18} /> : <CheckCircle size={18} />}
-          {queuedOffline ? 'Venta guardada, sincroniza al volver la red · ' : '¡Venta registrada! · '}
+          {queuedOffline ? 'Venta guardada en este dispositivo · ' : '¡Venta registrada! · '}
           {paymentLabel({ payment_method: lastPaymentMethod })}
         </div>
       )}

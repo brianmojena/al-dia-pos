@@ -1,3 +1,4 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight } from 'lucide-react'
@@ -9,17 +10,20 @@ const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits
 
 export default function Dashboard() {
   const [data, setData] = useState(null)
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
-  const load = () => {
-    setLoading(true)
-    apiFetch('/api/dashboard')
-      .then(r => r.json())
-      .then(d => { setData(d); setLoading(false) })
-      .catch(() => setLoading(false))
+  const load = async () => {
+    try {
+      const res = await apiFetch('/api/dashboard'), data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo cargar Inicio')
+      setData(data); setError('')
+    } catch (error) { setError(error.message) }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [])
+  useLocalRefresh(load)
 
   if (loading) return (
     <div className="flex items-center justify-center h-full">
@@ -68,6 +72,7 @@ export default function Dashboard() {
         </Link>
       )}
 
+      {error && <p role="alert" className="text-sm text-red-600 mb-4">{error}</p>}
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
         <div className="bg-white rounded-2xl p-5 shadow-sm">
@@ -133,7 +138,7 @@ export default function Dashboard() {
             {data.recentSales.map(sale => (
               <div key={sale.id} className="flex justify-between items-center py-2.5 border-b border-gray-50 last:border-0">
                 <div>
-                  <p className="text-gray-800 font-medium text-sm">Venta #{sale.id}</p>
+                  <p className="text-gray-800 font-medium text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.id}`}</p>
                   <p className="text-xs text-gray-400">
                     {formatTime(sale.created_at)}
                   </p>
