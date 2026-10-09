@@ -31,20 +31,12 @@ export default defineConfig({
       workbox: {
         // El shell (JS/CSS/HTML) se precachea al instalar el service worker.
         // Las llamadas a /api/* NO se cachean con estrategia genérica: la
-        // cola de ventas offline (src/lib/salesQueue.js) las maneja a mano,
+        // base local y su cola (src/lib/offlineClient.js) las manejan,
         // así que aquí solo dejamos pasar la red y no interferimos.
         navigateFallbackDenylist: [/^\/api\//],
-        runtimeCaching: [
-          {
-            urlPattern: /\/api\/products$/,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'products-cache',
-              networkTimeoutSeconds: 3,
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
+        cleanupOutdatedCaches: true,
+        globPatterns: ['**/*.{js,css,html,png,svg,ico,woff,woff2}'],
+        runtimeCaching: [],
       },
     }),
   ],

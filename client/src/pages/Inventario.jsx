@@ -1,3 +1,4 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import {
@@ -23,16 +24,19 @@ export default function Inventario() {
   const countIdRef = useRef(null)
 
   const load = async () => {
-    const [p, h] = await Promise.all([
-      apiFetch('/api/products').then(r => r.json()),
-      apiFetch('/api/inventory-counts').then(r => r.json()),
-    ])
-    setProducts(Array.isArray(p) ? p : [])
-    setHistory(Array.isArray(h) ? h : [])
-    setLoading(false)
+    try {
+      const [p, h] = await Promise.all([
+        apiFetch('/api/products').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
+        apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
+      ])
+      setProducts(Array.isArray(p) ? p : [])
+      setHistory(Array.isArray(h) ? h : [])
+    } catch (error) { setError(error.message || 'No se pudieron leer los datos locales') }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [])
+  useLocalRefresh(load)
 
   const filtered = useMemo(
     () => products.filter(p => p.name.toLowerCase().includes(search.toLowerCase())),
@@ -73,7 +77,7 @@ export default function Inventario() {
         await load()
       }
     } catch (_) {
-      setError('Sin conexión. El arqueo no se registró — vuelve a intentar cuando tengas red.')
+      setError('No se pudo guardar el arqueo en este dispositivo. Vuelve a intentar.')
     } finally {
       setSubmitting(false)
     }
@@ -308,6 +312,7 @@ function Resultado({ result, onNew }) {
         ))}
       </div>
 
+      {result.pending && <p className="text-xs text-amber-700 text-center mb-3">Guardado en este dispositivo. Pendiente de sincronizar.</p>}
       <p className="text-xs text-gray-400 text-center mb-4">
         El stock ya quedó ajustado a lo que contaste.
       </p>

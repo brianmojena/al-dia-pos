@@ -3,6 +3,9 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut, CloudOff } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
+import OfflineStatus from './OfflineStatus'
+import { localSyncStatus, retrySync } from '../lib/offlineClient.js'
+import { isElectron } from '../lib/network.js'
 import SyncStatus from './SyncStatus'
 
 // ownerOnly no es solo cosmética: el servidor devuelve 403 en esas rutas para
@@ -31,6 +34,10 @@ export default function Layout() {
   const [uploading, setUploading] = useState(false)
   const [stillOffline, setStillOffline] = useState(false)
 
+  const findBlockers = async () => {
+    const [legacy, local] = await Promise.all([getLogoutBlockers(), localSyncStatus()])
+    return { ...legacy, pending: legacy.pending + local.pending, total: legacy.total + local.pending }
+  }
   const doLogout = () => {
     setBlockers(null)
     logout()
@@ -38,7 +45,9 @@ export default function Layout() {
   }
 
   const handleLogout = async () => {
-    const found = await getLogoutBlockers().catch(() => ({ total: 0 }))
+    let found
+    try { found = await findBlockers() }
+    catch { setBlockers({ total: 1, pending: 0, storageUnavailable: true }); return }
     if (found.total > 0) {
       setStillOffline(false)
       setBlockers(found)
@@ -51,12 +60,13 @@ export default function Layout() {
     setUploading(true)
     setStillOffline(false)
     try {
-      await flushQueue()
-      const found = await getLogoutBlockers().catch(() => ({ total: 0 }))
+      if (isElectron()) await flushQueue()
+      else await retrySync()
+      const found = await findBlockers()
       if (found.total === 0) return doLogout()
       setBlockers(found)
       setStillOffline(true)
-    } finally {
+    } catch { setStillOffline(true) } finally {
       setUploading(false)
     }
   }
@@ -92,6 +102,7 @@ export default function Layout() {
         </button>
       </header>
 
+      <OfflineStatus />
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar — desktop */}
         <nav className="hidden md:flex flex-col w-56 bg-white border-r border-gray-200 py-5 px-3 gap-1 flex-shrink-0">
@@ -145,13 +156,13 @@ export default function Layout() {
               <CloudOff size={24} />
             </div>
             <h2 id="logout-blocked-title" className="text-lg font-bold text-gray-900">
-              {blockers.pending > 0
-                ? `${blockers.pending === 1 ? 'Queda 1 venta' : `Quedan ${blockers.pending} ventas`} sin subir`
+              {blockers.storageUnavailable ? 'No se pudieron comprobar los cambios pendientes' : blockers.pending > 0
+                ? `${blockers.pending === 1 ? 'Queda 1 cambio' : `Quedan ${blockers.pending} cambios`} sin subir`
                 : 'Hay ventas rechazadas sin avisar al dueño'}
             </h2>
             <p className="text-sm text-gray-600 mt-2">
-              Todavía no puedes cerrar sesión. Las ventas están guardadas en este teléfono,
-              pero el dueño no las verá hasta que se suban.
+              Todavía no puedes cerrar sesión. Los cambios están guardados en este teléfono,
+              pero el dueño no los verá hasta que se suban.
             </p>
             <p className="text-sm text-gray-600 mt-2">
               Conéctate a internet y toca <strong>Subir ahora</strong>.

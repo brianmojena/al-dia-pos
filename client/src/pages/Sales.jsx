@@ -1,3 +1,6 @@
+import { businessDate } from '../lib/offlineModel.js'
+import { monthCsv } from '../lib/offlineExport.js'
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import {
   ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowLeft, ClipboardList,
@@ -55,22 +58,30 @@ function HistorialPorMes() {
       const url = month ? `/api/reports/days?month=${month}` : '/api/reports/days'
       const res = await apiFetch(url)
       if (!res.ok) {
-        setError('No se pudo cargar el historial.')
+        const data = await res.json().catch(() => ({}))
+        setError(data.error || 'No se pudo cargar el historial.')
         return
       }
       const data = await res.json()
       setMonthData(data)
       setViewMonth(data.month)
-      setCurrentMonth((prev) => prev ?? data.month)
+      setCurrentMonth(businessDate().slice(0, 7))
     } catch (_) {
       // Sin red: antes esto dejaba el spinner girando para siempre.
-      setError('Necesitas internet para ver el historial.')
+      setError('No se pudo leer el historial guardado. Vuelve a intentar.')
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => { loadMonth() }, [])
+  useLocalRefresh(async () => {
+    await loadMonth(viewMonth)
+    if (selectedDate) {
+      const res = await apiFetch(`/api/sales?date=${selectedDate}`)
+      if (res.ok) setDaySales(await res.json())
+    }
+  })
 
   const goMonth = (delta) => {
     if (!viewMonth || loading) return
@@ -101,8 +112,12 @@ function HistorialPorMes() {
     if (expandedId === id) { setExpandedId(null); return }
     setExpandedId(id)
     if (!details[id]) {
-      const data = await apiFetch(`/api/sales/${id}`).then((r) => r.json())
-      setDetails((prev) => ({ ...prev, [id]: data }))
+      try {
+        const res = await apiFetch(`/api/sales/${id}`)
+        if (!res.ok) throw new Error('No se pudo cargar el detalle de la venta')
+        const data = await res.json()
+        setDetails((prev) => ({ ...prev, [id]: data }))
+      } catch (error) { setDayError(error.message); setExpandedId(null) }
     }
   }
 
@@ -111,13 +126,22 @@ function HistorialPorMes() {
     setExporting(true)
     setExportError('')
     try {
-      const res = await apiFetch(`/api/reports/export?month=${viewMonth}`)
-      if (!res.ok) throw new Error('export failed')
-      const blob = await res.blob()
+      let blob, extension = 'xlsx'
+      try {
+        if (navigator.onLine === false) throw new Error('offline')
+        const res = await apiFetch(`/api/reports/export?month=${viewMonth}`)
+        if (!res.ok) throw new Error('export failed')
+        blob = await res.blob()
+      } catch {
+        const res = await apiFetch('/api/sales')
+        if (!res.ok) throw new Error('No se pudo preparar el archivo local')
+        blob = new Blob([monthCsv(await res.json(), viewMonth)], { type: 'text/csv;charset=utf-8' })
+        extension = 'csv'
+      }
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `ventas-${viewMonth}.xlsx`
+      a.download = `ventas-${viewMonth}.${extension}`
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -125,7 +149,7 @@ function HistorialPorMes() {
       // el acto puede dejar una descarga vacía.
       setTimeout(() => URL.revokeObjectURL(url), 60_000)
     } catch (_) {
-      setExportError('Necesitas internet para descargar el Excel.')
+      setExportError('No se pudo generar el archivo. Vuelve a intentar.')
     } finally {
       setExporting(false)
     }
@@ -199,7 +223,7 @@ function HistorialPorMes() {
               className="w-full flex items-center justify-center gap-2 bg-white border border-gray-200 text-gray-700 font-semibold text-sm py-3 rounded-2xl shadow-sm hover:bg-gray-50 active:scale-[0.99] transition-all disabled:opacity-50"
             >
               <Download size={16} />
-              {exporting ? 'Generando...' : 'Descargar Excel del mes'}
+              {exporting ? 'Generando...' : 'Descargar ventas del mes (Excel / CSV sin conexión)'}
             </button>
             {exportError && (
               <p className="text-xs text-red-600 text-center mt-2">{exportError}</p>
@@ -346,7 +370,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                 }`}
               >
                 <div>
-                  <p className="font-semibold text-gray-900 text-sm">Venta #{sale.id}</p>
+                  <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.id}`}</p>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {formatTime(sale.created_at)}
                     {accountLabel(sale.account_email) && (
@@ -495,7 +519,7 @@ function ElectronHistorial() {
                         }`}
                       >
                         <div>
-                          <p className="font-semibold text-gray-900 text-sm">Venta #{sale.id}</p>
+                          <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.id}`}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
                             {formatTime(sale.created_at)}
                             {accountLabel(sale.account_email) && (

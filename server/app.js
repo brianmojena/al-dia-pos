@@ -27,6 +27,7 @@ app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 // Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner
 // vive dentro de cada ruta, igual que en /api/sales y /api/cash-closes).
 app.use('/api/reports', requireAuth, reportsRouter);
+app.use('/api/sync', requireAuth, require('./routes/pwaSync'));
 app.use('/api/sync', requireAuth, requireOwner, syncRouter);
 
 app.use((err, req, res, next) => {

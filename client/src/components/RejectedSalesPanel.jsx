@@ -1,3 +1,4 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { AlertTriangle, Check } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
@@ -20,6 +21,7 @@ export default function RejectedSalesPanel() {
       .catch(() => {})
 
   useEffect(() => { if (!isElectron()) load() }, [])
+  useLocalRefresh(load)
 
   const markReviewed = async (id) => {
     const res = await apiFetch(`/api/sales/rejected/${id}/review`, { method: 'POST' })

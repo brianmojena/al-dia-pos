@@ -1,3 +1,4 @@
+const { operationTime } = require('../lib/operationTime');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -177,6 +178,9 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
+  let operationDate;
+  try { operationDate = operationTime(req.body.sold_at); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
   const {
     items, payment_method = 'efectivo', client_sale_id = null,
     register_id: requestedRegisterId = null, transfer_amount = null,
@@ -305,10 +309,10 @@ router.post('/', asyncHandler(async (req, res) => {
     const saleResult = await tx.execute({
       sql: `INSERT INTO sales
               (user_id, client_sale_id, total, profit, payment_method, transfer_amount,
-               register_id, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               register_id, account_id, account_email, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [req.userId, client_sale_id, total, profit, payment_method, transferAmount,
-             registerId, account.id, account.email],
+             registerId, account.id, account.email, operationDate],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

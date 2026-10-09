@@ -1,3 +1,5 @@
+import { syncOffline } from '../lib/offlineClient.js'
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { Users, Plus, Trash2, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 import { apiFetch } from '../lib/api'
@@ -16,34 +18,33 @@ export default function Cajeros() {
   const load = () =>
     apiFetch('/api/auth/cashiers').then(r => r.json()).then(d => {
       setCajeros(Array.isArray(d) ? d : [])
-      setLoading(false)
-    })
+    }).catch(err => setError(err.message)).finally(() => setLoading(false))
 
   useEffect(() => { load() }, [])
+  useLocalRefresh(load)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
     setError('')
-    const res = await apiFetch('/api/auth/cashiers', {
-      method: 'POST',
-      body: JSON.stringify({ email: form.email.trim(), password: form.password }),
-    })
-    const data = await res.json()
-    if (!res.ok) {
-      setError(data.error || 'No se pudo crear el cajero.')
-    } else {
-      setForm(EMPTY)
-      setShowForm(false)
-      await load()
-    }
-    setSaving(false)
+    try {
+      const res = await apiFetch('/api/auth/cashiers', {
+        method: 'POST', body: JSON.stringify({ email: form.email.trim(), password: form.password }),
+      })
+      const data = await res.json()
+      if (!res.ok) setError(data.error || 'No se pudo crear el cajero.')
+      else { setForm(EMPTY); setShowForm(false); await syncOffline(); await load() }
+    } catch (_) { setError('Conéctate a internet para crear cuentas de cajeros.') }
+    finally { setSaving(false) }
   }
 
   const handleDelete = async (id, email) => {
     if (!confirm(`¿Quitar el acceso de "${email}"? No podrá volver a entrar.`)) return
-    await apiFetch(`/api/auth/cashiers/${id}`, { method: 'DELETE' })
-    await load()
+    try {
+      const res = await apiFetch(`/api/auth/cashiers/${id}`, { method: 'DELETE' })
+      if (!res.ok) { const data = await res.json(); setError(data.error || 'No se pudo quitar el acceso.'); return }
+      await syncOffline(); await load()
+    } catch (_) { setError('Conéctate a internet para quitar el acceso de cajeros.') }
   }
 
   const field = 'w-full border border-gray-200 rounded-xl px-4 py-3 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors'
@@ -56,6 +57,7 @@ export default function Cajeros() {
 
   return (
     <div className="p-5 md:p-8 max-w-2xl mx-auto pb-24 md:pb-8">
+      {error && !showForm && <p role="alert" className="text-sm text-red-600 mb-3">{error}</p>}
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-2xl font-bold text-gray-900">Cajeros</h2>
         <button

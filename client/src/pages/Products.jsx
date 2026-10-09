@@ -1,3 +1,4 @@
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTriangle } from 'lucide-react'
@@ -26,13 +27,17 @@ export default function Products() {
   const [formError, setFormError] = useState('')
   const [notice,    setNotice]    = useState('')
 
-  const load = () =>
-    apiFetch('/api/products').then(r => r.json()).then(d => {
-      setProducts(Array.isArray(d) ? d : [])
-      setLoading(false)
-    })
+  const load = async () => {
+    try {
+      const res = await apiFetch('/api/products'), data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo cargar el catálogo')
+      setProducts(Array.isArray(data) ? data : [])
+    } catch (error) { setNotice(error.message) }
+    finally { setLoading(false) }
+  }
 
   useEffect(() => { load() }, [])
+  useLocalRefresh(load)
 
   // En la caja de escritorio el catálogo puede cambiar desde la web con esta
   // pantalla abierta: el sync worker avisa y la lista se recarga sola.
@@ -78,13 +83,14 @@ export default function Products() {
         setFormError(data.error || 'No se pudo guardar el producto.')
         return
       }
+      if (data.pending) setNotice('Producto guardado en este dispositivo. Se subirá al recuperar la conexión.')
       if (data.merged) {
         setNotice(`«${data.name}» ya existía, así que no se creó otro. Se mantienen su precio y su stock.`)
       }
       await load()
       closeForm()
     } catch (_) {
-      setFormError('Sin conexión. El producto no se guardó.')
+      setFormError('No se pudo guardar el producto en este dispositivo. Vuelve a intentar.')
     } finally {
       setSaving(false)
     }
@@ -92,13 +98,12 @@ export default function Products() {
 
   const handleDelete = async (id, name) => {
     if (!confirm(`¿Eliminar "${name}"?`)) return
-    const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' })
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      alert(data.error || 'No se pudo eliminar el producto.')
-      return
-    }
-    await load()
+    try {
+      const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) { setNotice(data.error || 'No se pudo eliminar el producto.'); return }
+      await load()
+    } catch (error) { setNotice(error.message || 'No se pudo eliminar el producto') }
   }
 
   const field = (key) => ({

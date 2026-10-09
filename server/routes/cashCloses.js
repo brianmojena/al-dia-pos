@@ -1,3 +1,4 @@
+const { operationTime } = require('../lib/operationTime');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -213,6 +214,9 @@ router.get('/current', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
+  let operationDate;
+  try { operationDate = operationTime(req.body.closed_at); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
   const {
     counted_cash, opening_float = 0, note = null, client_close_id = null,
     client_sale_ids = null, register_id: requestedRegisterId = null,
@@ -254,9 +258,24 @@ router.post('/', asyncHandler(async (req, res) => {
   // encuentra las ventas ya marcadas y no las vuelve a contar.
   const tx = await db.transaction('write');
   try {
-    const covered = mode === 'desktop'
+    // La PWA cierra el conjunto exacto que vio localmente, para que una venta
+    // posterior de otra pestaña no entre en un cierre offline anterior.
+    const explicitIds = req.body.covered_sale_ids;
+    if (explicitIds != null && (!Array.isArray(explicitIds) || explicitIds.some((id) => !Number.isInteger(id) || id <= 0) || new Set(explicitIds).size !== explicitIds.length || mode !== 'web')) {
+      await tx.rollback();
+      return res.status(400).json({ error: 'Ventas del cierre inválidas' });
+    }
+    let covered = mode === 'desktop'
       ? await salesByClientIds(tx, req.userId, client_sale_ids)
       : await openSales(tx, req.userId, mode, registerId);
+    if (explicitIds) {
+      const available = new Set(covered.map((sale) => Number(sale.id)));
+      if (explicitIds.some((id) => !available.has(id))) {
+        await tx.rollback();
+        return res.status(409).json({ error: 'Una venta de este cierre ya no está disponible. Revisa la caja antes de sincronizar.' });
+      }
+      covered = covered.filter((sale) => explicitIds.includes(Number(sale.id)));
+    }
     const summary = summarize(covered);
 
     // Solo pasa en la transición: un escritorio viejo cierra por ids ventas
@@ -284,13 +303,13 @@ router.post('/', asyncHandler(async (req, res) => {
       sql: `INSERT INTO cash_closes
               (user_id, client_close_id, opened_at, opening_float, expected_cash,
                counted_cash, difference, expected_transfer, sales_count, note,
-               register_id, overlap_sales, account_id, account_email)
-            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               register_id, overlap_sales, account_id, account_email, closed_at)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [
         req.userId, client_close_id, openedAt, float, expectedCash,
         counted, counted - expectedCash,
         summary.transfer, summary.count, note,
-        registerId, overlapSales, account.id, account.email,
+        registerId, overlapSales, account.id, account.email, operationDate,
       ],
     });
     const closeId = Number(inserted.lastInsertRowid);

@@ -17,9 +17,9 @@
 // Cada venta guarda la cuenta que la cobró y solo la sube esa misma cuenta
 // (ver lib/queueOwnership.js): la cola es del teléfono, no de la sesión.
 import { get, update } from 'idb-keyval'
-import { apiFetch, getToken, isElectron } from './api'
-import { accountKeyFromToken, splitByAccount, logoutBlockers } from './queueOwnership'
-import { requestPersistentStorage } from './storagePersistence'
+import { networkFetch as apiFetch, getToken, isElectron } from './network.js'
+import { accountKeyFromToken, splitByAccount, logoutBlockers } from './queueOwnership.js'
+import { requestPersistentStorage } from './storagePersistence.js'
 
 const QUEUE_KEY = 'mypimes_sales_queue'
 const REJECTED_KEY = 'mypimes_rejected_sales'
@@ -118,7 +118,7 @@ async function reportRejected(accountKey) {
     let res
     try {
       res = await apiFetch('/api/sales/rejected', {
-        method: 'POST',
+        method: 'POST', preserveSession: true,
         body: JSON.stringify({
           client_sale_id: sale.client_sale_id,
           items: sale.items,
@@ -172,7 +172,7 @@ export async function flushQueue() {
       body.register_id = 'web'
       let res
       try {
-        res = await apiFetch('/api/sales', { method: 'POST', body: JSON.stringify(body) })
+        res = await apiFetch('/api/sales', { method: 'POST', preserveSession: true, body: JSON.stringify(body) })
       } catch (_) {
         break // sigue sin red — paramos y probamos en el próximo intento
       }
