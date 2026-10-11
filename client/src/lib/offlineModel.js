@@ -254,7 +254,14 @@ export function readLocal(data, path, account, user) {
   if (route === '/api/auth/cashiers') return data.cashiers
   if (route === '/api/dashboard') {
     const sales = newest(data.sales.filter((s) => businessDate(s.created_at) === businessDate()), 'created_at')
-    return { today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: data.products.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
+    const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 }
+    for (const sale of data.sales.filter((s) => s.cash_close_id == null)) {
+      const split = paymentSplit(sale)
+      for (const key of Object.keys(holdings)) holdings[key] += split[key]
+    }
+    for (const key of Object.keys(holdings)) holdings[key] = round(holdings[key])
+    const inventory = { cost: round(data.products.reduce((n, p) => n + p.stock * Number(p.purchase_price || 0), 0)), retail: round(data.products.reduce((n, p) => n + p.stock * Number(p.sale_price || 0), 0)), units: data.products.reduce((n, p) => n + p.stock, 0) }
+    return { holdings, inventory, today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: data.products.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
   }
   return undefined
 }

@@ -1,13 +1,15 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight } from 'lucide-react'
+import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight, Package } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import PaymentBadge from '../components/PaymentBadge'
 import ShopRatesCard from '../components/ShopRatesCard'
 import { formatTime } from '../lib/dates'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+
+const fmtMoney = (n) => new Intl.NumberFormat('es-ES', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n || 0)
 
 export default function Dashboard() {
   const [data, setData] = useState(null)
@@ -124,6 +126,41 @@ export default function Dashboard() {
             <span className="text-sm text-gray-500 font-medium">Transacciones</span>
           </div>
           <p className="text-2xl font-bold text-gray-900">{data?.today?.count || 0}</p>
+        </div>
+      </div>
+
+      {/* Lo que hay ahora: efectivo, transferencias, divisas e inventario */}
+      <div className="mb-6">
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Lo que hay ahora</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: 'Efectivo', value: fmt(data?.holdings?.cash), icon: Banknote, tone: 'bg-green-50 text-green-600' },
+            { label: 'Transferencia', value: fmt(data?.holdings?.transfer), icon: Smartphone, tone: 'bg-blue-50 text-[#007AFF]' },
+            { label: 'Dólares', value: `$ ${fmtMoney(data?.holdings?.usd)}`, icon: DollarSign, tone: 'bg-emerald-50 text-emerald-600' },
+            { label: 'Euros', value: `€ ${fmtMoney(data?.holdings?.eur)}`, icon: DollarSign, tone: 'bg-indigo-50 text-indigo-500' },
+          ].map(({ label, value, icon: Icon, tone }) => (
+            <div key={label} className="bg-white rounded-2xl p-4 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${tone}`}><Icon size={16} /></div>
+                <span className="text-xs text-gray-500 font-medium">{label}</span>
+              </div>
+              <p className="text-lg font-bold text-gray-900">{value}</p>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-gray-400 mt-2">Lo cobrado desde el último arqueo de caja.</p>
+
+        <div className="bg-white rounded-2xl p-4 shadow-sm mt-3 flex items-center gap-3">
+          <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center flex-shrink-0">
+            <Package size={19} className="text-amber-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-gray-500 font-medium">Importe total del inventario</p>
+            <p className="text-xl font-bold text-gray-900">{fmt(data?.inventory?.cost)}</p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              A precio de compra · {fmt(data?.inventory?.retail)} a precio de venta · {data?.inventory?.units || 0} uds
+            </p>
+          </div>
         </div>
       </div>
 

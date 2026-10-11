@@ -404,7 +404,22 @@ function getDashboard() {
       AND shop_rate IS NOT NULL AND ABS(exchange_rate - shop_rate) > 0.005
   `).get(start, end);
 
-  return { today: todayStats, lowStock, recentSales, audit: { offRateSales: offRate.n } };
+  // Lo que hay ahora en la tienda: lo cobrado desde el último arqueo, con la
+  // misma cuenta del arqueo (paymentSplit).
+  const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 };
+  for (const sale of periodSales(db)) {
+    const split = paymentSplit(sale);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+  for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
+
+  const inv = db.prepare(`
+    SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(stock), 0) AS units
+    FROM products WHERE deleted = 0
+  `).get();
+  const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: inv.units };
+
+  return { today: todayStats, holdings, inventory, lowStock, recentSales, audit: { offRateSales: offRate.n } };
 }
 
 // ---------------------------------------------------------------------------
