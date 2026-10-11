@@ -60,6 +60,7 @@ async function login(email, password) {
     token: res.data.token,
     transfer_limit: res.data.user.transfer_limit,
     usd_rate: res.data.user.usd_rate,
+    eur_rate: res.data.user.eur_rate ?? null,
     role: res.data.user.role,
   });
 

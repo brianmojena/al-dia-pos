@@ -62,6 +62,15 @@ router.get('/', asyncHandler(async (req, res) => {
     args: [req.userId],
   });
 
+  // Ventas de hoy cobradas en divisa a una tasa que no era la de la tienda:
+  // el cajero que la sube se queda con la diferencia en billetes.
+  const offRateResult = await db.execute({
+    sql: `SELECT COUNT(*) AS n FROM sales
+          WHERE user_id = ? AND created_at >= ? AND created_at < ? AND payment_method = 'divisa'
+            AND shop_rate IS NOT NULL AND ABS(exchange_rate - shop_rate) > 0.005`,
+    args: [req.userId, start, end],
+  });
+
   res.json({
     today: todayStatsResult.rows[0],
     lowStock: lowStockResult.rows,
@@ -77,6 +86,7 @@ router.get('/', asyncHandler(async (req, res) => {
         : null,
       cashierSummary: cashierSummaryResult.rows.length > 1 ? cashierSummaryResult.rows : [],
       rejectedSales: Number(rejectedResult.rows[0].n) || 0,
+      offRateSales: Number(offRateResult.rows[0].n) || 0,
     },
   });
 }));

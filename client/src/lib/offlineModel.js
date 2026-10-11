@@ -1,4 +1,4 @@
-import { paymentSplit } from './payment.js'
+import { paymentSplit, offShopRate, CURRENCIES } from './payment.js'
 import { parseServerDate } from './dates.js'
 
 export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], rejected_sales: [], cashiers: [], current_period: null })
@@ -124,7 +124,20 @@ export function prepareOperation(data, method, path, body, ctx) {
     const existing = data.sales.find((s) => s.client_sale_id === op.body.client_sale_id)
     if (existing) return { ...op, kind: 'noop', result: existing }
     assert(Array.isArray(body.items) && body.items.length, 'La venta debe tener productos')
-    assert(['efectivo', 'transferencia', 'mixto'].includes(body.payment_method), 'Forma de pago inválida')
+    assert(['efectivo', 'transferencia', 'mixto', 'divisa'].includes(body.payment_method), 'Forma de pago inválida')
+    // Mismas reglas que el servidor (server/lib/payment.js): si aquí se
+    // aceptara una divisa que allá se rechaza, la venta quedaría cobrada en el
+    // teléfono y rechazada al subir.
+    if (body.payment_method === 'divisa') {
+      assert(CURRENCIES.includes(body.foreign_currency), 'Moneda inválida: solo USD o EUR')
+      assert(number(body.foreign_amount) && Number(body.foreign_amount) > 0, 'Falta cuántos dólares o euros entregó el cliente')
+      assert(number(body.exchange_rate) && Number(body.exchange_rate) > 0, 'Falta la tasa de cambio del cobro')
+      op.body.foreign_amount = round(Number(body.foreign_amount))
+      op.body.exchange_rate = Number(body.exchange_rate)
+      op.body.shop_rate = body.shop_rate == null ? null : Number(body.shop_rate)
+    } else {
+      for (const key of ['foreign_currency', 'foreign_amount', 'exchange_rate', 'shop_rate']) delete op.body[key]
+    }
     const remaining = new Map(data.products.map((p) => [p.id, p.stock]))
     const items = body.items.map((item, index) => {
       const p = productById(data, item.product_id)
@@ -136,7 +149,7 @@ export function prepareOperation(data, method, path, body, ctx) {
     })
     const total = round(items.reduce((n, i) => n + i.quantity * i.unit_price, 0))
     if (body.payment_method === 'mixto') assert(number(body.transfer_amount) && body.transfer_amount > 0 && body.transfer_amount < total, 'Monto transferido inválido')
-    const split = paymentSplit({ ...body, total })
+    const split = paymentSplit({ ...op.body, total })
     assert(ctx.user.transfer_limit == null || split.transfer <= Number(ctx.user.transfer_limit), 'Transferencia por encima del límite')
     op.body.sold_at = now
     op.body.register_id = 'web'
@@ -162,14 +175,18 @@ export function prepareOperation(data, method, path, body, ctx) {
     const existing = data.cash_closes.find((c) => c.client_close_id === op.body.client_close_id)
     if (existing) return { ...op, kind: 'noop', result: existing }
     assert(number(body.counted_cash) && number(body.opening_float ?? 0), 'El efectivo debe ser mayor o igual a 0')
+    assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
     const covered = openSales(data, ctx.account)
     op.saleIds = covered.map((s) => s.id)
     op.coverageExact = owner
     if (owner) op.body.covered_sale_ids = op.saleIds
     op.body.closed_at = now
     op.body.register_id = 'web'
-    const cash = covered.reduce((n, s) => n + paymentSplit(s).cash, 0) + Number(body.opening_float || 0)
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || now, expected_cash: cash, expected_transfer: covered.reduce((n, s) => n + paymentSplit(s).transfer, 0), difference: round(Number(body.counted_cash) - cash), sales_count: covered.length, pending: true }
+    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0))
+    const cash = sumOf('cash') + Number(body.opening_float || 0)
+    const usd = sumOf('usd'), eur = sumOf('eur')
+    const countedUsd = round(Number(body.counted_usd || 0)), countedEur = round(Number(body.counted_eur || 0))
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -181,7 +198,7 @@ export function prepareOperation(data, method, path, body, ctx) {
 export function monthlyReport(data, month) {
   const groups = new Map()
   const dayFor = (date) => {
-    if (!groups.has(date)) groups.set(date, { date, sales_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, closes: null })
+    if (!groups.has(date)) groups.set(date, { date, sales_count: 0, off_rate_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0, closes: null })
     return groups.get(date)
   }
   for (const sale of data.sales) {
@@ -190,17 +207,21 @@ export function monthlyReport(data, month) {
     const day = dayFor(date), split = paymentSplit(sale)
     day.sales_count++; day.total += Number(sale.total); day.profit += Number(sale.profit)
     day.cash_total += split.cash; day.transfer_total += split.transfer
+    day.foreign_total += split.foreign_cup; day.usd_total += split.usd; day.eur_total += split.eur
+    if (offShopRate(sale)) day.off_rate_count++
   }
   for (const close of data.cash_closes) {
     const date = businessDate(close.closed_at)
     if (!date.startsWith(month)) continue
     const day = dayFor(date)
-    day.closes ||= { count: 0, difference: 0, short: false }
+    day.closes ||= { count: 0, difference: 0, difference_usd: 0, difference_eur: 0, short: false }
     day.closes.count++; day.closes.difference += Number(close.difference)
-    day.closes.short ||= close.difference < -0.5
+    day.closes.difference_usd = round(day.closes.difference_usd + Number(close.difference_usd || 0))
+    day.closes.difference_eur = round(day.closes.difference_eur + Number(close.difference_eur || 0))
+    day.closes.short ||= close.difference < -0.5 || close.difference_usd < -0.005 || close.difference_eur < -0.005
   }
   const days = [...groups.values()].sort((a, b) => b.date.localeCompare(a.date))
-  const totals = { sales_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0 }
+  const totals = { sales_count: 0, off_rate_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0 }
   for (const day of days) for (const key of Object.keys(totals)) { day[key] = round(day[key]); totals[key] = round(totals[key] + day[key]) }
   return { month, days, totals }
 }
@@ -224,15 +245,16 @@ export function readLocal(data, path, account, user) {
     const summary = new Map()
     for (const c of data.cash_closes) {
       const key = `${c.account_id}:${c.account_email}`
-      if (!summary.has(key)) summary.set(key, { account_id: c.account_id, account_email: c.account_email, closes: 0, total_difference: 0, worst_difference: 0, times_short: 0 })
+      if (!summary.has(key)) summary.set(key, { account_id: c.account_id, account_email: c.account_email, closes: 0, total_difference: 0, worst_difference: 0, times_short: 0, total_difference_usd: 0, total_difference_eur: 0 })
       const s = summary.get(key); s.closes++; s.total_difference += Number(c.difference); s.worst_difference = Math.min(s.worst_difference, c.difference); s.times_short += c.difference < -0.5 ? 1 : 0
+      s.total_difference_usd = round(s.total_difference_usd + Number(c.difference_usd || 0)); s.total_difference_eur = round(s.total_difference_eur + Number(c.difference_eur || 0))
     }
     return [...summary.values()].sort((a, b) => a.total_difference - b.total_difference)
   }
   if (route === '/api/auth/cashiers') return data.cashiers
   if (route === '/api/dashboard') {
     const sales = newest(data.sales.filter((s) => businessDate(s.created_at) === businessDate()), 'created_at')
-    return { today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: data.products.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length } }
+    return { today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: data.products.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
   }
   return undefined
 }

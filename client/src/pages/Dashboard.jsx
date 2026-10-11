@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import PaymentBadge from '../components/PaymentBadge'
+import ShopRatesCard from '../components/ShopRatesCard'
 import { formatTime } from '../lib/dates'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -69,6 +70,26 @@ export default function Dashboard() {
             </p>
           </div>
           <ChevronRight size={18} className="text-red-300 flex-shrink-0" />
+        </Link>
+      )}
+
+      {data?.audit?.offRateSales > 0 && (
+        <Link
+          to="/sales"
+          className="flex items-start gap-3 bg-orange-50 border border-orange-200 rounded-2xl px-5 py-4 mb-5 hover:bg-orange-100/60 transition-colors"
+        >
+          <AlertTriangle size={18} className="text-orange-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-orange-700 text-sm">
+              {data.audit.offRateSales === 1
+                ? '1 cobro en divisa hoy con otra tasa'
+                : `${data.audit.offRateSales} cobros en divisa hoy con otra tasa`}
+            </p>
+            <p className="text-xs text-orange-600 mt-0.5">
+              Se cobraron a una tasa distinta a la de la tienda. Míralos en Historial.
+            </p>
+          </div>
+          <ChevronRight size={18} className="text-orange-300 flex-shrink-0" />
         </Link>
       )}
 
@@ -159,6 +180,8 @@ export default function Dashboard() {
           <p className="text-sm">Sin ventas registradas hoy</p>
         </div>
       )}
+
+      <ShopRatesCard fmt={fmt} />
 
       <Link
         to="/cajeros"

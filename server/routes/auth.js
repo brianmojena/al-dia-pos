@@ -11,7 +11,7 @@ const PLANS = ['premium', 'dev'];
 
 // La identidad y los ajustes del negocio salen de sitios distintos: un cajero
 // tiene su propio email y su propio rol, pero el nombre de la tienda, el plan,
-// el límite de transferencia y la tasa del dólar son de la TIENDA. Sin esto,
+// el límite de transferencia y las tasas del dólar y del euro son de la TIENDA. Sin esto,
 // la caja de un cajero abriría sin límite ni tasa configurados.
 const publicUser = (account, shop = account) => ({
   id: account.id,
@@ -22,6 +22,7 @@ const publicUser = (account, shop = account) => ({
   plan: shop.plan,
   transfer_limit: shop.transfer_limit ?? null,
   usd_rate: shop.usd_rate ?? null,
+  eur_rate: shop.eur_rate ?? null,
 });
 
 // userId es la TIENDA (para un dueño, él mismo); accountId es quien inicia
@@ -107,12 +108,12 @@ router.get('/me', requireAuth, asyncHandler(async (req, res) => {
   res.json({ user: publicUser(user, await loadShop(db, user)) });
 }));
 
-// Configuración del negocio: límite de transferencia y tasa del dólar que el
-// dueño ajusta desde el dashboard móvil. Ambos campos son opcionales e
-// independientes — se puede actualizar uno sin tocar el otro. null explícito
-// borra el valor (vuelve a "sin definir").
+// Configuración del negocio: límite de transferencia y tasas del dólar y del
+// euro que ajusta el dueño. Todos los campos son opcionales e independientes —
+// se puede actualizar uno sin tocar los demás. null explícito borra el valor
+// (vuelve a "sin definir").
 router.put('/settings', requireAuth, requireOwner, asyncHandler(async (req, res) => {
-  const { transfer_limit, usd_rate } = req.body;
+  const { transfer_limit, usd_rate, eur_rate } = req.body;
 
   const validate = (value, label) => {
     if (value === undefined || value === null) return null;
@@ -123,10 +124,11 @@ router.put('/settings', requireAuth, requireOwner, asyncHandler(async (req, res)
     return num;
   };
 
-  let nextTransferLimit, nextUsdRate;
+  let nextTransferLimit, nextUsdRate, nextEurRate;
   try {
     nextTransferLimit = 'transfer_limit' in req.body ? validate(transfer_limit, 'El límite de transferencia') : undefined;
     nextUsdRate        = 'usd_rate' in req.body ? validate(usd_rate, 'La tasa del dólar') : undefined;
+    nextEurRate        = 'eur_rate' in req.body ? validate(eur_rate, 'La tasa del euro') : undefined;
   } catch (err) {
     return res.status(err.status || 400).json({ error: err.message });
   }
@@ -137,10 +139,11 @@ router.put('/settings', requireAuth, requireOwner, asyncHandler(async (req, res)
   if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
   await db.execute({
-    sql: 'UPDATE users SET transfer_limit = ?, usd_rate = ? WHERE id = ?',
+    sql: 'UPDATE users SET transfer_limit = ?, usd_rate = ?, eur_rate = ? WHERE id = ?',
     args: [
       nextTransferLimit !== undefined ? nextTransferLimit : user.transfer_limit,
       nextUsdRate        !== undefined ? nextUsdRate        : user.usd_rate,
+      nextEurRate        !== undefined ? nextEurRate        : user.eur_rate,
       req.userId,
     ],
   });

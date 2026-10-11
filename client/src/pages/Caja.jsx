@@ -1,19 +1,27 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
 import {
-  Calculator, Check, AlertTriangle, ArrowUp, Banknote, Smartphone, Lock, History, Users,
+  Calculator, Check, AlertTriangle, ArrowUp, Banknote, Smartphone, Lock, History, Users, DollarSign,
 } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { newId } from '../lib/newId'
 import { formatDateTime as fmtDateTime } from '../lib/dates'
 import { accountLabel } from '../lib/accountLabel'
 import { useAuth } from '../context/AuthContext'
+import { useExchangeRates } from '../lib/exchangeRates'
+import { fmtForeign } from '../lib/payment'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Caja() {
   const { user } = useAuth()
   const isOwner = user?.role !== 'cajero'
+  // Se piden los billetes en divisa solo si este aparato puede cobrar en esa
+  // moneda (tiene tasa, propia o de la tienda). Mostrar u ocultar el campo no
+  // le dice al cajero si hubo ventas en divisa: el conteo sigue a ciegas.
+  const rates = useExchangeRates(user)
+  const foreignFields = ['USD', 'EUR'].filter((c) => rates[c].rate != null)
+  const [countedForeign, setCountedForeign] = useState({ USD: '', EUR: '' })
   const [period,     setPeriod]     = useState(null)
   const [history,    setHistory]    = useState([])
   const [summary,    setSummary]    = useState([])
@@ -60,6 +68,8 @@ export default function Caja() {
         method: 'POST',
         body: JSON.stringify({
           counted_cash: parseFloat(counted) || 0,
+          counted_usd: parseFloat(countedForeign.USD) || 0,
+          counted_eur: parseFloat(countedForeign.EUR) || 0,
           opening_float: parseFloat(float) || 0,
           note: note.trim() || null,
           client_close_id: closeIdRef.current,
@@ -72,7 +82,7 @@ export default function Caja() {
       } else {
         closeIdRef.current = null
         setResult(data)
-        setFloat(''); setCounted(''); setNote('')
+        setFloat(''); setCounted(''); setNote(''); setCountedForeign({ USD: '', EUR: '' })
         await load()
       }
     } catch (_) {
@@ -113,7 +123,7 @@ export default function Caja() {
           <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-5">
             <Lock size={16} className="flex-shrink-0 mt-0.5" />
             <p className="text-xs leading-relaxed font-medium">
-              Cuenta el efectivo <strong>antes</strong> de ver el total del sistema.
+              Cuenta el efectivo{foreignFields.length > 0 && ' y la divisa'} <strong>antes</strong> de ver el total del sistema.
               La diferencia aparece solo cuando confirmes.
             </p>
           </div>
@@ -149,9 +159,32 @@ export default function Caja() {
                 className={`${field} text-2xl font-bold py-4`}
               />
               <p className="text-[11px] text-gray-400 mt-1.5">
-                Lo que hay físicamente en la gaveta ahora mismo.
+                Los pesos que hay físicamente en la gaveta ahora mismo.
               </p>
             </div>
+
+            {foreignFields.length > 0 && (
+              <div>
+                <div className={`grid gap-3 ${foreignFields.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                  {foreignFields.map((currency) => (
+                    <div key={currency}>
+                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                        {currency === 'USD' ? 'Dólares contados' : 'Euros contados'}
+                      </label>
+                      <input
+                        type="number" step="any" min="0" inputMode="decimal" placeholder="0"
+                        value={countedForeign[currency]}
+                        onChange={e => setCountedForeign((c) => ({ ...c, [currency]: e.target.value }))}
+                        className={`${field} text-xl font-bold`}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1.5">
+                  Los billetes en divisa se cuentan aparte, sin convertirlos a pesos.
+                </p>
+              </div>
+            )}
 
             <div>
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
@@ -216,6 +249,11 @@ export default function Caja() {
                     }`}>
                       {Math.round(saldo) === 0 ? fmt(0) : (falta ? '−' : '+') + fmt(Math.abs(saldo))}
                     </p>
+                    {['usd', 'eur'].map((k) => Math.abs(Number(s[`total_difference_${k}`]) || 0) >= 0.01 && (
+                      <p key={k} className={`text-[11px] font-semibold ${Number(s[`total_difference_${k}`]) < 0 ? 'text-red-600' : 'text-orange-500'}`}>
+                        {Number(s[`total_difference_${k}`]) > 0 ? '+' : '−'}{fmtForeign(Math.abs(s[`total_difference_${k}`]))} {k.toUpperCase()}
+                      </p>
+                    ))}
                     {Number(s.worst_difference) < -0.5 && (
                       <p className="text-[11px] text-gray-400 mt-0.5">
                         peor: {fmt(Math.abs(s.worst_difference))}
@@ -259,7 +297,10 @@ export default function Caja() {
                   </p>
                   {c.note && <p className="text-xs text-gray-400 mt-1 italic truncate">{c.note}</p>}
                 </div>
-                <DifferenceBadge value={c.difference} />
+                <div className="flex flex-col items-end gap-1">
+                  <DifferenceBadge value={c.difference} />
+                  <ForeignDifference close={c} />
+                </div>
               </div>
             ))}
           </div>
@@ -292,11 +333,33 @@ function DifferenceBadge({ value }) {
   )
 }
 
+// Los descuadres en divisa van aparte de los pesos: un faltante de 5 USD no
+// se puede leer como uno de 5 pesos.
+function ForeignDifference({ close }) {
+  const parts = ['usd', 'eur']
+    .map((k) => ({ code: k.toUpperCase(), diff: Number(close[`difference_${k}`]) || 0 }))
+    .filter((p) => Math.abs(p.diff) >= 0.005)
+  if (parts.length === 0) return null
+  return parts.map(({ code, diff }) => (
+    <span key={code} className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${diff < 0 ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
+      {diff < 0 ? 'Faltó' : 'Sobró'} {fmtForeign(Math.abs(diff))} {code}
+    </span>
+  ))
+}
+
 function ResultCard({ result, onNew }) {
   const square = isSquare(result.difference)
   const short  = result.difference < 0
 
-  const tone = square
+  // Los pesos cuadraron pero no la divisa: no se puede decir "cuadró".
+  const foreignShort = ['usd', 'eur'].some((k) => Number(result[`difference_${k}`]) < -0.005)
+  const foreignOff = ['usd', 'eur'].some((k) => Math.abs(Number(result[`difference_${k}`]) || 0) >= 0.005)
+
+  const tone = square && foreignOff
+    ? foreignShort
+      ? { bg: 'bg-red-500',    shadow: 'shadow-red-200',    label: 'Los pesos cuadraron, pero falta divisa', Icon: AlertTriangle }
+      : { bg: 'bg-orange-500', shadow: 'shadow-orange-200', label: 'Los pesos cuadraron, pero sobra divisa', Icon: ArrowUp }
+    : square
     ? { bg: 'bg-green-500',  shadow: 'shadow-green-200',  label: 'La caja cuadró',  Icon: Check }
     : short
       ? { bg: 'bg-red-500',   shadow: 'shadow-red-200',   label: 'Falta efectivo',  Icon: AlertTriangle }
@@ -331,6 +394,26 @@ function ResultCard({ result, onNew }) {
             tone={square ? 'text-green-600' : short ? 'text-red-600' : 'text-orange-600'}
           />
         </div>
+
+        {['usd', 'eur'].map((k) => {
+          const expected = Number(result[`expected_${k}`]) || 0
+          const counted = Number(result[`counted_${k}`]) || 0
+          if (expected === 0 && counted === 0) return null
+          const diff = Number(result[`difference_${k}`]) || 0
+          const code = k.toUpperCase()
+          return (
+            <div key={k} className="border-t border-gray-100 pt-3 space-y-2">
+              <Row label={<><DollarSign size={13} className="inline mr-1.5 -mt-0.5 text-amber-600" />{code} esperados</>} value={`${fmtForeign(expected)} ${code}`} muted />
+              <Row label={`${code} contados`} value={`${fmtForeign(counted)} ${code}`} />
+              <Row
+                label={`Diferencia ${code}`}
+                value={Math.abs(diff) < 0.005 ? 'Cuadró' : `${diff < 0 ? '−' : '+'}${fmtForeign(Math.abs(diff))} ${code}`}
+                strong
+                tone={Math.abs(diff) < 0.005 ? 'text-green-600' : diff < 0 ? 'text-red-600' : 'text-orange-600'}
+              />
+            </div>
+          )
+        })}
 
         {result.expected_transfer > 0 && (
           <div className="border-t border-gray-100 pt-3">

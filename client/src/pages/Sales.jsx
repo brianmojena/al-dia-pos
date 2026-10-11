@@ -4,10 +4,11 @@ import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import {
   ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowLeft, ClipboardList,
-  Banknote, Smartphone, Check, AlertTriangle, ArrowUp, Download, WifiOff,
+  Banknote, Smartphone, Check, AlertTriangle, ArrowUp, Download, WifiOff, DollarSign,
 } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
 import PaymentBadge from '../components/PaymentBadge'
+import { paymentSplit, offShopRate, fmtForeign } from '../lib/payment'
 import { formatDayLabel, formatTime } from '../lib/dates'
 import { shiftMonth, monthLabel, dayLabel, closeStatus } from '../lib/months'
 import { accountLabel } from '../lib/accountLabel'
@@ -258,7 +259,7 @@ function MonthSummary({ totals }) {
         </span>
       </div>
       <p className="text-3xl font-bold text-gray-900 mb-4">{fmt(totals.total)}</p>
-      <div className="grid grid-cols-3 gap-3 pt-3 border-t border-gray-100 text-center">
+      <div className={`grid ${totals.foreign_total ? 'grid-cols-4' : 'grid-cols-3'} gap-3 pt-3 border-t border-gray-100 text-center`}>
         <div>
           <p className="text-[11px] text-gray-400 mb-0.5">Efectivo</p>
           <p className="text-sm font-semibold text-gray-800">{fmt(totals.cash_total)}</p>
@@ -267,11 +268,18 @@ function MonthSummary({ totals }) {
           <p className="text-[11px] text-gray-400 mb-0.5">Transf.</p>
           <p className="text-sm font-semibold text-gray-800">{fmt(totals.transfer_total)}</p>
         </div>
+        {!!totals.foreign_total && (
+          <div>
+            <p className="text-[11px] text-gray-400 mb-0.5">Divisa</p>
+            <p className="text-sm font-semibold text-amber-700">{fmt(totals.foreign_total)}</p>
+          </div>
+        )}
         <div>
           <p className="text-[11px] text-gray-400 mb-0.5">Ganancia</p>
           <p className="text-sm font-semibold text-green-600">{fmt(totals.profit)}</p>
         </div>
       </div>
+      <ForeignLine day={totals} />
     </div>
   )
 }
@@ -289,12 +297,70 @@ function DayRow({ day, onOpen }) {
       </div>
       <p className="text-xs text-gray-400 mb-2">
         {day.sales_count} {day.sales_count === 1 ? 'venta' : 'ventas'} · efectivo {fmt(day.cash_total)} · transf. {fmt(day.transfer_total)}
+        {!!day.foreign_total && <> · divisa {fmt(day.foreign_total)}</>}
       </p>
+      <ForeignLine day={day} />
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-green-600 font-medium">Ganancia {fmt(day.profit)}</p>
         <CloseBadge status={status} />
       </div>
     </button>
+  )
+}
+
+// Los billetes recibidos en el día o el mes, sin convertir, y cuántos se
+// cobraron a una tasa que no era la de la tienda. Los descuadres de divisa de
+// los cierres van aquí también: la etiqueta del cierre habla solo de pesos.
+function ForeignLine({ day }) {
+  const received = [['usd_total', 'USD'], ['eur_total', 'EUR']]
+    .filter(([key]) => Number(day[key]) > 0)
+    .map(([key, code]) => `${fmtForeign(day[key])} ${code}`)
+  const diffs = [['difference_usd', 'USD'], ['difference_eur', 'EUR']]
+    .map(([key, code]) => ({ code, diff: Number(day.closes?.[key]) || 0 }))
+    .filter((d) => Math.abs(d.diff) >= 0.005)
+  if (received.length === 0 && !day.off_rate_count && diffs.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-2 mt-1">
+      {received.length > 0 && (
+        <span className="flex items-center gap-1 text-amber-800 font-medium">
+          <DollarSign size={12} /> {received.join(' · ')}
+        </span>
+      )}
+      {day.off_rate_count > 0 && (
+        <span className="flex items-center gap-1 text-orange-600 font-semibold">
+          <AlertTriangle size={12} />
+          {day.off_rate_count === 1 ? '1 cobro' : `${day.off_rate_count} cobros`} con otra tasa
+        </span>
+      )}
+      {diffs.map(({ code, diff }) => (
+        <span key={code} className={`font-semibold ${diff < 0 ? 'text-red-600' : 'text-orange-600'}`}>
+          {diff < 0 ? 'Faltó' : 'Sobró'} {fmtForeign(Math.abs(diff))} {code} en caja
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// Detalle de un cobro en divisa, para el dueño: a cuánto se tomó el billete,
+// qué completó el cliente en pesos o qué vuelto se le dio, y si la tasa no era
+// la de la tienda.
+function ForeignDetail({ sale }) {
+  if (sale.payment_method !== 'divisa') return null
+  const { cash, foreign_cup: foreignCup } = paymentSplit(sale)
+  const off = offShopRate(sale)
+  return (
+    <div className={`rounded-xl px-3 py-2.5 mb-3 text-sm ${off ? 'bg-orange-50' : 'bg-amber-50'}`}>
+      <p className="text-gray-800">
+        <strong>{fmtForeign(sale.foreign_amount)} {sale.foreign_currency}</strong> a {fmt(sale.exchange_rate)} = {fmt(foreignCup)}
+      </p>
+      {Math.round(cash) > 0 && <p className="text-xs text-gray-600 mt-0.5">El cliente completó {fmt(cash)} en efectivo</p>}
+      {Math.round(cash) < 0 && <p className="text-xs text-gray-600 mt-0.5">Vuelto en pesos: {fmt(-cash)}</p>}
+      {off && (
+        <p className="flex items-center gap-1 text-xs font-semibold text-orange-700 mt-1">
+          <AlertTriangle size={12} /> La tasa de la tienda era {fmt(sale.shop_rate)}
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -391,6 +457,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                 <div className="bg-gray-50/60 px-5 pb-4 pt-3 border-b border-gray-50 last:border-0">
                   {details[sale.id] ? (
                     <>
+                      <ForeignDetail sale={sale} />
                       <div className="space-y-2 mb-3">
                         {details[sale.id].items.map((item) => (
                           <div key={item.id} className="flex justify-between text-sm">
@@ -540,6 +607,7 @@ function ElectronHistorial() {
                         <div className="bg-gray-50/60 px-5 pb-4 pt-3 border-b border-gray-50 last:border-0">
                           {details[sale.id] ? (
                             <>
+                              <ForeignDetail sale={sale} />
                               <div className="space-y-2 mb-3">
                                 {details[sale.id].items.map((item) => (
                                   <div key={item.id} className="flex justify-between text-sm">

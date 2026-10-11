@@ -1,12 +1,15 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
-import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle, CloudOff } from 'lucide-react'
+import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle, CloudOff, DollarSign, Pencil } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
 import { isTransferBlocked } from '../lib/transferGuard'
 import { maxTransfer, paymentLabel } from '../lib/payment'
 import MixedPayment from '../components/MixedPayment'
+import ForeignPayment from '../components/ForeignPayment'
+import DeviceRatesEditor from '../components/DeviceRatesEditor'
+import { useExchangeRates } from '../lib/exchangeRates'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 
@@ -14,6 +17,7 @@ const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits
 
 export default function POS() {
   const { user } = useAuth()
+  const rates = useExchangeRates(user)
   const [products,          setProducts]          = useState([])
   const [search,            setSearch]            = useState('')
   const [cart,              setCart]              = useState([])
@@ -22,8 +26,10 @@ export default function POS() {
   const [success,           setSuccess]           = useState(false)
   const [showCart,          setShowCart]          = useState(false)
   const [showPaymentModal,  setShowPaymentModal]  = useState(false)
-  const [mixedOpen,         setMixedOpen]         = useState(false)
-  const [lastPaymentMethod, setLastPaymentMethod] = useState('efectivo')
+  // Qué pantalla del modal de cobro está abierta: la lista, el mixto o la divisa.
+  const [paymentView,       setPaymentView]       = useState('list')
+  const [ratesOpen,         setRatesOpen]         = useState(false)
+  const [lastPayment,       setLastPayment]       = useState({ payment_method: 'efectivo' })
   const [error,             setError]             = useState('')
   const [queuedOffline,     setQueuedOffline]     = useState(false)
   const [rejected,          setRejected]          = useState([])
@@ -103,19 +109,16 @@ export default function POS() {
 
   // El modal siempre abre en la lista de formas de pago, y el cobro mixto
   // siempre arranca en 50/50 (MixedPayment se monta de nuevo cada vez).
-  const openPayment = () => { setMixedOpen(false); setShowPaymentModal(true) }
-  const closePayment = () => { setShowPaymentModal(false); setMixedOpen(false) }
+  const openPayment = () => { setPaymentView('list'); setShowPaymentModal(true) }
+  const closePayment = () => { setShowPaymentModal(false); setPaymentView('list') }
 
-  // transferAmount solo en un cobro mixto: la parte transferida. El efectivo
-  // es el resto y lo calcula el servidor.
-  const handleCheckout = async (paymentMethod, transferAmount = null) => {
+  // payment es la forma de cobro tal como viaja al servidor: en un mixto
+  // lleva la parte transferida; en divisa, los billetes, la moneda y la tasa.
+  const handleCheckout = async (payment) => {
     if (cart.length === 0 || completing) return
     setCompleting(true)
     closePayment()
     setError('')
-    const payment = paymentMethod === 'mixto'
-      ? { payment_method: 'mixto', transfer_amount: transferAmount }
-      : { payment_method: paymentMethod }
 
     if (!saleIdRef.current) saleIdRef.current = newSaleId()
 
@@ -134,7 +137,7 @@ export default function POS() {
         saleIdRef.current = null   // venta cerrada: la siguiente empieza con id nuevo
         setCart([])
         setShowCart(false)
-        setLastPaymentMethod(paymentMethod)
+        setLastPayment(payment)
         const saved = await res.json()
         setQueuedOffline(!!saved.pending)
         setSuccess(true)
@@ -199,7 +202,9 @@ export default function POS() {
         }`}>
           {queuedOffline ? <CloudOff size={18} /> : <CheckCircle size={18} />}
           {queuedOffline ? 'Venta guardada en este dispositivo · ' : '¡Venta registrada! · '}
-          {paymentLabel({ payment_method: lastPaymentMethod })}
+          {lastPayment.payment_method === 'divisa'
+            ? `${lastPayment.foreign_amount} ${lastPayment.foreign_currency}`
+            : paymentLabel(lastPayment)}
         </div>
       )}
 
@@ -224,25 +229,29 @@ export default function POS() {
           <div className="relative bg-white rounded-3xl p-6 shadow-2xl w-80 mx-4">
             <h3 className="text-lg font-bold text-gray-900 text-center mb-1">Forma de pago</h3>
             <p className="text-3xl font-bold text-center text-[#007AFF]">{fmt(total)}</p>
-            {user?.usd_rate != null && (
-              <p className="text-xs text-gray-400 text-center mt-1 mb-4">
-                1 USD ≈ {fmt(user.usd_rate)}
-              </p>
-            )}
-            {user?.usd_rate == null && <div className="mb-6" />}
-            {mixedOpen ? (
+            <div className="mb-5" />
+            {paymentView === 'mixed' ? (
               <MixedPayment
                 total={total}
                 transferLimit={user?.transfer_limit}
                 fmt={fmt}
                 disabled={completing}
-                onConfirm={({ payment_method, transfer_amount }) => handleCheckout(payment_method, transfer_amount)}
-                onBack={() => setMixedOpen(false)}
+                onConfirm={handleCheckout}
+                onBack={() => setPaymentView('list')}
+              />
+            ) : paymentView === 'foreign' ? (
+              <ForeignPayment
+                total={total}
+                rates={rates}
+                fmt={fmt}
+                disabled={completing}
+                onConfirm={handleCheckout}
+                onBack={() => setPaymentView('list')}
               />
             ) : (<>
             <div className="space-y-3">
               <button
-                onClick={() => handleCheckout('efectivo')}
+                onClick={() => handleCheckout({ payment_method: 'efectivo' })}
                 disabled={completing}
                 className="w-full bg-green-500 text-white py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 active:scale-95 transition-all shadow-md shadow-green-200 disabled:opacity-50"
               >
@@ -251,7 +260,7 @@ export default function POS() {
               </button>
               <div>
                 <button
-                  onClick={() => handleCheckout('transferencia')}
+                  onClick={() => handleCheckout({ payment_method: 'transferencia' })}
                   disabled={completing || transferOverLimit}
                   className="w-full bg-[#007AFF] text-white py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 active:scale-95 transition-all shadow-md shadow-blue-200 disabled:opacity-50 disabled:shadow-none"
                 >
@@ -267,7 +276,7 @@ export default function POS() {
               </div>
               {canSplit && (
                 <button
-                  onClick={() => setMixedOpen(true)}
+                  onClick={() => setPaymentView('mixed')}
                   disabled={completing}
                   className="w-full bg-white text-gray-900 border-2 border-gray-200 py-3.5 rounded-2xl font-bold text-base flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
                 >
@@ -276,6 +285,14 @@ export default function POS() {
                   <Banknote size={18} className="text-green-600" />
                 </button>
               )}
+              <button
+                onClick={() => setPaymentView('foreign')}
+                disabled={completing}
+                className="w-full bg-amber-500 text-white py-3.5 rounded-2xl font-bold text-base flex items-center justify-center gap-2 active:scale-95 transition-all shadow-md shadow-amber-200 disabled:opacity-50"
+              >
+                <DollarSign size={18} />
+                Dólares / Euros
+              </button>
             </div>
             <button
               onClick={closePayment}
@@ -291,25 +308,37 @@ export default function POS() {
       {/* Products panel */}
       <div className="flex-1 flex flex-col p-4 md:p-6 min-w-0">
         <RejectedSalesBanner rejected={rejected} onAcknowledge={acknowledgeRejected} />
-        {/* Barra de referencia: límite de transferencia y tasa del dólar,
-            configurados por el dueño desde la app móvil. Siempre visible para
-            el cajero, no solo dentro del modal de cobro. */}
-        {(user?.transfer_limit != null || user?.usd_rate != null) && (
-          <div className="flex flex-wrap gap-2 mb-4">
-            {user?.transfer_limit != null && (
-              <div className="flex items-center gap-1.5 bg-blue-50 text-[#007AFF] text-xs font-semibold px-3 py-1.5 rounded-full">
-                <Smartphone size={13} />
-                Transferencia hasta {fmt(user.transfer_limit)}
-              </div>
-            )}
-            {user?.usd_rate != null && (
-              <div className="flex items-center gap-1.5 bg-green-50 text-green-700 text-xs font-semibold px-3 py-1.5 rounded-full">
-                <Banknote size={13} />
-                1 USD ≈ {fmt(user.usd_rate)}
-              </div>
-            )}
-          </div>
-        )}
+        {ratesOpen && <DeviceRatesEditor rates={rates} fmt={fmt} onClose={() => setRatesOpen(false)} />}
+        {/* Barra de referencia: el límite de transferencia del dueño y las
+            tasas con que cobra este aparato. Siempre visible para el cajero;
+            tocar una tasa la cambia en este aparato. */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          {user?.transfer_limit != null && (
+            <div className="flex items-center gap-1.5 bg-blue-50 text-[#007AFF] text-xs font-semibold px-3 py-1.5 rounded-full">
+              <Smartphone size={13} />
+              Transferencia hasta {fmt(user.transfer_limit)}
+            </div>
+          )}
+          {['USD', 'EUR'].map((currency) => {
+            const r = rates[currency]
+            const differs = r.source === 'device' && r.shopRate != null && r.rate !== r.shopRate
+            return (
+              <button
+                key={currency}
+                onClick={() => setRatesOpen(true)}
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full transition-colors ${
+                  differs ? 'bg-orange-100 text-orange-700' : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                }`}
+                title="Cambiar la tasa de este aparato"
+              >
+                <DollarSign size={13} />
+                {r.rate == null ? `Poner tasa ${currency}` : `1 ${currency} = ${fmt(r.rate)}`}
+                {differs && <span className="font-normal">(tienda {fmt(r.shopRate)})</span>}
+                <Pencil size={11} className="opacity-60" />
+              </button>
+            )
+          })}
+        </div>
 
         {/* Search */}
         <div className="relative mb-4">

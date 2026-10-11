@@ -110,6 +110,13 @@ export function AuthProvider({ children }) {
     return data.user
   }
 
+  // Los ajustes de la tienda (tasas, techo) cambiaron en el servidor: se
+  // reflejan ya y quedan en el cache para abrir sin internet con ellos.
+  const updateUser = (next) => {
+    setUser(next)
+    if (!isElectron()) cacheUser(next)
+  }
+
   // Quien llama es responsable de comprobar antes que no queden ventas sin
   // subir (ver getLogoutBlockers en Layout.jsx).
   const logout = () => {
@@ -119,7 +126,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   )
