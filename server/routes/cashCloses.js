@@ -6,7 +6,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { paymentSplit } = require('../lib/payment');
+const { paymentSplit, round2 } = require('../lib/payment');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -67,13 +67,26 @@ const getLastCloseForRegister = async (executor, userId, registerId) => {
 
 // Separado por forma de cobro: solo el efectivo tiene que aparecer físicamente
 // en la gaveta; las transferencias se muestran aparte como referencia. Una
-// venta mixta aporta a los dos lados.
+// venta mixta aporta a los dos lados. Los dólares y euros se cuentan cada uno
+// por su lado, en billetes: el vuelto en pesos de una venta en divisa ya está
+// descontado del efectivo.
+const sumOf = (rows, key) => round2(rows.reduce((sum, row) => sum + paymentSplit(row)[key], 0));
 const summarize = (rows) => ({
-  cash: rows.reduce((sum, row) => sum + paymentSplit(row).cash, 0),
-  transfer: rows.reduce((sum, row) => sum + paymentSplit(row).transfer, 0),
+  cash: sumOf(rows, 'cash'),
+  transfer: sumOf(rows, 'transfer'),
+  usd: sumOf(rows, 'usd'),
+  eur: sumOf(rows, 'eur'),
   count: rows.length,
   first_sale_at: rows[0]?.created_at || null,
 });
+
+// Lo contado en divisa es opcional: una caja que nunca cobra en dólares no
+// tiene por qué mandarlo, y entonces se contó cero.
+const countedForeign = (value) => {
+  if (value === undefined || value === null || value === '') return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? round2(n) : NaN;
+};
 
 /**
  * Ventas todavía sin arqueo que le tocan a esta caja.
@@ -186,6 +199,8 @@ router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
             COALESCE(SUM(difference), 0)    AS total_difference,
             COALESCE(MIN(difference), 0)    AS worst_difference,
             SUM(CASE WHEN difference < -0.5 THEN 1 ELSE 0 END) AS times_short,
+            COALESCE(SUM(difference_usd), 0) AS total_difference_usd,
+            COALESCE(SUM(difference_eur), 0) AS total_difference_eur,
             MAX(closed_at)                  AS last_close_at
           FROM cash_closes
           WHERE user_id = ?
@@ -233,6 +248,11 @@ router.post('/', asyncHandler(async (req, res) => {
   const float = Number(opening_float);
   if (!Number.isFinite(float) || float < 0) {
     return res.status(400).json({ error: 'El fondo de caja no es válido' });
+  }
+  const countedUsd = countedForeign(req.body.counted_usd);
+  const countedEur = countedForeign(req.body.counted_eur);
+  if (Number.isNaN(countedUsd) || Number.isNaN(countedEur)) {
+    return res.status(400).json({ error: 'Los dólares o euros contados no son válidos' });
   }
 
   const db = getDb();
@@ -303,13 +323,18 @@ router.post('/', asyncHandler(async (req, res) => {
       sql: `INSERT INTO cash_closes
               (user_id, client_close_id, opened_at, opening_float, expected_cash,
                counted_cash, difference, expected_transfer, sales_count, note,
-               register_id, overlap_sales, account_id, account_email, closed_at)
-            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+               register_id, overlap_sales, account_id, account_email, closed_at,
+               expected_usd, counted_usd, difference_usd,
+               expected_eur, counted_eur, difference_eur)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')),
+                    ?, ?, ?, ?, ?, ?)`,
       args: [
         req.userId, client_close_id, openedAt, float, expectedCash,
         counted, counted - expectedCash,
         summary.transfer, summary.count, note,
         registerId, overlapSales, account.id, account.email, operationDate,
+        summary.usd, countedUsd, round2(countedUsd - summary.usd),
+        summary.eur, countedEur, round2(countedEur - summary.eur),
       ],
     });
     const closeId = Number(inserted.lastInsertRowid);

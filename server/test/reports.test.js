@@ -200,7 +200,7 @@ test('reportes: histórico por día y exportación a Excel', async (t) => {
     assert.equal(res.body[0].id, v.body.id);
   });
 
-  await t.test('el Excel trae las tres hojas con las ventas y cierres del mes', async () => {
+  await t.test('el Excel trae las hojas de ventas, divisa y cierres del mes', async () => {
     const token = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, token, { name: 'Refresco', stock: 20, sale_price: 80, purchase_price: 50 });
 
@@ -236,7 +236,7 @@ test('reportes: histórico por día y exportación a Excel', async (t) => {
     await workbook.xlsx.load(buffer);
 
     const nombres = workbook.worksheets.map((s) => s.name);
-    assert.deepEqual(nombres, ['Resumen por día', 'Ventas', 'Cierres de caja']);
+    assert.deepEqual(nombres, ['Resumen por día', 'Ventas', 'Cobros en divisa', 'Cierres de caja']);
 
     const ventas = workbook.getWorksheet('Ventas');
     // Encabezado + 2 líneas de venta (una de la venta de 2 unidades, otra de la de transferencia).

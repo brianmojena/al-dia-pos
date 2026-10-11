@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
 const { todayBounds, boundsForDate } = require('../lib/businessDay');
-const { PAYMENT_METHODS, paymentSplit, round2 } = require('../lib/payment');
+const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -14,32 +14,32 @@ function getSession() {
 
 function setSession({
   user_id, email, store_name, plan, token,
-  transfer_limit = null, usd_rate = null, role = null,
+  transfer_limit = null, usd_rate = null, eur_rate = null, role = null,
 }) {
   const db = getLocalDb();
   db.prepare(`
-    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, role, updated_at)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, updated_at)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id, email = excluded.email, store_name = excluded.store_name,
       plan = excluded.plan, token = excluded.token,
       transfer_limit = excluded.transfer_limit, usd_rate = excluded.usd_rate,
-      role = excluded.role,
+      eur_rate = excluded.eur_rate, role = excluded.role,
       updated_at = datetime('now')
-  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, role);
+  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role);
 }
 
 /**
- * Actualiza SOLO transfer_limit/usd_rate de la sesión ya guardada, sin tocar
+ * Actualiza SOLO transfer_limit y las tasas de la sesión ya guardada, sin tocar
  * el resto — la usa el sync worker para reflejar en la caja lo que el dueño
  * cambió desde su teléfono, sin tener que volver a loguearse. No crea sesión
  * si no hay una activa: no tendría a quién actualizar.
  */
-function updateSessionSettings({ transfer_limit = null, usd_rate = null }) {
+function updateSessionSettings({ transfer_limit = null, usd_rate = null, eur_rate = null }) {
   const db = getLocalDb();
   db.prepare(`
-    UPDATE session SET transfer_limit = ?, usd_rate = ?, updated_at = datetime('now') WHERE id = 1
-  `).run(transfer_limit, usd_rate);
+    UPDATE session SET transfer_limit = ?, usd_rate = ?, eur_rate = ?, updated_at = datetime('now') WHERE id = 1
+  `).run(transfer_limit, usd_rate, eur_rate);
 }
 
 function clearSession() {
@@ -236,7 +236,7 @@ function deleteProduct(id) {
  * arreglamos en el servidor) y todo ocurre en una sola transacción con el
  * encolado del outbox — o se guarda todo, o no se guarda nada.
  */
-function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount = null }) {
+function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount = null, ...rest }) {
   if (!Array.isArray(items) || items.length === 0) {
     throw Object.assign(new Error('La venta debe tener al menos un producto'), { code: 'EMPTY_SALE' });
   }
@@ -251,10 +251,20 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
     throw Object.assign(new Error('Falta el monto transferido del cobro mixto'), { code: 'BAD_PAYMENT' });
   }
 
+  let foreign;
+  try { foreign = foreignFields({ payment_method, ...rest }); }
+  catch (error) { throw Object.assign(error, { code: 'BAD_PAYMENT' }); }
+
   const db = getLocalDb();
   const clientSaleId = crypto.randomUUID();
   const registerId = getRegisterId();
-  const accountEmail = getSession()?.email ?? null;
+  const session = getSession();
+  const accountEmail = session?.email ?? null;
+  // Sin shop_rate del cliente se compara contra la tasa de la tienda que
+  // tiene guardada esta caja, igual que hace el servidor con la suya.
+  if (foreign.foreign_currency && !('shop_rate' in rest)) {
+    foreign.shop_rate = session?.[foreign.foreign_currency === 'USD' ? 'usd_rate' : 'eur_rate'] ?? null;
+  }
 
   const create = db.transaction(() => {
     let total = 0;
@@ -308,9 +318,11 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
 
     const saleResult = db.prepare(`
       INSERT INTO sales
-        (client_sale_id, origin, register_id, account_email, total, profit, payment_method, transfer_amount)
-      VALUES (?, 'local', ?, ?, ?, ?, ?, ?)
-    `).run(clientSaleId, registerId, accountEmail, total, profit, payment_method, transferAmount);
+        (client_sale_id, origin, register_id, account_email, total, profit, payment_method, transfer_amount,
+         foreign_currency, foreign_amount, exchange_rate, shop_rate)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(clientSaleId, registerId, accountEmail, total, profit, payment_method, transferAmount,
+      foreign.foreign_currency, foreign.foreign_amount, foreign.exchange_rate, foreign.shop_rate);
     const saleId = saleResult.lastInsertRowid;
 
     for (const line of lines) {
@@ -328,6 +340,7 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
         client_sale_id: clientSaleId,
         payment_method,
         transfer_amount: transferAmount,
+        ...foreign,
         items: lines.map(l => ({
           local_product_id: l.product_id,
           quantity: l.quantity,
@@ -383,7 +396,15 @@ function getDashboard() {
     SELECT * FROM sales WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC LIMIT 5
   `).all(start, end);
 
-  return { today: todayStats, lowStock, recentSales };
+  // Mismo aviso que el servidor: cobros en divisa de hoy a una tasa que no
+  // era la de la tienda.
+  const offRate = db.prepare(`
+    SELECT COUNT(*) AS n FROM sales
+    WHERE created_at >= ? AND created_at < ? AND payment_method = 'divisa'
+      AND shop_rate IS NOT NULL AND ABS(exchange_rate - shop_rate) > 0.005
+  `).get(start, end);
+
+  return { today: todayStats, lowStock, recentSales, audit: { offRateSales: offRate.n } };
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +426,8 @@ const getPeriodStart = (db) => {
 // período más tarde; nunca dos veces.
 const periodSales = (db, periodStart) =>
   db.prepare(
-    `SELECT client_sale_id, total, payment_method, transfer_amount, created_at
+    `SELECT client_sale_id, total, payment_method, transfer_amount,
+            foreign_currency, foreign_amount, exchange_rate, created_at
      FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
@@ -439,7 +461,15 @@ function getCurrentCashPeriod() {
  * venta del otro lado. Con los ids, el servidor suma exactamente las mismas
  * ventas y el resultado no depende de cuánto tardó la sincronización.
  */
-function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) {
+// Lo contado en divisa es opcional, igual que en el servidor: no mandarlo es
+// haber contado cero.
+const countedForeign = (value) => {
+  if (value === undefined || value === null || value === '') return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? round2(n) : NaN;
+};
+
+function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, counted_usd, counted_eur }) {
   const counted = Number(counted_cash);
   if (!Number.isFinite(counted) || counted < 0) {
     throw Object.assign(new Error('El efectivo contado no es válido'), { code: 'BAD_COUNT' });
@@ -447,6 +477,11 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
   const float = Number(opening_float);
   if (!Number.isFinite(float) || float < 0) {
     throw Object.assign(new Error('El fondo de caja no es válido'), { code: 'BAD_FLOAT' });
+  }
+  const countedUsd = countedForeign(counted_usd);
+  const countedEur = countedForeign(counted_eur);
+  if (Number.isNaN(countedUsd) || Number.isNaN(countedEur)) {
+    throw Object.assign(new Error('Los dólares o euros contados no son válidos'), { code: 'BAD_COUNT' });
   }
 
   const db = getLocalDb();
@@ -459,8 +494,12 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
     const sales = periodSales(db, periodStart);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
-    const cash = sales.reduce((sum, s) => sum + paymentSplit(s).cash, 0);
-    const transfer = sales.reduce((sum, s) => sum + paymentSplit(s).transfer, 0);
+    // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
+    const sumOf = (key) => round2(sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0));
+    const cash = sumOf('cash');
+    const transfer = sumOf('transfer');
+    const usd = sumOf('usd');
+    const eur = sumOf('eur');
 
     const expectedCash = float + cash;
     const openedAt = periodStart === BEGINNING_OF_TIME
@@ -470,11 +509,13 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
     const result = db.prepare(`
       INSERT INTO cash_closes
         (client_close_id, origin, register_id, opened_at, opening_float, expected_cash, counted_cash,
-         difference, expected_transfer, sales_count, note, account_email)
-      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         difference, expected_transfer, sales_count, note, account_email,
+         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       clientCloseId, registerId, openedAt, float, expectedCash, counted,
-      counted - expectedCash, transfer, sales.length, note, email
+      counted - expectedCash, transfer, sales.length, note, email,
+      usd, countedUsd, round2(countedUsd - usd), eur, countedEur, round2(countedEur - eur)
     );
     const closeId = result.lastInsertRowid;
 
@@ -494,6 +535,8 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null }) 
         client_close_id: clientCloseId,
         opening_float: float,
         counted_cash: counted,
+        counted_usd: countedUsd,
+        counted_eur: countedEur,
         note,
         closed_at: db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at,
         client_sale_ids: sales.map(s => s.client_sale_id),
@@ -519,6 +562,8 @@ const cashCloseSummary = () =>
            COALESCE(SUM(difference), 0) AS total_difference,
            COALESCE(MIN(difference), 0) AS worst_difference,
            SUM(CASE WHEN difference < -0.5 THEN 1 ELSE 0 END) AS times_short,
+           COALESCE(SUM(difference_usd), 0) AS total_difference_usd,
+           COALESCE(SUM(difference_eur), 0) AS total_difference_eur,
            MAX(closed_at) AS last_close_at
     FROM cash_closes
     GROUP BY account_email
@@ -676,8 +721,9 @@ function applyServerDelta(page) {
     const insertSale = db.prepare(`
       INSERT INTO sales
         (server_id, client_sale_id, origin, register_id, account_email, total, profit,
-         payment_method, transfer_amount, created_at)
-      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?)
+         payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate,
+         created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertSaleItem = db.prepare(`
       INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost)
@@ -693,7 +739,8 @@ function applyServerDelta(page) {
       const result = insertSale.run(
         Number(sale.id), clientSaleId, sale.register_id ?? null, sale.account_email ?? null,
         Number(sale.total) || 0, Number(sale.profit) || 0, sale.payment_method || 'efectivo',
-        sale.transfer_amount ?? null, sale.created_at,
+        sale.transfer_amount ?? null, sale.foreign_currency ?? null, sale.foreign_amount ?? null,
+        sale.exchange_rate ?? null, sale.shop_rate ?? null, sale.created_at,
       );
       const saleId = Number(result.lastInsertRowid);
       for (const item of sale.items || []) {
@@ -709,8 +756,9 @@ function applyServerDelta(page) {
       INSERT INTO cash_closes
         (server_id, client_close_id, origin, register_id, opened_at, closed_at,
          opening_float, expected_cash, counted_cash, difference, expected_transfer,
-         sales_count, note, account_email)
-      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         sales_count, note, account_email,
+         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const close of page.cash_closes) {
       const clientCloseId = close.client_close_id || `srv-${close.id}`;
@@ -725,6 +773,8 @@ function applyServerDelta(page) {
         Number(close.counted_cash) || 0, Number(close.difference) || 0,
         Number(close.expected_transfer) || 0, Number(close.sales_count) || 0,
         close.note ?? null, close.account_email ?? null,
+        Number(close.expected_usd) || 0, Number(close.counted_usd) || 0, Number(close.difference_usd) || 0,
+        Number(close.expected_eur) || 0, Number(close.counted_eur) || 0, Number(close.difference_eur) || 0,
       );
       stats.closes++;
     }

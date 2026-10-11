@@ -28,6 +28,7 @@ function initLocalDb(dbPath) {
       token TEXT,
       transfer_limit REAL,
       usd_rate REAL,
+      eur_rate REAL,
       role TEXT,
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -170,6 +171,20 @@ function initLocalDb(dbPath) {
     "ALTER TABLE cash_closes ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
     'ALTER TABLE cash_closes ADD COLUMN register_id TEXT',
     "ALTER TABLE inventory_counts ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
+    // Cobro en divisa: billetes, moneda y la tasa con que se tomaron, más la
+    // tasa de la tienda que conocía la caja — ver src/lib/payment.js.
+    'ALTER TABLE session ADD COLUMN eur_rate REAL',
+    'ALTER TABLE sales ADD COLUMN foreign_currency TEXT',
+    'ALTER TABLE sales ADD COLUMN foreign_amount REAL',
+    'ALTER TABLE sales ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE sales ADD COLUMN shop_rate REAL',
+    // El arqueo cuenta dólares y euros cada uno por su lado.
+    'ALTER TABLE cash_closes ADD COLUMN expected_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN counted_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN difference_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN expected_eur REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN counted_eur REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN difference_eur REAL NOT NULL DEFAULT 0',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }

@@ -34,7 +34,7 @@ async function routeRequest(method, fullPath, body) {
             user_id: res.data.user.id, email: res.data.user.email,
             store_name: res.data.user.store_name, plan: res.data.user.plan, token: res.data.token,
             transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
-            role: res.data.user.role,
+            eur_rate: res.data.user.eur_rate ?? null, role: res.data.user.role,
           });
           await auth.pullCatalog(res.data.token).catch(() => {});
         }
@@ -48,6 +48,7 @@ async function routeRequest(method, fullPath, body) {
             id: session.user_id, email: session.email,
             store_name: session.store_name, plan: session.plan,
             transfer_limit: session.transfer_limit, usd_rate: session.usd_rate,
+            eur_rate: session.eur_rate ?? null,
             // Sin rol guardado son sesiones anteriores a que existieran los
             // cajeros: eran dueños, así que se interpretan como tales.
             role: session.role || 'dueño',
@@ -59,6 +60,31 @@ async function routeRequest(method, fullPath, body) {
     // Todo lo demás requiere sesión local (igual que requireAuth en el servidor).
     const session = auth.getLocalSession();
     if (!session) return fail(401, 'No autenticado');
+
+    // Las tasas y el techo son de la tienda entera: cambiarlos necesita red,
+    // como el alta de cuenta. Si el servidor acepta, la caja se queda con los
+    // valores nuevos sin esperar a la próxima pasada del sync.
+    if (parts[0] === 'api' && parts[1] === 'auth' && parts[2] === 'settings' && method === 'PUT') {
+      if (session.role === 'cajero') return fail(403, 'Solo el dueño puede cambiar esto');
+      const { apiRequest } = require('./sync/apiClient');
+      let res;
+      try {
+        res = await apiRequest('PUT', '/api/auth/settings', { token: session.token, body });
+      } catch (_) {
+        return fail(503, 'Para cambiar la tasa de la tienda hace falta internet');
+      }
+      // Un 401 de la nube no puede volver como 401: la ventana lo tomaría como
+      // sesión local perdida y sacaría al dueño de una caja que sí funciona.
+      if (res.status === 401) return fail(403, 'Tu sesión con la nube venció. Vuelve a iniciar sesión para cambiar la tasa.');
+      if (res.ok) {
+        queries.updateSessionSettings({
+          transfer_limit: res.data.user.transfer_limit,
+          usd_rate: res.data.user.usd_rate,
+          eur_rate: res.data.user.eur_rate ?? null,
+        });
+      }
+      return { ok: res.ok, status: res.status, data: res.data };
+    }
 
     // --- products ---
     // Mismas reglas que el servidor: un empleado puede dar de ALTA productos

@@ -39,6 +39,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const db = getDb();
   const sales = await db.execute({
     sql: `SELECT id, user_id, client_sale_id, total, profit, payment_method, transfer_amount,
+            foreign_currency, foreign_amount, exchange_rate, shop_rate,
             created_at, register_id, account_id, account_email
           FROM sales WHERE user_id = ? AND id > ?
             ${since ? 'AND created_at >= ?' : ''}

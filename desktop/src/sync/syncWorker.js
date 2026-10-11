@@ -105,6 +105,14 @@ function buildRequest(db, row) {
         body: {
           items, payment_method: payload.payment_method, client_sale_id: payload.client_sale_id,
           transfer_amount: payload.transfer_amount ?? null,
+          // Solo un cobro en divisa los trae; las ventas encoladas antes de
+          // esta versión no tienen ninguno y se suben como siempre.
+          ...(payload.payment_method === 'divisa' ? {
+            foreign_currency: payload.foreign_currency,
+            foreign_amount: payload.foreign_amount,
+            exchange_rate: payload.exchange_rate,
+            shop_rate: payload.shop_rate ?? null,
+          } : {}),
           register_id: registerId,
         },
         onSuccess: (data) => {
@@ -138,6 +146,8 @@ function buildRequest(db, row) {
           client_close_id: payload.client_close_id,
           opening_float: payload.opening_float,
           counted_cash: payload.counted_cash,
+          counted_usd: payload.counted_usd ?? 0,
+          counted_eur: payload.counted_eur ?? 0,
           note: payload.note,
           client_sale_ids: ids,
           register_id: registerId,
@@ -344,7 +354,11 @@ async function syncOnce() {
   try {
     const me = await apiRequest('GET', '/api/auth/me', { token: session.token });
     if (me.ok) {
-      updateSessionSettings({ transfer_limit: me.data.user.transfer_limit, usd_rate: me.data.user.usd_rate });
+      updateSessionSettings({
+        transfer_limit: me.data.user.transfer_limit,
+        usd_rate: me.data.user.usd_rate,
+        eur_rate: me.data.user.eur_rate ?? null,
+      });
       summary.settingsRefreshed = true;
     }
   } catch (_) { /* sin red — se reintenta en la próxima pasada */ }

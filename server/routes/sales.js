@@ -7,7 +7,7 @@ const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { PAYMENT_METHODS, paymentSplit, round2 } = require('../lib/payment');
+const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -104,13 +104,18 @@ router.post('/rejected', asyncHandler(async (req, res) => {
   }
   const total = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
   const account = await describeAccount(db, req);
+  // Igual que el monto transferido: el dinero ya se cobró, así que un aviso
+  // con la divisa mal formada se guarda sin ella antes que rechazarlo.
+  let foreign = foreignFields({});
+  try { foreign = foreignFields(req.body); } catch (_) { /* se guarda sin divisa */ }
 
   try {
     const inserted = await db.execute({
       sql: `INSERT INTO rejected_sales
               (user_id, client_sale_id, total, payment_method, transfer_amount,
-               items, error, sold_at, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               items, error, sold_at, account_id, account_email,
+               foreign_currency, foreign_amount, exchange_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         req.userId, client_sale_id, total,
         PAYMENT_METHODS.includes(payment_method) ? payment_method : 'efectivo',
@@ -121,6 +126,7 @@ router.post('/rejected', asyncHandler(async (req, res) => {
         typeof error === 'string' ? error.slice(0, 300) : null,
         typeof sold_at === 'string' ? sold_at.slice(0, 40) : null,
         account.id, account.email,
+        foreign.foreign_currency, foreign.foreign_amount, foreign.exchange_rate,
       ],
     });
     const row = await db.execute({
@@ -190,8 +196,8 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'La venta debe tener al menos un producto' });
   }
 
-  // La forma de cobro solo puede ser efectivo, transferencia o mixto: el techo
-  // del dueño y el desglose de la caja dependen de este valor.
+  // La forma de cobro solo puede ser efectivo, transferencia, mixto o divisa:
+  // el techo del dueño y el desglose de la caja dependen de este valor.
   if (!PAYMENT_METHODS.includes(payment_method)) {
     return res.status(400).json({ error: 'Forma de pago inválida' });
   }
@@ -204,6 +210,13 @@ router.post('/', asyncHandler(async (req, res) => {
       && (transfer_amount === null || !Number.isFinite(Number(transfer_amount)) || transferAmount <= 0)) {
     return res.status(400).json({ error: 'Falta el monto transferido del cobro mixto' });
   }
+
+  // Cobro en divisa: cuántos billetes, de qué moneda y a qué tasa. Que los
+  // billetes alcancen o no da igual: lo que falte lo pone el cliente en pesos
+  // y lo que sobre sale de vuelto (ver server/lib/payment.js).
+  let foreign;
+  try { foreign = foreignFields(req.body); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
 
   const db = getDb();
 
@@ -221,10 +234,18 @@ router.post('/', asyncHandler(async (req, res) => {
   // valida aquí, no solo en la pantalla del POS: la cola offline y la app de
   // escritorio también cobran por esta vía.
   const shopResult = await db.execute({
-    sql: 'SELECT transfer_limit FROM users WHERE id = ?',
+    sql: 'SELECT transfer_limit, usd_rate, eur_rate FROM users WHERE id = ?',
     args: [req.userId],
   });
   const transferLimit = shopResult.rows[0]?.transfer_limit ?? null;
+
+  // La tasa de la tienda la manda el aparato: es la que conocía al cobrar,
+  // que puede ser de ayer si cobró sin internet. Solo un cliente que no sabe
+  // de tasas (no la manda) se compara contra la tasa de hoy.
+  if (foreign.foreign_currency && !('shop_rate' in req.body)) {
+    const current = shopResult.rows[0]?.[foreign.foreign_currency === 'USD' ? 'usd_rate' : 'eur_rate'];
+    foreign.shop_rate = current ?? null;
+  }
 
   // Fuera de la transacción a propósito: es una lectura por clave primaria y
   // la cuenta que cobra no cambia a mitad del cobro.
@@ -309,9 +330,11 @@ router.post('/', asyncHandler(async (req, res) => {
     const saleResult = await tx.execute({
       sql: `INSERT INTO sales
               (user_id, client_sale_id, total, profit, payment_method, transfer_amount,
+               foreign_currency, foreign_amount, exchange_rate, shop_rate,
                register_id, account_id, account_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [req.userId, client_sale_id, total, profit, payment_method, transferAmount,
+             foreign.foreign_currency, foreign.foreign_amount, foreign.exchange_rate, foreign.shop_rate,
              registerId, account.id, account.email, operationDate],
     });
     const saleId = Number(saleResult.lastInsertRowid);

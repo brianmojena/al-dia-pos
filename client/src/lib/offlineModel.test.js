@@ -16,7 +16,7 @@ test('venta local persiste al reabrir y aparece en stock, historial, detalle e I
   assert.equal(readLocal(data, '/api/sales?date=2026-09-15', '1:1', user)[0].id, sale.result.id)
   assert.equal(readLocal(data, `/api/sales/${sale.result.id}`, '1:1', user).items[0].product_name, 'Pan')
   const report = monthlyReport(data, '2026-09')
-  assert.deepEqual(report.totals, { sales_count: 1, total: 20, profit: 8, cash_total: 20, transfer_total: 0 })
+  assert.deepEqual(report.totals, { sales_count: 1, off_rate_count: 0, total: 20, profit: 8, cash_total: 20, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0 })
   assert.equal(state.base.products[0].stock, 20, 'la base no se modifica al proyectar')
 })
 test('producto nuevo → editar → venta → conteo → cierre conserva dependencias al obtener IDs de nube', () => {
@@ -90,4 +90,31 @@ test('exportación local contiene líneas y escapa nombres que Excel interpretar
   assert.ok(csv.includes("'=1+2;"))
   assert.ok(csv.includes('""Pan""'))
   assert.ok(csv.includes('2026-09-15'))
+})
+test('cobro en divisa sin internet: vuelto en pesos, arqueo por moneda y aviso de tasa', () => {
+  const state = fixture()
+  state.base.products[0] = { id: 10, name: 'Aceite', purchase_price: 5000, sale_price: 6000, stock: 5 }
+  const divisa = (extra) => add(state, 'POST', '/api/sales', { client_sale_id: `usd-${++sequence}`, payment_method: 'divisa', foreign_currency: 'USD', foreign_amount: 20, exchange_rate: 350, shop_rate: 360, items: [{ product_id: 10, unit_price: 6000, quantity: 1 }], ...extra })
+  const sale = divisa()
+  assert.equal(sale.body.exchange_rate, 350)
+  assert.equal(sale.body.shop_rate, 360)
+  assert.throws(() => divisa({ foreign_currency: 'CAD' }), /Moneda/)
+  assert.throws(() => divisa({ foreign_amount: 0 }), /dólares o euros/)
+  assert.throws(() => divisa({ exchange_rate: null }), /tasa/)
+  // El techo de transferencia (200) no aplica a la divisa.
+  assert.equal(state.outbox.length, 1)
+
+  const data = project(state)
+  const { totals } = monthlyReport(data, '2026-09')
+  assert.equal(totals.cash_total, -1000)
+  assert.equal(totals.foreign_total, 7000)
+  assert.equal(totals.usd_total, 20)
+  assert.equal(totals.off_rate_count, 1)
+
+  const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 1000, opening_float: 2000, counted_usd: 15 })
+  assert.equal(close.result.expected_cash, 1000)
+  assert.equal(close.result.difference, 0)
+  assert.equal(close.result.expected_usd, 20)
+  assert.equal(close.result.difference_usd, -5)
+  assert.ok(monthCsv(project(state).sales, '2026-09').includes('20 USD a 350'))
 })

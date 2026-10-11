@@ -238,6 +238,27 @@ async function initDb() {
     // email congelado y sin clave foránea, para que sobreviva a borrar la cuenta.
     'ALTER TABLE products ADD COLUMN created_by_account_id INTEGER',
     'ALTER TABLE products ADD COLUMN created_by_email TEXT',
+    // Cobro en divisa (ver server/lib/payment.js). La tasa del euro de la
+    // tienda acompaña a la del dólar que ya existía.
+    'ALTER TABLE users ADD COLUMN eur_rate REAL',
+    // En la venta queda congelado a cuánto se tomó cada billete: la tasa de
+    // la tienda cambia casi a diario y el dueño tiene que poder ver después
+    // la que se usó ese día, y si era la suya.
+    'ALTER TABLE sales ADD COLUMN foreign_currency TEXT',
+    'ALTER TABLE sales ADD COLUMN foreign_amount REAL',
+    'ALTER TABLE sales ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE sales ADD COLUMN shop_rate REAL',
+    'ALTER TABLE rejected_sales ADD COLUMN foreign_currency TEXT',
+    'ALTER TABLE rejected_sales ADD COLUMN foreign_amount REAL',
+    'ALTER TABLE rejected_sales ADD COLUMN exchange_rate REAL',
+    // El arqueo cuenta cada moneda por separado: son billetes distintos y una
+    // tasa que cambia a mitad del día no puede descuadrar los pesos.
+    'ALTER TABLE cash_closes ADD COLUMN expected_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN counted_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN difference_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN expected_eur REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN counted_eur REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN difference_eur REAL NOT NULL DEFAULT 0',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
