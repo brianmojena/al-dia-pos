@@ -115,6 +115,29 @@ test('importación masiva de productos', async (t) => {
     assert.equal(Number(arrozA.sale_price), 130, 'el arroz de A sigue igual');
   });
 
+  await t.test('stock_mode "sumar" suma el stock del archivo al que ya había', async () => {
+    const token = await registerUser(ctx.api);
+    await createProduct(ctx.api, token, { name: 'Harina', stock: 50, sale_price: 100, purchase_price: 60 });
+
+    const res = await ctx.api('POST', '/api/products/import', {
+      token,
+      body: { stock_mode: 'sumar', items: [
+        { name: 'Harina', sale_price: 110, purchase_price: null, stock: 20 },
+        { name: 'Sin stock', sale_price: 10, purchase_price: null, stock: null },
+      ] },
+    });
+    assert.deepEqual(res.body, { created: 1, updated: 1, total: 2 });
+    const harina = (await catalogo(ctx.api, token)).find((p) => p.name === 'Harina');
+    assert.equal(Number(harina.stock), 70);
+    assert.equal(Number(harina.sale_price), 110);
+
+    await ctx.api('POST', '/api/products/import', {
+      token, body: { stock_mode: 'sumar', items: [{ name: 'Harina', sale_price: 110, stock: null }] },
+    });
+    const igual = (await catalogo(ctx.api, token)).find((p) => p.name === 'Harina');
+    assert.equal(Number(igual.stock), 70, 'stock vacío no cambia nada al sumar');
+  });
+
   await t.test('aguanta una lista grande de una sola vez', async () => {
     const token = await registerUser(ctx.api);
     const items = Array.from({ length: 500 }, (_, i) => ({

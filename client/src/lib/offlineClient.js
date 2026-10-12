@@ -77,7 +77,7 @@ export async function offlineRequest(path, options = {}) {
         const norm = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
         for (const item of body.items) {
           const existing = data.products.find((p) => norm(p.name) === norm(item.name))
-          const clean = { ...item, purchase_price: item.purchase_price ?? existing?.purchase_price ?? 0, stock: item.stock ?? existing?.stock ?? 0 }
+          const clean = { ...item, purchase_price: item.purchase_price ?? existing?.purchase_price ?? 0, stock: body.stock_mode === 'sumar' ? (existing?.stock ?? 0) + (item.stock ?? 0) : item.stock ?? existing?.stock ?? 0 }
           const op = prepareOperation(data, existing ? 'PUT' : 'POST', existing ? `/api/products/${existing.id}` : '/api/products', clean, ctx)
           current.outbox.push(op); applyOperation(data, op)
           result[existing ? 'updated' : 'created']++

@@ -25,6 +25,7 @@ export default function ImportarProductos() {
   const [importing, setImporting] = useState(false)
   const [serverErr, setServerErr] = useState(null)
   const [done,      setDone]      = useState(null)
+  const [stockMode, setStockMode] = useState('sumar')
 
   useEffect(() => {
     apiFetch('/api/products').then(r => r.json()).then(d => setProducts(Array.isArray(d) ? d : []))
@@ -81,7 +82,7 @@ export default function ImportarProductos() {
     try {
       const res = await apiFetch('/api/products/import', {
         method: 'POST',
-        body: JSON.stringify({ items: toPayload(rows) }),
+        body: JSON.stringify({ items: toPayload(rows), stock_mode: stockMode }),
       })
       const data = await res.json()
       if (!res.ok) setServerErr(data)
@@ -195,10 +196,25 @@ export default function ImportarProductos() {
           </div>
 
           {replacesStock && (
-            <p className="text-xs text-orange-700 bg-orange-50 rounded-xl px-4 py-3 mb-4">
-              Hay productos que ya existían: su precio y su stock pasan a ser los del archivo.
-              Las celdas de costo o stock que dejes vacías no cambian lo que ya había.
-            </p>
+            <div className="bg-orange-50 rounded-xl px-4 py-3 mb-4">
+              <p className="text-xs text-orange-700 mb-2">
+                Hay productos que ya existían. Su precio pasa a ser el del archivo. ¿Qué hacemos con el stock?
+                Las celdas de costo o stock que dejes vacías no cambian lo que ya había.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[['sumar', 'Sumar al que hay', '50 + 20 = 70'], ['reemplazar', 'Reemplazar', '50 → 20']].map(([v, t, ex]) => (
+                  <button
+                    key={v}
+                    onClick={() => setStockMode(v)}
+                    className={`rounded-xl px-3 py-2 text-left border text-sm ${
+                      stockMode === v ? 'bg-white border-[#007AFF] text-[#007AFF] font-semibold' : 'bg-orange-50 border-orange-200 text-gray-600'
+                    }`}
+                  >
+                    {t}<span className="block text-[11px] font-normal opacity-70">{ex}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           {invalid.length > 0 && (

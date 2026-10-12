@@ -111,6 +111,7 @@ const optionalNumber = (value) => {
 
 router.post('/import', requireOwner, asyncHandler(async (req, res) => {
   const { items } = req.body;
+  const addStock = req.body.stock_mode === 'sumar';
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'No hay productos para importar' });
   }
@@ -171,7 +172,7 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
         sql: `UPDATE products
               SET name = ?, sale_price = ?,
                   purchase_price = COALESCE(?, purchase_price),
-                  stock = COALESCE(?, stock)
+                  stock = ${addStock ? 'stock + COALESCE(?, 0)' : 'COALESCE(?, stock)'}
               WHERE id = ? AND user_id = ?`,
         args: [p.name, p.sale, p.purchase, p.stock, id, req.userId],
       };
