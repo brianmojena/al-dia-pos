@@ -22,6 +22,7 @@ app.use('/api/sales',     requireAuth, salesRouter);
 // El dashboard dice cuánto se vendió hoy — justo lo que un cajero no puede
 // saber antes de declarar el efectivo contado.
 app.use('/api/dashboard', requireAuth, requireOwner, dashboardRouter);
+app.use('/api/push', requireAuth, requireOwner, require('./routes/push'));
 app.use('/api/cash-closes', requireAuth, cashClosesRouter);
 app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 // Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner

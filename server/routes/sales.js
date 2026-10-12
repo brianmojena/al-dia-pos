@@ -7,6 +7,7 @@ const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
+const { notifySale } = require('../lib/push');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 
 const isUniqueViolation = (err) => {
@@ -349,6 +350,10 @@ router.post('/', asyncHandler(async (req, res) => {
     await tx.commit();
 
     const finalResult = await db.execute({ sql: 'SELECT * FROM sales WHERE id = ?', args: [saleId] });
+    // Aviso al teléfono del dueño. Se espera (con tope) antes de responder: en
+    // Vercel la función se congela al enviar la respuesta y un envío "en
+    // segundo plano" se perdería. Nunca hace fallar el cobro.
+    await notifySale(db, req.userId, finalResult.rows[0]);
     return res.status(201).json(finalResult.rows[0]);
   } catch (err) {
     await tx.rollback().catch(() => { /* la transacción ya estaba cerrada */ });

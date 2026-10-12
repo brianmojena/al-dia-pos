@@ -181,6 +181,18 @@ async function initDb() {
       PRIMARY KEY (user_id, account_id, operation_id)
     );
 
+    -- Teléfonos del dueño que reciben avisos push de cada venta. El token es
+    -- único: si el mismo teléfono inicia sesión con otra cuenta, el registro
+    -- cambia de dueño en vez de duplicarse.
+    CREATE TABLE IF NOT EXISTS push_devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      account_id INTEGER NOT NULL,
+      platform TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
