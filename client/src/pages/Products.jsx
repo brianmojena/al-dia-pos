@@ -8,7 +8,7 @@ import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix } from '../lib/units'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '' }
+const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', add_stock: '' }
 
 export default function Products() {
   const { user } = useAuth()
@@ -56,22 +56,26 @@ export default function Products() {
   const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
-    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '' })
+    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', add_stock: '' })
     setFormError('')
     setShowForm(true)
   }
   const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY); setFormError('') }
 
+  const addPreview = parseFloat(String(form.add_stock ?? '').replace(',', '.')) || 0
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
     setFormError('')
-    const body = editing && !isOwner ? { sale_price: parseFloat(form.sale_price) } : {
+    const addStock = form.add_stock === '' || form.add_stock == null ? 0 : parseFloat(String(form.add_stock).replace(',', '.'))
+    const body = editing && !isOwner ? { sale_price: parseFloat(form.sale_price), ...(addStock > 0 && { add_stock: addStock }) } : {
       name: form.name,
       purchase_price: parseFloat(form.purchase_price) || 0,
       sale_price: parseFloat(form.sale_price),
       stock: (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock)) || 0,
       unit: form.unit || null,
+      ...(editing && addStock > 0 && { add_stock: addStock }),
     }
     try {
       const res = await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
@@ -192,7 +196,7 @@ export default function Products() {
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
             <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-900">
-                {editing ? (isOwner ? 'Editar producto' : 'Cambiar precio de venta') : 'Nuevo producto'}
+                {editing ? (isOwner ? 'Editar producto' : 'Editar precio y stock') : 'Nuevo producto'}
               </h3>
               <button onClick={closeForm} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
                 <X size={20} className="text-gray-500" />
@@ -266,6 +270,19 @@ export default function Products() {
                 </label>
                 <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
               </div>
+              {editing && (
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                    Añadir al stock{form.unit ? ` (${form.unit})` : ''}
+                  </label>
+                  <input type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="Cantidad que llegó" {...field('add_stock')} />
+                  {addPreview > 0 && (
+                    <p className="text-xs text-gray-400 mt-1.5">
+                      Quedará en {Math.round((Number(form.stock || 0) + addPreview) * 1000) / 1000}{form.unit ? ` ${form.unit}` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {formError && (
                 <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium">
@@ -335,8 +352,8 @@ export default function Products() {
                       <div className="flex items-center justify-end gap-1">
                         <button
                           onClick={() => openEdit(p)}
-                          title={isOwner ? 'Editar producto' : 'Cambiar precio de venta'}
-                          aria-label={isOwner ? 'Editar producto' : 'Cambiar precio de venta'}
+                          title={isOwner ? 'Editar producto' : 'Editar precio y stock'}
+                          aria-label={isOwner ? 'Editar producto' : 'Editar precio y stock'}
                           className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700 transition-colors"
                         >
                           <Pencil size={15} />

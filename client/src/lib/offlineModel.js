@@ -110,7 +110,7 @@ export function prepareOperation(data, method, path, body, ctx) {
   const meta = { account_email: ctx.user.email, account_id: Number(ctx.account.split(':')[1]) }
   const op = { id: ctx.newId(), method, path, body: structuredClone(body), queued_at: now, result: {} }
   if (path === '/api/products' || /^\/api\/products\/-?\d+$/.test(path)) {
-    assert(owner || method === 'POST' || (method === 'PUT' && Object.keys(body).every((key) => key === 'sale_price')), 'Solo el dueño puede cambiar otros datos o borrar productos')
+    assert(owner || method === 'POST' || (method === 'PUT' && Object.keys(body).every((key) => key === 'sale_price' || key === 'add_stock')), 'Solo el dueño puede cambiar otros datos o borrar productos')
     if (method === 'PUT' && 'sale_price' in body) assert(body.sale_price != null && body.sale_price !== '' && number(body.sale_price), 'El precio de venta no es válido')
     op.kind = 'product'
     if (method === 'DELETE') {
@@ -121,7 +121,12 @@ export function prepareOperation(data, method, path, body, ctx) {
       return op
     }
     const previous = method === 'PUT' ? productById(data, path.split('/').pop()) : null
-    const p = { ...(previous || {}), ...body }
+    const { add_stock: addStock, ...rest } = body
+    const p = { ...(previous || {}), ...rest }
+    if (previous && addStock != null && addStock !== '') {
+      assert(validQuantity(addStock, previous.unit || null), 'La cantidad a añadir no es válida')
+      p.stock = Math.round((Number(previous.stock) + Number(addStock)) * 1000) / 1000
+    }
     assert(typeof p.name === 'string' && p.name.trim(), 'Falta el nombre del producto')
     assert(number(p.sale_price) && number(p.purchase_price ?? 0), 'Los precios deben ser números mayores o iguales a 0')
     assert(isValidUnit(p.unit), 'La unidad de medida no es válida (kg, g o lb)')

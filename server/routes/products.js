@@ -196,8 +196,8 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.put('/:id', asyncHandler(async (req, res) => {
-  if (req.role !== 'dueño' && Object.keys(req.body).some((key) => key !== 'sale_price')) {
-    return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta' });
+  if (req.role !== 'dueño' && Object.keys(req.body).some((key) => key !== 'sale_price' && key !== 'add_stock')) {
+    return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta y añadir stock' });
   }
   if ('sale_price' in req.body && (req.body.sale_price === null || req.body.sale_price === ''
       || !Number.isFinite(Number(req.body.sale_price)) || Number(req.body.sale_price) < 0)) {
@@ -211,7 +211,8 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const existing = existingResult.rows[0];
   if (!existing) return res.status(404).json({ error: 'Producto no encontrado' });
 
-  const { name, purchase_price, sale_price, stock } = req.body;
+  const { name, purchase_price, sale_price } = req.body;
+  let { stock } = req.body;
   const parsedUnit = parseUnit(req.body.unit);
   if (parsedUnit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
   const unit = parsedUnit === undefined ? (existing.unit ?? null) : parsedUnit;
@@ -221,6 +222,19 @@ router.put('/:id', asyncHandler(async (req, res) => {
         ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)'
         : 'El stock debe ser un número entero mayor o igual a 0',
     });
+  }
+  // Mercancía recibida: se suma al stock actual. Va como cantidad (no como
+  // total) para que dos personas añadiendo a la vez no se pisen.
+  const addStock = req.body.add_stock;
+  if (addStock !== undefined && addStock !== null && addStock !== '') {
+    if (!validQuantity(addStock, unit)) {
+      return res.status(400).json({
+        error: unit
+          ? 'La cantidad a añadir debe ser un número mayor o igual a 0 (hasta 3 decimales)'
+          : 'La cantidad a añadir debe ser un número entero mayor o igual a 0',
+      });
+    }
+    stock = Math.round((Number(existing.stock) + Number(addStock)) * 1000) / 1000;
   }
   // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
   if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {

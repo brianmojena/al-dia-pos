@@ -59,6 +59,12 @@ test('roles: dueño y cajero', async (t) => {
     for (const body of [{ name: 'Otro' }, { stock: 100 }, { purchase_price: 0 }, { sale_price: 2, stock: 100 }]) {
       assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body })).status, 403);
     }
+    const suma = await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { add_stock: 5 } });
+    assert.equal(suma.status, 200);
+    assert.equal(Number(suma.body.stock), 15, 'la cantidad se suma al stock actual');
+    for (const add_stock of [-1, 1.5, 'abc']) {
+      assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { add_stock } })).status, 400);
+    }
     for (const sale_price of [-1, '', null, 'abc']) {
       assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { sale_price } })).status, 400);
     }
