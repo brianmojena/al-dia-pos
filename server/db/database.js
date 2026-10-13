@@ -152,6 +152,22 @@ async function initDb() {
       FOREIGN KEY (count_id) REFERENCES inventory_counts(id)
     );
 
+    -- Cada vez que alguien añade mercancía recibida a un producto. Guarda el
+    -- nombre del momento y el stock antes/después: si alguien infla el stock
+    -- para tapar un faltante, aquí queda quién fue y cuánto.
+    CREATE TABLE IF NOT EXISTS stock_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      quantity REAL NOT NULL,
+      stock_before REAL NOT NULL,
+      stock_after REAL NOT NULL,
+      account_id INTEGER,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Arqueo de caja: lo que el sistema dice que debería haber contra lo que el
     -- cajero contó de verdad. Los cierres son contiguos — cada uno cubre desde
     -- el corte del anterior — así que ninguna venta queda fuera de un arqueo.
@@ -358,6 +374,7 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
       ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;
 
+    CREATE INDEX IF NOT EXISTS idx_stock_entries_user ON stock_entries(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_counts_user  ON inventory_counts(user_id, counted_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_items_count  ON inventory_count_items(count_id);
 

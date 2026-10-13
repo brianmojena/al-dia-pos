@@ -62,6 +62,19 @@ export default function Products() {
   }
   const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY); setFormError('') }
 
+  const [showEntries, setShowEntries] = useState(false)
+  const [entries, setEntries] = useState(null)
+  const [entriesError, setEntriesError] = useState('')
+  const openEntries = async () => {
+    setShowEntries(true); setEntries(null); setEntriesError('')
+    try {
+      const res = await apiFetch('/api/products/stock-entries')
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !Array.isArray(data)) { setEntriesError((data && data.error) || 'No se pudo cargar el historial. Hace falta conexión.'); return }
+      setEntries(data)
+    } catch (_) { setEntriesError('No se pudo cargar el historial. Hace falta conexión.') }
+  }
+
   const addPreview = parseFloat(String(form.add_stock ?? '').replace(',', '.')) || 0
 
   const handleSubmit = async (e) => {
@@ -143,6 +156,16 @@ export default function Products() {
             </Link>
           )}
           {isOwner && (
+            <button
+              onClick={openEntries}
+              title="Historial de stock añadido"
+              className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+            >
+              <Info size={17} />
+              <span className="hidden sm:inline">Entradas</span>
+            </button>
+          )}
+          {isOwner && (
             <Link
               to="/inventario"
               title="Contar inventario"
@@ -166,7 +189,7 @@ export default function Products() {
         <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-4">
           <Info size={16} className="flex-shrink-0 mt-0.5" />
           <p className="text-xs leading-relaxed font-medium">
-            Puedes dar de alta productos nuevos y cambiar su precio de venta. Los demás cambios
+            Puedes dar de alta productos nuevos, cambiar su precio de venta y añadir stock (queda registrado a tu nombre). Los demás cambios
             y la eliminación de productos los hace el dueño.
           </p>
         </div>
@@ -191,6 +214,35 @@ export default function Products() {
       />
 
       {/* Modal form */}
+      {showEntries && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Stock añadido</h3>
+              <button onClick={() => setShowEntries(false)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
+                <X size={20} className="text-gray-500" />
+              </button>
+            </div>
+            <div className="overflow-y-auto px-6 py-4">
+              {entriesError && <p className="text-sm text-red-600 font-medium">{entriesError}</p>}
+              {!entriesError && entries === null && <p className="text-sm text-gray-400">Cargando...</p>}
+              {entries && entries.length === 0 && <p className="text-sm text-gray-400">Todavía nadie ha añadido stock.</p>}
+              {entries && entries.map(e => (
+                <div key={e.id} className="py-3 border-b border-gray-100 last:border-0">
+                  <div className="flex justify-between gap-3">
+                    <span className="font-semibold text-gray-900 text-sm">{e.product_name}</span>
+                    <span className="font-bold text-green-600 text-sm">+{Number(e.quantity)}</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {Number(e.stock_before)} → {Number(e.stock_after)} · {e.account_email || 'cuenta desconocida'} · {new Date(String(e.created_at).replace(' ', 'T') + 'Z').toLocaleString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showForm && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">

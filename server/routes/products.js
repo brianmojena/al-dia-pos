@@ -20,6 +20,16 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
+// Historial de mercancía añadida al stock: solo el dueño, porque es el que
+// revisa que nadie infle el inventario.
+router.get('/stock-entries', requireOwner, asyncHandler(async (req, res) => {
+  const result = await getDb().execute({
+    sql: 'SELECT * FROM stock_entries WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 200',
+    args: [req.userId],
+  });
+  res.json(result.rows);
+}));
+
 /**
  * Alta de un producto. Si ya existe uno con el mismo nombre —sin distinguir
  * mayúsculas, acentos ni espacios, igual que la importación— NO se crea otro:
@@ -236,21 +246,35 @@ router.put('/:id', asyncHandler(async (req, res) => {
     }
     stock = Math.round((Number(existing.stock) + Number(addStock)) * 1000) / 1000;
   }
+  const addedQty = addStock !== undefined && addStock !== null && addStock !== '' ? Number(addStock) : 0;
   // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
   if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {
     return res.status(400).json({ error: 'Al quitar la unidad de medida hay que poner el stock en piezas enteras' });
   }
-  await db.execute({
-    sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE id = ?',
+  const statements = [{
+    // Con add_stock la suma la hace la base de datos, no el valor leído arriba:
+    // dos entradas simultáneas no se pisan.
+    sql: `UPDATE products SET name = ?, purchase_price = ?, sale_price = ?,
+            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ? WHERE id = ?`,
     args: [
       name           ?? existing.name,
       purchase_price ?? existing.purchase_price,
       sale_price     ?? existing.sale_price,
-      stock          ?? existing.stock,
+      addedQty > 0 ? addedQty : (stock ?? existing.stock),
       unit,
       req.params.id,
     ],
-  });
+  }];
+  if (addedQty > 0) {
+    const account = await describeAccount(db, req);
+    statements.push({
+      sql: `INSERT INTO stock_entries
+              (user_id, product_id, product_name, quantity, stock_before, stock_after, account_id, account_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, existing.id, name ?? existing.name, addedQty, Number(existing.stock), stock, account.id, account.email],
+    });
+  }
+  await db.batch(statements, 'write');
   const result = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
   res.json(result.rows[0]);
 }));

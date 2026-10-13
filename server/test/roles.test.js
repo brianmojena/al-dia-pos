@@ -62,6 +62,14 @@ test('roles: dueño y cajero', async (t) => {
     const suma = await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { add_stock: 5 } });
     assert.equal(suma.status, 200);
     assert.equal(Number(suma.body.stock), 15, 'la cantidad se suma al stock actual');
+    const historial = await ctx.api('GET', '/api/products/stock-entries', { token: dueño });
+    assert.equal(historial.status, 200);
+    assert.equal(historial.body.length, 1);
+    assert.equal(historial.body[0].account_email, cajero.user.email);
+    assert.equal(Number(historial.body[0].quantity), 5);
+    assert.equal(Number(historial.body[0].stock_before), 10);
+    assert.equal(Number(historial.body[0].stock_after), 15);
+    assert.equal((await ctx.api('GET', '/api/products/stock-entries', { token: cajero.token })).status, 403);
     for (const add_stock of [-1, 1.5, 'abc']) {
       assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { add_stock } })).status, 400);
     }
