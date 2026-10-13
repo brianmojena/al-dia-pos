@@ -102,6 +102,11 @@ export async function offlineRequest(path, options = {}) {
     return response({ error: storageError ? 'No se pudo guardar en este dispositivo. Libera espacio y vuelve a intentar.' : error.message }, storageError ? 507 : 400)
   }
 }
+// Las versiones antiguas de la app guardaban la edición de un cajero con el
+// producto entero; el servidor solo admite precio de venta y entrada de stock
+// y rechazaba (403) la operación, dejando parada toda la cola detrás de ella.
+const cashierEdit = (op) => op.method === 'PUT' && getCachedUser()?.role === 'cajero'
+const priceAndStockOnly = ({ sale_price, add_stock }) => ({ ...(sale_price !== undefined && { sale_price }), ...(add_stock !== undefined && { add_stock }) })
 let syncing = null
 export async function syncOffline() {
   if (isElectron() || navigator.onLine === false || !accountNow() || !getCachedUser()) return
@@ -120,7 +125,7 @@ export async function syncOffline() {
         if (!op) break
         if (op.error) throw new Error(op.error)
         const path = op.kind === 'product' ? '/api/sync/product-operation' : op.path
-        const body = op.kind === 'product' ? { operation_id: op.id, method: op.method, product_id: op.productId, product: op.body, expected: op.before } : { ...op.body }
+        const body = op.kind === 'product' ? { operation_id: op.id, method: op.method, product_id: op.productId, product: cashierEdit(op) ? priceAndStockOnly(op.body) : op.body, expected: op.before } : { ...op.body }
         if (op.kind === 'close' && op.coverageExact) { body.covered_sale_ids = op.saleIds; body.covered_purchase_ids = op.purchaseIds || [] }
         const res = await request(path, { method: op.kind === 'product' ? 'POST' : op.method, body: JSON.stringify(body) })
         const result = await res.json().catch(() => ({}))
