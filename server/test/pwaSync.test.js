@@ -84,4 +84,22 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     assert.equal((await operation({ ...edit, operation_id: 'cashier-delete', method: 'DELETE' }, cashier.token)).status, 403);
     assert.equal((await operation({ ...edit, operation_id: 'missing-product', product_id: 999999, expected: undefined }, cashier.token)).status, 404);
   });
+  await t.test('añadir stock sin internet suma encima de las ventas, se anota y no da conflicto', async () => {
+    const id = await createProduct(ctx.api, token, { name: 'Harina', stock: 10, sale_price: 20 });
+    const sell = (n) => call('/api/sales', { client_sale_id: `harina-${n}`, register_id: 'web', items: [{ product_id: id, quantity: n, unit_price: 20 }] });
+    // La caja editó con stock 10; mientras tanto otra vendió 3.
+    assert.equal((await sell(3)).status, 201);
+    const owner = await operation({ operation_id: 'add-owner', method: 'PUT', product_id: id, expected: { name: 'Harina', sale_price: 20, purchase_price: 60, stock: 10 }, product: { name: 'Harina', purchase_price: 60, sale_price: 20, add_stock: 5 } });
+    assert.equal(owner.status, 200);
+    assert.equal(owner.body.stock, 12, '10 - 3 vendidas + 5 añadidas');
+    assert.equal((await operation({ operation_id: 'add-owner', method: 'PUT', product_id: id, product: { add_stock: 5 } })).body.stock, 12, 'el reintento no suma dos veces');
+    const byCashier = await operation({ operation_id: 'add-cashier', method: 'PUT', product_id: id, expected: { sale_price: 20 }, product: { sale_price: 22, add_stock: 2 } }, cashier.token);
+    assert.equal(byCashier.status, 200);
+    assert.equal(byCashier.body.stock, 14); assert.equal(byCashier.body.sale_price, 22);
+    assert.equal((await operation({ operation_id: 'cashier-other', method: 'PUT', product_id: id, product: { name: 'X', add_stock: 1 } }, cashier.token)).status, 403);
+    assert.equal((await operation({ operation_id: 'add-bad', method: 'PUT', product_id: id, product: { add_stock: 1.5 } })).status, 400, 'una pieza no admite decimales');
+    const entries = await ctx.api('GET', '/api/products/stock-entries', { token });
+    const mine = entries.body.filter((e) => e.product_id === id);
+    assert.deepEqual(mine.map((e) => [Number(e.quantity), Number(e.stock_before), Number(e.stock_after)]).sort(), [[2, 12, 14], [5, 7, 12]]);
+  });
 });
