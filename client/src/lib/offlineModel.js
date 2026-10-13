@@ -98,11 +98,11 @@ const productById = (data, id) => {
   assert(p, 'Producto no encontrado')
   return p
 }
-export function openSales(data, account) {
-  return data.sales.filter((s) => s.cash_close_id == null && (!s.register_id || s.register_id === registerFor(account)))
+export function openSales(data, account, wholeShop = false) {
+  return data.sales.filter((s) => s.cash_close_id == null && (wholeShop || !s.register_id || s.register_id === registerFor(account)))
 }
-export function openPurchases(data, account) {
-  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (!p.register_id || p.register_id === registerFor(account)))
+export function openPurchases(data, account, wholeShop = false) {
+  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (wholeShop || !p.register_id || p.register_id === registerFor(account)))
 }
 export function prepareOperation(data, method, path, body, ctx) {
   const owner = ctx.user.role !== 'cajero'
@@ -210,8 +210,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     if (existing) return { ...op, kind: 'noop', result: existing }
     assert(number(body.counted_cash) && number(body.opening_float ?? 0), 'El efectivo debe ser mayor o igual a 0')
     assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
-    const covered = openSales(data, ctx.account)
-    const coveredPurchases = openPurchases(data, ctx.account)
+    const covered = openSales(data, ctx.account, owner)
+    const coveredPurchases = openPurchases(data, ctx.account, owner)
     op.saleIds = covered.map((s) => s.id)
     op.purchaseIds = coveredPurchases.map((p) => p.id)
     op.coverageExact = owner
@@ -266,7 +266,7 @@ export function readLocal(data, path, account, user) {
   const owner = user.role !== 'cajero'
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
-    const sales = [...openSales(data, account), ...openPurchases(data, account)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
+    const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
     return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || null, has_sales: sales.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')

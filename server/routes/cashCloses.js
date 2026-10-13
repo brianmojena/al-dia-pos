@@ -4,7 +4,7 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
-const { requireOwner } = require('../middleware/auth');
+const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
 
@@ -104,7 +104,14 @@ const countedForeign = (value) => {
  * arqueo para siempre. Si después ese escritorio viejo las cierra por ids, el
  * cierre lo deja anotado en `overlap_sales` (ver el POST).
  */
-const openSales = async (executor, userId, mode, registerId) => {
+const openSales = async (executor, userId, mode, registerId, wholeShop = false) => {
+  if (mode === 'web' && wholeShop) {
+    const result = await executor.execute({
+      sql: `SELECT * FROM sales WHERE user_id = ? AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
+      args: [userId],
+    });
+    return result.rows;
+  }
   if (mode === 'web') {
     const result = await executor.execute({
       sql: `SELECT * FROM sales WHERE user_id = ? AND cash_close_id IS NULL
@@ -148,7 +155,14 @@ const salesByClientIds = async (executor, userId, ids) => {
 
 // Lo mismo para las compras de divisa: las que le tocan a esta caja y siguen
 // sin arqueo. Misma regla de cobertura que las ventas.
-const openPurchases = async (executor, userId, mode, registerId) => {
+const openPurchases = async (executor, userId, mode, registerId, wholeShop = false) => {
+  if (mode === 'web' && wholeShop) {
+    const all = await executor.execute({
+      sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
+      args: [userId],
+    });
+    return all.rows;
+  }
   const result = mode === 'web'
     ? await executor.execute({
         sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL
@@ -176,6 +190,10 @@ const purchasesByClientIds = async (executor, userId, ids) => {
   return result.rows;
 };
 
+// La cuenta principal cierra la tienda entera: todas las ventas abiertas, de
+// cualquier caja y cajero. Los cajeros siguen cerrando solo la suya.
+const closesWholeShop = (req) => req.role === OWNER;
+
 const modeFor = (req, clientSaleIds, requestedRegisterId) => {
   if (Array.isArray(clientSaleIds)) return 'desktop';
   return requestedRegisterId != null && resolveRegisterId(req, requestedRegisterId) ? 'web' : 'legacy';
@@ -184,8 +202,8 @@ const modeFor = (req, clientSaleIds, requestedRegisterId) => {
 const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const registerId = resolveRegisterId(req, requestedRegisterId);
   const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
-  const sales = await openSales(executor, req.userId, mode, registerId);
-  const purchases = await openPurchases(executor, req.userId, mode, registerId);
+  const sales = await openSales(executor, req.userId, mode, registerId, closesWholeShop(req));
+  const purchases = await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req));
 
   if (mode === 'web') {
     const lastClose = await getLastCloseForRegister(executor, req.userId, registerId);
@@ -330,7 +348,7 @@ router.post('/', asyncHandler(async (req, res) => {
     }
     let covered = mode === 'desktop'
       ? await salesByClientIds(tx, req.userId, client_sale_ids)
-      : await openSales(tx, req.userId, mode, registerId);
+      : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req));
     if (explicitIds) {
       const available = new Set(covered.map((sale) => Number(sale.id)));
       if (explicitIds.some((id) => !available.has(id))) {
@@ -348,7 +366,7 @@ router.post('/', asyncHandler(async (req, res) => {
     }
     let coveredPurchases = mode === 'desktop'
       ? await purchasesByClientIds(tx, req.userId, client_purchase_ids || [])
-      : await openPurchases(tx, req.userId, mode, registerId);
+      : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req));
     if (explicitPurchaseIds) {
       const available = new Set(coveredPurchases.map((purchase) => Number(purchase.id)));
       if (explicitPurchaseIds.some((id) => !available.has(id))) {
