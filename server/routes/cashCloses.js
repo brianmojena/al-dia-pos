@@ -6,7 +6,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { paymentSplit, round2 } = require('../lib/payment');
+const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -70,12 +70,19 @@ const getLastCloseForRegister = async (executor, userId, registerId) => {
 // venta mixta aporta a los dos lados. Los dólares y euros se cuentan cada uno
 // por su lado, en billetes: el vuelto en pesos de una venta en divisa ya está
 // descontado del efectivo.
-const sumOf = (rows, key) => round2(rows.reduce((sum, row) => sum + paymentSplit(row)[key], 0));
-const summarize = (rows) => ({
-  cash: sumOf(rows, 'cash'),
-  transfer: sumOf(rows, 'transfer'),
-  usd: sumOf(rows, 'usd'),
-  eur: sumOf(rows, 'eur'),
+//
+// Las compras de divisa de la caja entran en la misma cuenta: los pesos que
+// salieron de la gaveta restan del efectivo y los billetes comprados suman a
+// su moneda.
+const sumOf = (rows, key, purchases = []) => round2(
+  rows.reduce((sum, row) => sum + paymentSplit(row)[key], 0)
+  + purchases.reduce((sum, row) => sum + purchaseSplit(row)[key], 0)
+);
+const summarize = (rows, purchases = []) => ({
+  cash: sumOf(rows, 'cash', purchases),
+  transfer: sumOf(rows, 'transfer', purchases),
+  usd: sumOf(rows, 'usd', purchases),
+  eur: sumOf(rows, 'eur', purchases),
   count: rows.length,
   first_sale_at: rows[0]?.created_at || null,
 });
@@ -139,6 +146,36 @@ const salesByClientIds = async (executor, userId, ids) => {
   return result.rows;
 };
 
+// Lo mismo para las compras de divisa: las que le tocan a esta caja y siguen
+// sin arqueo. Misma regla de cobertura que las ventas.
+const openPurchases = async (executor, userId, mode, registerId) => {
+  const result = mode === 'web'
+    ? await executor.execute({
+        sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL
+              AND (register_id = ? OR register_id IS NULL) ORDER BY created_at ASC, id ASC`,
+        args: [userId, registerId],
+      })
+    : await executor.execute({
+        sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND register_id IS NULL
+              AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
+        args: [userId],
+      });
+  return result.rows;
+};
+
+// Las compras de un conjunto explícito de client_purchase_id (cierre de la
+// app de escritorio, que ya las tiene sincronizadas).
+const purchasesByClientIds = async (executor, userId, ids) => {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const result = await executor.execute({
+    sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND client_purchase_id IN (${placeholders})
+          ORDER BY created_at ASC, id ASC`,
+    args: [userId, ...ids],
+  });
+  return result.rows;
+};
+
 const modeFor = (req, clientSaleIds, requestedRegisterId) => {
   if (Array.isArray(clientSaleIds)) return 'desktop';
   return requestedRegisterId != null && resolveRegisterId(req, requestedRegisterId) ? 'web' : 'legacy';
@@ -148,12 +185,14 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const registerId = resolveRegisterId(req, requestedRegisterId);
   const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
   const sales = await openSales(executor, req.userId, mode, registerId);
+  const purchases = await openPurchases(executor, req.userId, mode, registerId);
 
   if (mode === 'web') {
     const lastClose = await getLastCloseForRegister(executor, req.userId, registerId);
     return {
       sales,
-      openedAt: lastClose || sales[0]?.created_at || null,
+      purchases,
+      openedAt: lastClose || sales[0]?.created_at || purchases[0]?.created_at || null,
       isFirstClose: !lastClose,
     };
   }
@@ -162,7 +201,8 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
   return {
     sales,
-    openedAt: isFirstClose ? (sales[0]?.created_at || null) : periodStart,
+    purchases,
+    openedAt: isFirstClose ? (sales[0]?.created_at || purchases[0]?.created_at || null) : periodStart,
     isFirstClose,
   };
 };
@@ -224,7 +264,7 @@ router.get('/current', asyncHandler(async (req, res) => {
   res.json({
     opened_at: period.openedAt,
     is_first_close: period.isFirstClose,
-    has_sales: period.sales.length > 0,
+    has_sales: period.sales.length > 0 || period.purchases.length > 0,
   });
 }));
 
@@ -234,11 +274,14 @@ router.post('/', asyncHandler(async (req, res) => {
   catch (error) { return res.status(400).json({ error: error.message }); }
   const {
     counted_cash, opening_float = 0, note = null, client_close_id = null,
-    client_sale_ids = null, register_id: requestedRegisterId = null,
+    client_sale_ids = null, client_purchase_ids = null, register_id: requestedRegisterId = null,
   } = req.body;
 
   if (client_sale_ids != null && !Array.isArray(client_sale_ids)) {
     return res.status(400).json({ error: 'client_sale_ids debe ser una lista' });
+  }
+  if (client_purchase_ids != null && !Array.isArray(client_purchase_ids)) {
+    return res.status(400).json({ error: 'client_purchase_ids debe ser una lista' });
   }
 
   const counted = Number(counted_cash);
@@ -296,7 +339,25 @@ router.post('/', asyncHandler(async (req, res) => {
       }
       covered = covered.filter((sale) => explicitIds.includes(Number(sale.id)));
     }
-    const summary = summarize(covered);
+    // Compras de divisa: mismo criterio que las ventas. Sin la lista explícita
+    // de ids (escritorio) o de ids de servidor (PWA), se llevan las abiertas.
+    const explicitPurchaseIds = req.body.covered_purchase_ids;
+    if (explicitPurchaseIds != null && (!Array.isArray(explicitPurchaseIds) || explicitPurchaseIds.some((id) => !Number.isInteger(id) || id <= 0) || new Set(explicitPurchaseIds).size !== explicitPurchaseIds.length || mode !== 'web')) {
+      await tx.rollback();
+      return res.status(400).json({ error: 'Compras del cierre inválidas' });
+    }
+    let coveredPurchases = mode === 'desktop'
+      ? await purchasesByClientIds(tx, req.userId, client_purchase_ids || [])
+      : await openPurchases(tx, req.userId, mode, registerId);
+    if (explicitPurchaseIds) {
+      const available = new Set(coveredPurchases.map((purchase) => Number(purchase.id)));
+      if (explicitPurchaseIds.some((id) => !available.has(id))) {
+        await tx.rollback();
+        return res.status(409).json({ error: 'Una compra de divisa de este cierre ya no está disponible. Revisa la caja antes de sincronizar.' });
+      }
+      coveredPurchases = coveredPurchases.filter((purchase) => explicitPurchaseIds.includes(Number(purchase.id)));
+    }
+    const summary = summarize(covered, coveredPurchases);
 
     // Solo pasa en la transición: un escritorio viejo cierra por ids ventas
     // que la web ya se había llevado. Se suman igual —ese dinero está en esa
@@ -309,10 +370,10 @@ router.post('/', asyncHandler(async (req, res) => {
     let openedAt;
     if (mode === 'legacy') {
       const periodStart = await getPeriodStart(tx, req.userId);
-      openedAt = periodStart === BEGINNING_OF_TIME ? summary.first_sale_at : periodStart;
+      openedAt = periodStart === BEGINNING_OF_TIME ? (summary.first_sale_at || coveredPurchases[0]?.created_at || null) : periodStart;
     } else {
       const priorClose = await getLastCloseForRegister(tx, req.userId, registerId);
-      openedAt = priorClose || summary.first_sale_at;
+      openedAt = priorClose || summary.first_sale_at || coveredPurchases[0]?.created_at || null;
     }
 
     const expectedCash = float + summary.cash;
@@ -345,6 +406,15 @@ router.post('/', asyncHandler(async (req, res) => {
         sql: `UPDATE sales SET cash_close_id = ?
               WHERE id IN (${placeholders}) AND cash_close_id IS NULL`,
         args: [closeId, ...covered.map((sale) => sale.id)],
+      });
+    }
+
+    if (coveredPurchases.length > 0) {
+      const placeholders = coveredPurchases.map(() => '?').join(',');
+      await tx.execute({
+        sql: `UPDATE currency_purchases SET cash_close_id = ?
+              WHERE id IN (${placeholders}) AND cash_close_id IS NULL`,
+        args: [closeId, ...coveredPurchases.map((purchase) => purchase.id)],
       });
     }
 

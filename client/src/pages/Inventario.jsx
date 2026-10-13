@@ -1,3 +1,4 @@
+import { validQuantity } from '../lib/units'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
@@ -47,8 +48,11 @@ export default function Inventario() {
   // conté", que no es lo mismo que "conté cero".
   const entered = Object.entries(counts)
     .filter(([, v]) => v !== '' && v != null)
-    .map(([id, v]) => ({ product_id: Number(id), counted: parseInt(v, 10) }))
-    .filter(i => Number.isInteger(i.counted) && i.counted >= 0)
+    .map(([id, v]) => ({ product_id: Number(id), counted: parseFloat(String(v).replace(',', '.')) }))
+    .filter(i => {
+      const unit = products.find(p => p.id === i.product_id)?.unit
+      return validQuantity(i.counted, unit)
+    })
 
   const handleSubmit = async () => {
     if (entered.length === 0 || submitting) return
@@ -143,8 +147,9 @@ export default function Inventario() {
               } ${value !== '' ? 'bg-blue-50/40' : ''}`}
             >
               <span className="flex-1 text-sm font-medium text-gray-900 min-w-0 truncate">{p.name}</span>
+              {p.unit && <span className="text-xs font-semibold text-gray-400">{p.unit}</span>}
               <input
-                type="number" min="0" step="1" inputMode="numeric" placeholder="—"
+                type="number" min="0" step={p.unit ? 'any' : '1'} inputMode={p.unit ? 'decimal' : 'numeric'} placeholder="—"
                 value={value}
                 onChange={e => setCounts(c => ({ ...c, [p.id]: e.target.value }))}
                 className="w-20 text-center border border-gray-200 rounded-xl px-2 py-2 text-base font-semibold focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"

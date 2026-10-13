@@ -95,6 +95,24 @@ function initLocalDb(dbPath) {
       account_email TEXT
     );
 
+    -- Compra de divisa: la tienda paga pesos de la gaveta y recibe billetes.
+    -- client_purchase_id es la clave de idempotencia, igual que en sales.
+    CREATE TABLE IF NOT EXISTS currency_purchases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER,
+      client_purchase_id TEXT NOT NULL UNIQUE,
+      origin TEXT NOT NULL DEFAULT 'local',
+      register_id TEXT,
+      cash_close_id INTEGER,
+      account_email TEXT,
+      foreign_currency TEXT NOT NULL,
+      foreign_amount REAL NOT NULL,
+      exchange_rate REAL NOT NULL,
+      shop_rate REAL,
+      cup_amount REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS inventory_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       server_id INTEGER,
@@ -127,7 +145,7 @@ function initLocalDb(dbPath) {
     -- el sync worker los traduce a server_id recién al armar el POST.
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create' | 'cash_close.create' | 'inventory_count.create'
+      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create' | 'currency_purchase.create' | 'cash_close.create' | 'inventory_count.create'
       client_op_id TEXT NOT NULL UNIQUE,
       local_ref_id INTEGER,
       payload TEXT NOT NULL,
@@ -185,6 +203,12 @@ function initLocalDb(dbPath) {
     'ALTER TABLE cash_closes ADD COLUMN expected_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN counted_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN difference_eur REAL NOT NULL DEFAULT 0',
+    // Productos por peso: NULL = por unidad; 'kg' | 'g' | 'lb' = precio y stock
+    // por esa unidad, con decimales. Las columnas stock/quantity/expected/counted
+    // se declararon INTEGER, pero la afinidad INTEGER de SQLite guarda un REAL
+    // como REAL cuando no es entero (2.35 no se trunca), así que no hace falta
+    // tocar esas tablas; el CHECK (stock >= 0) también vale para decimales.
+    'ALTER TABLE products ADD COLUMN unit TEXT',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }
@@ -194,6 +218,8 @@ function initLocalDb(dbPath) {
       ON sales(server_id) WHERE server_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_closes_server_id
       ON cash_closes(server_id) WHERE server_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_server_id
+      ON currency_purchases(server_id) WHERE server_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_counts_server_id
       ON inventory_counts(server_id) WHERE server_id IS NOT NULL;
   `);

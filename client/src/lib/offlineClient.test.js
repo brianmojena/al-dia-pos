@@ -36,6 +36,43 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     const reopened = await import('./offlineClient.js?reopened')
     assert.equal((await (await reopened.offlineRequest('/api/sales')).json()).length, 1)
   })
+  await t.test('actualizar y reabrir la web del cajero conserva ventas pendientes y su precio original', async () => {
+    resetStore(); seed(); navigator.onLine = false
+    setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' })
+    const key = 'mypimes_local_v1:1:2'
+    records.set(key, structuredClone(records.get(stateKey(1))))
+    assert.equal((await write('/api/sales', saleBody('cashier-before-update'))).status, 202)
+    assert.equal((await write('/api/products/10', { sale_price: 12.5 }, 'PUT')).status, 202)
+    const stored = structuredClone(records.get(key))
+    const updated = await import('./offlineClient.js?cashier-update')
+    assert.equal((await updated.localSyncStatus()).pending, 2)
+    assert.equal((await (await updated.offlineRequest('/api/products')).json())[0].stock, 18)
+    assert.equal((await (await updated.offlineRequest('/api/products')).json())[0].sale_price, 12.5)
+    assert.deepEqual(records.get(key), stored, 'la reapertura no cambia las operaciones guardadas')
+    navigator.onLine = true
+    const uploaded = []
+    const remoteSale = { ...stored.outbox[0].result, id: 45, pending: false }
+    const remoteProduct = { ...stored.outbox[1].result, pending: false }
+    globalThis.fetch = async (path, options) => {
+      if (path === '/api/sales') {
+        const body = JSON.parse(options.body); uploaded.push(body)
+        assert.equal(body.client_sale_id, 'cashier-before-update')
+        assert.equal(body.items[0].unit_price, 10, 'el cambio de catálogo no altera una venta ya cobrada')
+        return jsonResponse(remoteSale)
+      }
+      if (path === '/api/sync/product-operation') {
+        assert.deepEqual(JSON.parse(options.body).product, { sale_price: 12.5 })
+        return jsonResponse(remoteProduct)
+      }
+      assert.equal(path, '/api/sync/snapshot')
+      return jsonResponse({ products: [remoteProduct], current_period: {} })
+    }
+    await updated.syncOffline()
+    assert.equal((await updated.localSyncStatus()).pending, 0)
+    assert.equal(uploaded.length, 1)
+    resetStore(); login(1); seed(); navigator.onLine = false
+    await write('/api/sales', saleBody())
+  })
   await t.test('un 5xx o respuesta perdida conserva la operación hasta el reintento exitoso', async () => {
     navigator.onLine = true
     globalThis.fetch = async () => jsonResponse({ error: 'Servidor caído' }, 503)

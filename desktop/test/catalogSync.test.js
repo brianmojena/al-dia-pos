@@ -184,15 +184,26 @@ test('el catálogo baja del servidor a la caja', async (t) => {
     assert.equal(outboxDe('product.create')[0].status, 'pending');
   }));
 
-  await t.test('un empleado da de alta productos pero no toca los existentes', () => conCaja(async ({ db, queries }) => {
+  await t.test('un empleado da de alta productos y cambia solo el precio de venta', () => conCaja(async ({ db, queries }) => {
     // La sesión de prueba es de una cajera (ver helpers.js).
     const ron = crearProductoSincronizado(queries, { name: 'Ron', stock: 10, sale_price: 500 });
 
     const editar = await routeRequest('PUT', `/api/products/${ron.id}`, { sale_price: 1 });
-    assert.equal(editar.status, 403);
+    assert.equal(editar.status, 200);
+    assert.equal(fila(db, ron.id).stock, 10);
+    assert.equal(fila(db, ron.id).purchase_price, 60);
+    for (const body of [{ stock: 99 }, { name: 'Otro' }, { purchase_price: 0 }, { sale_price: 2, stock: 99 }]) {
+      assert.equal((await routeRequest('PUT', `/api/products/${ron.id}`, body)).status, 403);
+    }
+    for (const sale_price of [-1, null, '', 'abc']) {
+      assert.equal((await routeRequest('PUT', `/api/products/${ron.id}`, { sale_price })).status, 400);
+    }
+    const queued = outboxDe('product.update');
+    assert.equal(queued.length, 1);
+    assert.deepEqual(JSON.parse(queued[0].payload), { local_product_id: ron.id, sale_price: 1 });
     const borrar = await routeRequest('DELETE', `/api/products/${ron.id}`);
     assert.equal(borrar.status, 403);
-    assert.equal(fila(db, ron.id).sale_price, 500);
+    assert.equal(fila(db, ron.id).sale_price, 1);
     assert.equal(fila(db, ron.id).deleted, 0);
 
     const alta = await routeRequest('POST', '/api/products', { name: 'Galletas', sale_price: 250, stock: 24 });

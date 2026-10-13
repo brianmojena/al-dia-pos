@@ -1,7 +1,8 @@
-import { paymentSplit, offShopRate, CURRENCIES } from './payment.js'
+import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES } from './payment.js'
 import { parseServerDate } from './dates.js'
+import { isValidUnit, validQuantity, roundQty, lineTotal } from './units.js'
 
-export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], rejected_sales: [], cashiers: [], current_period: null })
+export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], rejected_sales: [], cashiers: [], current_period: null })
 export const businessDate = (value = new Date()) => {
   const date = value instanceof Date ? value : parseServerDate(value)
   if (!date) return ''
@@ -19,13 +20,14 @@ const upsert = (rows, row, clientKey) => {
 export function applyOperation(data, op, result = op.result) {
   if (op.kind === 'product') {
     if (op.method === 'DELETE') data.products = data.products.filter((p) => p.id !== op.productId)
-    else upsert(data.products, result)
+    // Copia: las ventas siguientes mutan el stock y no deben alterar el resultado guardado en la operación.
+    else upsert(data.products, structuredClone(result))
   } else if (op.kind === 'sale') {
     // A replay of an already downloaded sale must not subtract stock twice.
     if (!data.sales.some((s) => s.client_sale_id === op.body.client_sale_id)) {
       for (const item of op.result.items) {
         const p = data.products.find((p) => p.id === item.product_id)
-        if (p) p.stock = Math.max(0, p.stock - item.quantity)
+        if (p) p.stock = Math.max(0, roundQty(p.stock - item.quantity))
       }
     }
     upsert(data.sales, { ...op.result, ...result, items: op.result.items }, 'client_sale_id')
@@ -37,8 +39,11 @@ export function applyOperation(data, op, result = op.result) {
       }
     }
     upsert(data.inventory_counts, result, 'client_count_id')
+  } else if (op.kind === 'purchase') {
+    upsert(data.currency_purchases ||= [], { ...op.result, ...result }, 'client_purchase_id')
   } else if (op.kind === 'close') {
     for (const sale of data.sales) if (op.saleIds.includes(sale.id)) sale.cash_close_id = result.id
+    for (const purchase of data.currency_purchases || []) if (op.purchaseIds?.includes(purchase.id)) purchase.cash_close_id = result.id
     upsert(data.cash_closes, result, 'client_close_id')
   } else if (op.kind === 'review') {
     const sale = data.rejected_sales.find((s) => s.id === op.productId)
@@ -77,6 +82,11 @@ export function acknowledgeOperation(state, opId, result) {
       if (pending.saleIds) pending.saleIds = pending.saleIds.map((id) => id === op.result.id ? Number(result.id) : id)
     }
   }
+  if (op.kind === 'purchase') {
+    for (const pending of state.outbox) {
+      if (pending.purchaseIds) pending.purchaseIds = pending.purchaseIds.map((id) => id === op.result.id ? Number(result.id) : id)
+    }
+  }
   applyOperation(state.base, op, result)
   state.outbox = state.outbox.filter((o) => o.id !== opId)
   return state
@@ -91,18 +101,22 @@ const productById = (data, id) => {
 export function openSales(data, account) {
   return data.sales.filter((s) => s.cash_close_id == null && (!s.register_id || s.register_id === registerFor(account)))
 }
+export function openPurchases(data, account) {
+  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (!p.register_id || p.register_id === registerFor(account)))
+}
 export function prepareOperation(data, method, path, body, ctx) {
   const owner = ctx.user.role !== 'cajero'
   const now = ctx.now || new Date().toISOString()
   const meta = { account_email: ctx.user.email, account_id: Number(ctx.account.split(':')[1]) }
   const op = { id: ctx.newId(), method, path, body: structuredClone(body), queued_at: now, result: {} }
   if (path === '/api/products' || /^\/api\/products\/-?\d+$/.test(path)) {
-    assert(owner || method === 'POST', 'Solo el dueño puede editar o borrar productos')
+    assert(owner || method === 'POST' || (method === 'PUT' && Object.keys(body).every((key) => key === 'sale_price')), 'Solo el dueño puede cambiar otros datos o borrar productos')
+    if (method === 'PUT' && 'sale_price' in body) assert(body.sale_price != null && body.sale_price !== '' && number(body.sale_price), 'El precio de venta no es válido')
     op.kind = 'product'
     if (method === 'DELETE') {
       const previous = productById(data, path.split('/').pop())
       op.productId = previous.id
-      op.before = { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock }
+      op.before = { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null }
       op.result = { success: true }
       return op
     }
@@ -110,14 +124,18 @@ export function prepareOperation(data, method, path, body, ctx) {
     const p = { ...(previous || {}), ...body }
     assert(typeof p.name === 'string' && p.name.trim(), 'Falta el nombre del producto')
     assert(number(p.sale_price) && number(p.purchase_price ?? 0), 'Los precios deben ser números mayores o iguales a 0')
-    assert(number(p.stock ?? 0) && Number.isInteger(Number(p.stock ?? 0)), 'El stock debe ser un entero mayor o igual a 0')
+    assert(isValidUnit(p.unit), 'La unidad de medida no es válida (kg, g o lb)')
+    assert(validQuantity(p.stock ?? 0, p.unit || null), p.unit ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)' : 'El stock debe ser un entero mayor o igual a 0')
     if (!previous) {
       const existing = data.products.find((p) => normalize(p.name) === normalize(body.name))
       if (existing) return { ...op, kind: 'noop', result: { ...existing, merged: true } }
     }
     op.productId = previous?.id
-    if (previous) op.before = { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock }
-    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), created_by_email: previous?.created_by_email ?? ctx.user.email }
+    if (previous) op.before = owner ? { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null } : { sale_price: previous.sale_price }
+    // La unidad viaja siempre en las altas y ediciones del dueño: si se omitiera,
+    // una edición que no la menciona (p. ej. la importación) la dejaría en blanco.
+    if (!previous || owner) op.body.unit = p.unit || null
+    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, created_by_email: previous?.created_by_email ?? ctx.user.email }
   } else if (path === '/api/sales') {
     op.kind = 'sale'
     op.body.client_sale_id ||= ctx.newId()
@@ -141,19 +159,35 @@ export function prepareOperation(data, method, path, body, ctx) {
     const remaining = new Map(data.products.map((p) => [p.id, p.stock]))
     const items = body.items.map((item, index) => {
       const p = productById(data, item.product_id)
-      assert(Number.isInteger(item.quantity) && item.quantity > 0, 'Cantidad inválida')
+      assert(validQuantity(item.quantity, p.unit || null, 0.001), p.unit ? `Cantidad inválida para ${p.name} (usa hasta 3 decimales)` : `${p.name} se vende por unidades enteras`)
       assert(number(item.unit_price), 'Precio inválido')
       assert(remaining.get(p.id) >= item.quantity, `Stock insuficiente para ${p.name}`)
-      remaining.set(p.id, remaining.get(p.id) - item.quantity)
+      remaining.set(p.id, roundQty(remaining.get(p.id) - item.quantity))
       return { ...item, id: index, product_name: p.name, unit_cost: Number(p.purchase_price || 0) }
     })
-    const total = round(items.reduce((n, i) => n + i.quantity * i.unit_price, 0))
+    const total = round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price), 0))
     if (body.payment_method === 'mixto') assert(number(body.transfer_amount) && body.transfer_amount > 0 && body.transfer_amount < total, 'Monto transferido inválido')
     const split = paymentSplit({ ...op.body, total })
     assert(ctx.user.transfer_limit == null || split.transfer <= Number(ctx.user.transfer_limit), 'Transferencia por encima del límite')
     op.body.sold_at = now
     op.body.register_id = 'web'
-    op.result = { ...op.body, ...meta, id: ctx.localId(), items, total, profit: round(items.reduce((n, i) => n + i.quantity * (i.unit_price - i.unit_cost), 0)), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+    op.result = { ...op.body, ...meta, id: ctx.localId(), items, total, profit: round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price - i.unit_cost), 0)), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+  } else if (path === '/api/currency-purchases') {
+    op.kind = 'purchase'
+    op.body.client_purchase_id ||= ctx.newId()
+    const existing = (data.currency_purchases || []).find((p) => p.client_purchase_id === op.body.client_purchase_id)
+    if (existing) return { ...op, kind: 'noop', result: existing }
+    // Mismas reglas que el servidor (server/lib/payment.js, purchaseFields).
+    assert(CURRENCIES.includes(body.foreign_currency), 'Moneda inválida: solo USD o EUR')
+    assert(number(body.foreign_amount) && round(Number(body.foreign_amount)) > 0, 'Falta cuántos dólares o euros se compran')
+    assert(number(body.exchange_rate) && Number(body.exchange_rate) > 0, 'Falta la tasa de la compra')
+    op.body.foreign_amount = round(Number(body.foreign_amount))
+    op.body.exchange_rate = Number(body.exchange_rate)
+    op.body.shop_rate = body.shop_rate == null ? null : Number(body.shop_rate)
+    delete op.body.cup_amount
+    op.body.sold_at = now
+    op.body.register_id = 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
   } else if (path === '/api/inventory-counts') {
     assert(owner, 'Solo el dueño puede contar inventario')
     op.kind = 'count'
@@ -164,8 +198,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     assert(new Set(body.items.map((i) => i.product_id)).size === body.items.length, 'Producto repetido')
     const items = body.items.map((item, index) => {
       const p = productById(data, item.product_id)
-      assert(Number.isInteger(item.counted) && item.counted >= 0, 'Cantidad contada inválida')
-      return { ...item, id: index, product_name: p.name, expected: p.stock, difference: item.counted - p.stock, unit_cost: p.purchase_price || 0, unit_price: p.sale_price }
+      assert(validQuantity(item.counted, p.unit || null), 'Cantidad contada inválida')
+      return { ...item, id: index, product_name: p.name, expected: p.stock, difference: roundQty(item.counted - p.stock), unit_cost: p.purchase_price || 0, unit_price: p.sale_price }
     })
     op.body.counted_at = now
     op.result = { ...op.body, ...meta, id: ctx.localId(), counted_at: now, items, lines_count: items.length, products_with_difference: items.filter((i) => i.difference).length, units_missing: items.reduce((n, i) => n + Math.max(0, -i.difference), 0), units_extra: items.reduce((n, i) => n + Math.max(0, i.difference), 0), value_missing: items.reduce((n, i) => n + Math.max(0, -i.difference) * i.unit_price, 0), pending: true }
@@ -177,16 +211,18 @@ export function prepareOperation(data, method, path, body, ctx) {
     assert(number(body.counted_cash) && number(body.opening_float ?? 0), 'El efectivo debe ser mayor o igual a 0')
     assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
     const covered = openSales(data, ctx.account)
+    const coveredPurchases = openPurchases(data, ctx.account)
     op.saleIds = covered.map((s) => s.id)
+    op.purchaseIds = coveredPurchases.map((p) => p.id)
     op.coverageExact = owner
-    if (owner) op.body.covered_sale_ids = op.saleIds
+    if (owner) { op.body.covered_sale_ids = op.saleIds; op.body.covered_purchase_ids = op.purchaseIds }
     op.body.closed_at = now
     op.body.register_id = 'web'
-    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0))
+    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0))
     const cash = sumOf('cash') + Number(body.opening_float || 0)
     const usd = sumOf('usd'), eur = sumOf('eur')
     const countedUsd = round(Number(body.counted_usd || 0)), countedEur = round(Number(body.counted_eur || 0))
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -230,11 +266,12 @@ export function readLocal(data, path, account, user) {
   const owner = user.role !== 'cajero'
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
-    const sales = openSales(data, account), prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
+    const sales = [...openSales(data, account), ...openPurchases(data, account)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
     return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || null, has_sales: sales.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
+  if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales') return newest(data.sales.filter((s) => !url.searchParams.has('date') || businessDate(s.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales/rejected') return data.rejected_sales.filter((s) => !s.reviewed_at)
   if (/^\/api\/sales\/-?\d+$/.test(route)) return data.sales.find((s) => s.id === Number(route.split('/').pop()))
@@ -257,6 +294,10 @@ export function readLocal(data, path, account, user) {
     const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 }
     for (const sale of data.sales.filter((s) => s.cash_close_id == null)) {
       const split = paymentSplit(sale)
+      for (const key of Object.keys(holdings)) holdings[key] += split[key]
+    }
+    for (const purchase of (data.currency_purchases || []).filter((p) => p.cash_close_id == null)) {
+      const split = purchaseSplit(purchase)
       for (const key of Object.keys(holdings)) holdings[key] += split[key]
     }
     for (const key of Object.keys(holdings)) holdings[key] = round(holdings[key])

@@ -8,6 +8,7 @@ const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { notifySale } = require('../lib/push');
+const { roundQty, validQuantity } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 
 const isUniqueViolation = (err) => {
@@ -91,7 +92,7 @@ router.post('/rejected', asyncHandler(async (req, res) => {
   for (const item of items) {
     const quantity = Number(item?.quantity);
     const unitPrice = Number(item?.unit_price);
-    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
       return res.status(400).json({ error: 'Una línea de la venta rechazada no es válida' });
     }
     const productId = item.product_id != null ? Number(item.product_id) : null;
@@ -99,11 +100,11 @@ router.post('/rejected', asyncHandler(async (req, res) => {
     lines.push({
       product_id: productId,
       product_name: givenName || names.get(productId) || `Producto #${productId ?? '?'}`,
-      quantity,
+      quantity: roundQty(quantity),
       unit_price: unitPrice,
     });
   }
-  const total = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+  const total = round2(lines.reduce((sum, l) => sum + round2(l.quantity * l.unit_price), 0));
   const account = await describeAccount(db, req);
   // Igual que el monto transferido: el dinero ya se cobró, así que un aviso
   // con la divisa mal formada se guarda sin ella antes que rechazarlo.
@@ -261,7 +262,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
     for (const item of items) {
       const quantity = Number(item.quantity);
-      if (!Number.isInteger(quantity) || quantity <= 0) {
+      if (!Number.isFinite(quantity) || quantity <= 0) {
         await tx.rollback();
         return res.status(400).json({ error: 'Cantidad inválida' });
       }
@@ -274,7 +275,7 @@ router.post('/', asyncHandler(async (req, res) => {
       // Lectura DENTRO de la transacción (antes se hacía fuera, lo que abría una
       // ventana entre la comprobación de stock y el descuento).
       const productResult = await tx.execute({
-        sql: 'SELECT id, name, purchase_price FROM products WHERE id = ? AND user_id = ?',
+        sql: 'SELECT id, name, purchase_price, unit FROM products WHERE id = ? AND user_id = ?',
         args: [item.product_id, req.userId],
       });
       const product = productResult.rows[0];
@@ -282,12 +283,22 @@ router.post('/', asyncHandler(async (req, res) => {
         await tx.rollback();
         return res.status(400).json({ error: 'Producto no existe' });
       }
+      // Solo un producto por peso admite fracciones (hasta 3 decimales); uno por
+      // pieza sigue vendiéndose en unidades enteras.
+      if (!validQuantity(quantity, product.unit, { min: 0.001 })) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: product.unit
+            ? `Cantidad inválida para ${product.name} (usa hasta 3 decimales)`
+            : `${product.name} se vende por unidades enteras`,
+        });
+      }
 
       // Descuento condicional: el propio UPDATE comprueba el stock. Si otra venta
       // simultánea se adelantó, rowsAffected es 0 y abortamos — el stock nunca
       // puede quedar negativo por esta vía.
       const updated = await tx.execute({
-        sql: 'UPDATE products SET stock = stock - ? WHERE id = ? AND user_id = ? AND stock >= ?',
+        sql: 'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND user_id = ? AND ROUND(stock, 3) >= ?',
         args: [quantity, item.product_id, req.userId, quantity],
       });
       if (updated.rowsAffected !== 1) {
@@ -295,16 +306,21 @@ router.post('/', asyncHandler(async (req, res) => {
         return res.status(409).json({ error: `Stock insuficiente para ${product.name}` });
       }
 
-      total  += quantity * unitPrice;
-      profit += quantity * (unitPrice - (product.purchase_price || 0));
+      // Cada línea se redondea a centavos: es el importe que el cliente ve y
+      // paga, y el total tiene que ser exactamente la suma de lo que se ve.
+      total  += round2(quantity * unitPrice);
+      profit += round2(quantity * (unitPrice - (product.purchase_price || 0)));
       lines.push({
         product_id: product.id,
         product_name: product.name,
-        quantity,
+        quantity: roundQty(quantity),
         unit_price: unitPrice,
         unit_cost: product.purchase_price || 0,
       });
     }
+
+    total = round2(total);
+    profit = round2(profit);
 
     // Un cobro mixto con 0 en una de las partes no es mixto: el POS lo manda
     // como efectivo o transferencia puro. Si llega así es un cliente roto o un

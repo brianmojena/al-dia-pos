@@ -5,16 +5,17 @@ import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTr
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { accountLabel } from '../lib/accountLabel'
+import { UNITS, formatQty, priceSuffix } from '../lib/units'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '' }
+const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '' }
 
 export default function Products() {
   const { user } = useAuth()
   // Decisión del negocio: el empleado da de alta productos nuevos (el dueño
-  // delega la carga de mercancía), pero no edita ni borra los que ya existen.
-  // Ocultarlo aquí es comodidad: quien lo impide es el servidor y, en la caja
-  // de escritorio, su router local.
+  // delega la carga de mercancía) y puede editar su precio de venta.
+  // Los permisos también se validan en el servidor y en el router local
+  // de la caja de escritorio.
   const isOwner = user?.role !== 'cajero'
 
   const [products,  setProducts]  = useState([])
@@ -55,7 +56,7 @@ export default function Products() {
   const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
-    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock })
+    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '' })
     setFormError('')
     setShowForm(true)
   }
@@ -65,11 +66,12 @@ export default function Products() {
     e.preventDefault()
     setSaving(true)
     setFormError('')
-    const body = {
+    const body = editing && !isOwner ? { sale_price: parseFloat(form.sale_price) } : {
       name: form.name,
       purchase_price: parseFloat(form.purchase_price) || 0,
       sale_price: parseFloat(form.sale_price),
-      stock: parseInt(form.stock) || 0,
+      stock: (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock)) || 0,
+      unit: form.unit || null,
     }
     try {
       const res = await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
@@ -160,8 +162,8 @@ export default function Products() {
         <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-4">
           <Info size={16} className="flex-shrink-0 mt-0.5" />
           <p className="text-xs leading-relaxed font-medium">
-            Puedes dar de alta productos nuevos cuando llega mercancía. Cambiar precios o borrar
-            productos que ya existen lo hace el dueño.
+            Puedes dar de alta productos nuevos y cambiar su precio de venta. Los demás cambios
+            y la eliminación de productos los hace el dueño.
           </p>
         </div>
       )}
@@ -190,7 +192,7 @@ export default function Products() {
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
             <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-900">
-                {editing ? 'Editar producto' : 'Nuevo producto'}
+                {editing ? (isOwner ? 'Editar producto' : 'Cambiar precio de venta') : 'Nuevo producto'}
               </h3>
               <button onClick={closeForm} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
                 <X size={20} className="text-gray-500" />
@@ -201,27 +203,68 @@ export default function Products() {
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
                   Nombre del producto
                 </label>
-                <input required placeholder="Ej: Coca-Cola 600ml" {...field('name')} />
+                <input disabled={!!editing && !isOwner} required placeholder="Ej: Coca-Cola 600ml" {...field('name')} />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
+              {/* Productos fraccionados: el precio y el stock pasan a ser por
+                  kg, g o lb, y en la venta se marca cuánto pesa lo que se lleva. */}
+              {(!editing || isOwner) && (
+                <div className="rounded-xl border border-gray-200 px-4 py-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!form.unit}
+                      onChange={(e) => setForm(f => ({ ...f, unit: e.target.checked ? 'lb' : '' }))}
+                      className="w-5 h-5 accent-[#007AFF]"
+                    />
+                    <span className="text-sm font-semibold text-gray-800">Se vende por peso</span>
+                  </label>
+                  {form.unit && (
+                    <div className="mt-3">
+                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                        Unidad de medida
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {UNITS.map(u => (
+                          <button
+                            type="button"
+                            key={u.value}
+                            onClick={() => setForm(f => ({ ...f, unit: u.value }))}
+                            className={`py-2.5 rounded-xl text-sm font-bold border-2 transition-colors ${
+                              form.unit === u.value
+                                ? 'border-[#007AFF] bg-blue-50 text-[#007AFF]'
+                                : 'border-gray-200 text-gray-500 hover:bg-gray-50'
+                            }`}
+                          >
+                            {u.value}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-2">
+                        Los precios y el stock son por {form.unit}. Al vender, escribes cuántos {form.unit} se lleva el cliente y se calcula el total.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className={editing && !isOwner ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-2 gap-3'}>
+                {(!editing || isOwner) && <div>
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                    Precio compra
+                    Precio compra{form.unit ? ` por ${form.unit}` : ''}
                   </label>
                   <input type="number" step="0.01" min="0" placeholder="0.00" {...field('purchase_price')} />
-                </div>
+                </div>}
                 <div>
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                    Precio venta *
+                    Precio venta{form.unit ? ` por ${form.unit}` : ''} *
                   </label>
                   <input required type="number" step="0.01" min="0" placeholder="0.00" {...field('sale_price')} />
                 </div>
               </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                  {editing ? 'Stock' : 'Stock inicial'}
+                  {editing ? 'Stock' : 'Stock inicial'}{form.unit ? ` (${form.unit})` : ''}
                 </label>
-                <input type="number" min="0" placeholder="0" {...field('stock')} />
+                <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
               </div>
 
               {formError && (
@@ -261,7 +304,7 @@ export default function Products() {
                   )}
                   <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Venta</th>
                   <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Stock</th>
-                  {isOwner && <th className="px-5 py-3 w-24"></th>}
+                  <th className="px-5 py-3 w-24"></th>
                 </tr>
               </thead>
               <tbody>
@@ -276,36 +319,36 @@ export default function Products() {
                       )}
                     </td>
                     {isOwner && (
-                      <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}</td>
+                      <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}{priceSuffix(p.unit)}</td>
                     )}
-                    <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">{fmt(p.sale_price)}</td>
+                    <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">{fmt(p.sale_price)}{priceSuffix(p.unit)}</td>
                     <td className="px-5 py-4 text-right">
                       <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
                         p.stock === 0 ? 'bg-red-50 text-red-600' :
                         p.stock <= 5  ? 'bg-orange-50 text-orange-600' :
                                         'bg-green-50 text-green-700'
                       }`}>
-                        {p.stock}
+                        {formatQty(p.stock, p.unit)}
                       </span>
                     </td>
-                    {isOwner && (
-                      <td className="px-5 py-4">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            onClick={() => openEdit(p)}
-                            className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700 transition-colors"
-                          >
-                            <Pencil size={15} />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(p.id, p.name)}
-                            className="p-2 hover:bg-red-50 rounded-xl text-gray-300 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
-                      </td>
-                    )}
+                    <td className="px-5 py-4">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => openEdit(p)}
+                          title={isOwner ? 'Editar producto' : 'Cambiar precio de venta'}
+                          aria-label={isOwner ? 'Editar producto' : 'Cambiar precio de venta'}
+                          className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700 transition-colors"
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        {isOwner && <button
+                          onClick={() => handleDelete(p.id, p.name)}
+                          className="p-2 hover:bg-red-50 rounded-xl text-gray-300 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 size={15} />
+                        </button>}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

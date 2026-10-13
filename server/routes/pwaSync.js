@@ -4,6 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { resolveRegisterId } = require('../lib/register');
+const { parseUnit, validQuantity } = require('../lib/units');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 // Una fotografía bajo la misma transacción: no mezclar stock anterior a una
@@ -14,14 +15,16 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
     const products = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name', args: [req.userId] })).rows;
     const register = resolveRegisterId(req, 'web');
     const open = (await tx.execute({ sql: 'SELECT created_at FROM sales WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL) ORDER BY created_at LIMIT 1', args: [req.userId, register] })).rows[0];
+    const openPurchase = (await tx.execute({ sql: 'SELECT created_at FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL) ORDER BY created_at LIMIT 1', args: [req.userId, register] })).rows[0];
     const last = (await tx.execute({ sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1', args: [req.userId, register] })).rows[0];
-    const snapshot = { products, current_period: { opened_at: last?.closed_at || open?.created_at || null, has_sales: !!open, is_first_close: !last } };
+    const snapshot = { products, current_period: { opened_at: last?.closed_at || open?.created_at || openPurchase?.created_at || null, has_sales: !!(open || openPurchase), is_first_close: !last } };
     if (req.role === 'dueño') {
       snapshot.sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? ORDER BY i.id', args: [req.userId] })).rows;
       const bySale = new Map();
       for (const item of items) { if (!bySale.has(item.sale_id)) bySale.set(item.sale_id, []); bySale.get(item.sale_id).push(item); }
       snapshot.sales = snapshot.sales.map((s) => ({ ...s, items: bySale.get(s.id) || [] }));
+      snapshot.currency_purchases = (await tx.execute({ sql: 'SELECT * FROM currency_purchases WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       snapshot.cash_closes = (await tx.execute({ sql: 'SELECT * FROM cash_closes WHERE user_id = ?', args: [req.userId] })).rows;
       const counts = (await tx.execute({ sql: 'SELECT * FROM inventory_counts WHERE user_id = ?', args: [req.userId] })).rows;
       const countItems = (await tx.execute({ sql: 'SELECT i.* FROM inventory_count_items i JOIN inventory_counts c ON c.id = i.count_id WHERE c.user_id = ?', args: [req.userId] })).rows;
@@ -41,7 +44,13 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
 router.post('/product-operation', asyncHandler(async (req, res) => {
   const { operation_id, method, product_id, product = {}, expected } = req.body;
   if (typeof operation_id !== 'string' || !operation_id || operation_id.length > 100 || !['POST', 'PUT', 'DELETE'].includes(method)) return res.status(400).json({ error: 'Operación de producto inválida' });
-  if (method !== 'POST' && req.role !== 'dueño') return res.status(403).json({ error: 'Solo el dueño puede editar o borrar productos' });
+  const priceOnly = method === 'PUT' && req.role !== 'dueño';
+  if (req.role !== 'dueño' && (method === 'DELETE' || (priceOnly && Object.keys(product).some((key) => key !== 'sale_price')))) {
+    return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta' });
+  }
+  if (priceOnly && (product.sale_price == null || product.sale_price === '' || !Number.isFinite(Number(product.sale_price)) || Number(product.sale_price) < 0)) {
+    return res.status(400).json({ error: 'El precio de venta no es válido' });
+  }
   const db = getDb(), account = await describeAccount(db, req);
   const tx = await db.transaction('write');
   try {
@@ -49,7 +58,7 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
     if (receipt) { await tx.commit(); return res.json(JSON.parse(receipt.response)); }
     if (method !== 'POST' && expected) {
       const previous = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0];
-      if (previous && ['name', 'sale_price', 'purchase_price', 'stock'].some((key) => previous[key] !== expected[key])) {
+      if (previous && (priceOnly ? ['sale_price'] : ['name', 'sale_price', 'purchase_price', 'stock', 'unit']).some((key) => (previous[key] ?? null) !== (expected[key] ?? null))) {
         await tx.rollback();
         return res.status(409).json({ error: 'El producto cambió en otra caja. Los cambios locales están guardados y necesitan revisión antes de subir.' });
       }
@@ -58,20 +67,25 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
     if (method === 'DELETE') {
       await tx.execute({ sql: 'DELETE FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] });
       result = { success: true };
+    } else if (priceOnly) {
+      const updated = await tx.execute({ sql: 'UPDATE products SET sale_price = ? WHERE user_id = ? AND id = ?', args: [Number(product.sale_price), req.userId, product_id] });
+      if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
+      result = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0];
     } else {
       const name = typeof product.name === 'string' ? product.name.trim().replace(/\s+/g, ' ') : '';
       const sale = Number(product.sale_price), purchase = Number(product.purchase_price ?? 0), stock = Number(product.stock ?? 0);
-      if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || !Number.isInteger(stock) || stock < 0) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
+      const unit = parseUnit(product.unit) ?? null;
+      if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || unit === false || !validQuantity(stock, unit)) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
       let id = product_id;
       if (method === 'POST') {
         const existing = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ?', args: [req.userId] })).rows.find((p) => normalize(p.name) === normalize(name));
         if (existing) result = { ...existing, merged: true };
         else {
-          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, stock, account.id, account.email] });
+          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, stock, unit, account.id, account.email] });
           id = Number(insert.lastInsertRowid);
         }
       } else {
-        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, stock, req.userId, id] });
+        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, stock, unit, req.userId, id] });
         if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
       }
       if (!result) result = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? AND id = ?', args: [req.userId, id] })).rows[0];

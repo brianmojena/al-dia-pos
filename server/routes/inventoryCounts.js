@@ -5,6 +5,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
+const { validQuantity, roundQty } = require('../lib/units');
 
 /**
  * Arqueo de inventario.
@@ -74,10 +75,12 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Hay que contar al menos un producto' });
   }
 
+  // Aquí solo se comprueba que sea un número >= 0; si exige entero o admite
+  // decimales (producto por peso) se decide abajo, con el producto delante.
   for (const item of items) {
     const counted = Number(item.counted);
-    if (!Number.isInteger(counted) || counted < 0) {
-      return res.status(400).json({ error: 'Las cantidades contadas deben ser números enteros mayores o iguales a 0' });
+    if (item.counted === null || item.counted === '' || !Number.isFinite(counted) || counted < 0) {
+      return res.status(400).json({ error: 'Las cantidades contadas deben ser números mayores o iguales a 0' });
     }
   }
 
@@ -115,7 +118,7 @@ router.post('/', asyncHandler(async (req, res) => {
       // la pantalla: si entró una venta mientras se contaba, la diferencia se
       // calcula contra el número más fresco y no contra uno ya vencido.
       const productResult = await tx.execute({
-        sql: 'SELECT id, name, stock, purchase_price, sale_price FROM products WHERE id = ? AND user_id = ?',
+        sql: 'SELECT id, name, stock, unit, purchase_price, sale_price FROM products WHERE id = ? AND user_id = ?',
         args: [item.product_id, req.userId],
       });
       const product = productResult.rows[0];
@@ -123,9 +126,17 @@ router.post('/', asyncHandler(async (req, res) => {
         await tx.rollback();
         return res.status(400).json({ error: 'Producto no existe' });
       }
+      if (!validQuantity(counted, product.unit)) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: product.unit
+            ? `La cantidad contada de ${product.name} admite hasta 3 decimales`
+            : `${product.name} se cuenta en unidades enteras`,
+        });
+      }
 
       const expected = Number(product.stock);
-      const difference = counted - expected;
+      const difference = roundQty(counted - expected);
 
       if (difference !== 0) {
         withDifference += 1;
@@ -164,7 +175,7 @@ router.post('/', asyncHandler(async (req, res) => {
                units_missing, units_extra, value_missing, note, account_id, account_email, counted_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [req.userId, client_count_id, lines.length, withDifference,
-             unitsMissing, unitsExtra, valueMissing, note, account.id, account.email, operationDate],
+             roundQty(unitsMissing), roundQty(unitsExtra), Math.round(valueMissing * 100) / 100, note, account.id, account.email, operationDate],
     });
     const countId = Number(inserted.lastInsertRowid);
 

@@ -23,6 +23,7 @@ app.use('/api/sales',     requireAuth, salesRouter);
 // saber antes de declarar el efectivo contado.
 app.use('/api/dashboard', requireAuth, requireOwner, dashboardRouter);
 app.use('/api/push', requireAuth, requireOwner, require('./routes/push'));
+app.use('/api/currency-purchases', requireAuth, require('./routes/currencyPurchases'));
 app.use('/api/cash-closes', requireAuth, cashClosesRouter);
 app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 // Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner

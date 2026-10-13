@@ -88,7 +88,7 @@ async function routeRequest(method, fullPath, body) {
 
     // --- products ---
     // Mismas reglas que el servidor: un empleado puede dar de ALTA productos
-    // nuevos, pero editar o borrar los que ya existen es del dueño. Si la caja
+    // nuevos y cambiar su precio de venta. Otros cambios son del dueño. Si la caja
     // no las aplicara, el cambio quedaría hecho aquí, el servidor lo rechazaría
     // al sincronizar, y la caja y la web contarían historias distintas.
     if (parts[0] === 'api' && parts[1] === 'products') {
@@ -103,8 +103,9 @@ async function routeRequest(method, fullPath, body) {
           return fail(err.code === 'DUPLICATE_NAME' ? 409 : 400, err.message);
         }
       }
-      if (parts.length === 3 && (method === 'PUT' || method === 'DELETE') && session.role === 'cajero') {
-        return fail(403, 'Solo el dueño puede cambiar o borrar productos que ya existen');
+      if (parts.length === 3 && session.role === 'cajero'
+          && (method === 'DELETE' || (method === 'PUT' && Object.keys(body).some((key) => key !== 'sale_price')))) {
+        return fail(403, 'El cajero solo puede cambiar el precio de venta');
       }
       if (parts.length === 3 && method === 'PUT') {
         try {
@@ -136,6 +137,22 @@ async function routeRequest(method, fullPath, body) {
           return ok(201, queries.createSaleLocal(body));
         } catch (err) {
           return fail(SALE_ERROR_STATUS[err.code] || 400, err.message);
+        }
+      }
+    }
+
+    // --- compra de divisa ---
+    // Cualquier cuenta compra; el historial es del dueño (como el servidor).
+    if (parts[0] === 'api' && parts[1] === 'currency-purchases' && parts.length === 2) {
+      if (method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listCurrencyPurchases({ date: query.date }));
+      }
+      if (method === 'POST') {
+        try {
+          return ok(201, queries.createCurrencyPurchaseLocal(body || {}));
+        } catch (err) {
+          return fail(400, err.message);
         }
       }
     }

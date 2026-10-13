@@ -5,7 +5,8 @@ const { startTestServer, registerUser, createProduct } = require('./helpers');
 /**
  * El conteo a ciegas del cierre de caja solo vale si el cajero no puede
  * averiguar por otra vía cuánto debería haber. Estos tests fijan esa frontera:
- * un cajero puede cobrar y cerrar la caja, y nada más.
+ * el cajero cobra, cierra la caja, crea productos y cambia su precio de venta,
+ * pero no accede a la auditoría del dueño.
  */
 
 const crearCajero = async (api, tokenDueño, email, password = 'cajero1234') => {
@@ -41,25 +42,35 @@ test('roles: dueño y cajero', async (t) => {
   });
 
   // Dar de ALTA productos sí puede (el dueño delega la carga de mercancía):
-  // eso lo cubre productCreate.test.js. Lo que sigue prohibido es tocar los
-  // que ya existen.
-  await t.test('un cajero no puede editar ni borrar productos existentes', async () => {
+  // eso lo cubre productCreate.test.js. También puede editar el precio de venta.
+  await t.test('un cajero puede editar el precio de venta, pero no otros datos ni borrar productos', async () => {
     const dueño = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, dueño, { name: 'Ron', stock: 10, sale_price: 500 });
     const cajero = await crearCajero(ctx.api, dueño, `caja2${Date.now()}@test.local`);
 
-    // El caso que importa: bajarse el precio para quedarse con la diferencia.
     const editar = await ctx.api('PUT', `/api/products/${productId}`, {
       token: cajero.token,
       body: { sale_price: 1 },
     });
-    assert.equal(editar.status, 403);
+    assert.equal(editar.status, 200);
+    assert.equal(Number(editar.body.sale_price), 1);
+    assert.equal(Number(editar.body.stock), 10);
+    assert.equal(Number(editar.body.purchase_price), 60);
+    for (const body of [{ name: 'Otro' }, { stock: 100 }, { purchase_price: 0 }, { sale_price: 2, stock: 100 }]) {
+      assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body })).status, 403);
+    }
+    for (const sale_price of [-1, '', null, 'abc']) {
+      assert.equal((await ctx.api('PUT', `/api/products/${productId}`, { token: cajero.token, body: { sale_price } })).status, 400);
+    }
+    const otroDueño = await registerUser(ctx.api);
+    const otroProducto = await createProduct(ctx.api, otroDueño);
+    assert.equal((await ctx.api('PUT', `/api/products/${otroProducto}`, { token: cajero.token, body: { sale_price: 1 } })).status, 404);
 
     const borrar = await ctx.api('DELETE', `/api/products/${productId}`, { token: cajero.token });
     assert.equal(borrar.status, 403);
 
     const producto = await ctx.db.execute({ sql: 'SELECT sale_price FROM products WHERE id = ?', args: [productId] });
-    assert.equal(Number(producto.rows[0].sale_price), 500, 'el precio no pudo cambiarse');
+    assert.equal(Number(producto.rows[0].sale_price), 1, 'se conserva el precio editado sin permitir otros cambios');
   });
 
   await t.test('un cajero sí puede ver el catálogo, cobrar y cerrar la caja', async () => {

@@ -9,6 +9,7 @@ import Products from './pages/Products'
 import POS from './pages/POS'
 import Sales from './pages/Sales'
 import Caja from './pages/Caja'
+import Divisas from './pages/Divisas'
 import Cajeros from './pages/Cajeros'
 import Inventario from './pages/Inventario'
 import ImportarProductos from './pages/ImportarProductos'
@@ -32,6 +33,8 @@ export default function App() {
             <Route index element={<Navigate to="/pos" replace />} />
             <Route path="pos"  element={<POS />} />
             <Route path="caja" element={<Caja />} />
+            {/* Cualquier cuenta compra divisas; el historial lo ve solo el dueño. */}
+            <Route path="divisas" element={<Divisas />} />
             {/* El empleado entra para dar de alta productos nuevos; la
                 pantalla le oculta editar, borrar, importar y contar. */}
             <Route path="products" element={<Products />} />

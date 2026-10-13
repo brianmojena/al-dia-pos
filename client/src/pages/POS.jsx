@@ -12,8 +12,13 @@ import DeviceRatesEditor from '../components/DeviceRatesEditor'
 import { useExchangeRates } from '../lib/exchangeRates'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
+import { formatQty, lineTotal, priceSuffix, roundQty } from '../lib/units'
 
-const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+// Hasta 2 decimales: 1,3 lb a $55 son $71,50 y el cliente tiene que ver ese importe.
+const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Math.round((n || 0) * 100) / 100)
+
+// Atajos de peso para el modal: lo más común en cada unidad.
+const QUICK = { lb: [0.5, 1, 2, 5], kg: [0.5, 1, 2, 5], g: [100, 250, 500, 1000] }
 
 export default function POS() {
   const { user } = useAuth()
@@ -31,6 +36,9 @@ export default function POS() {
   const [ratesOpen,         setRatesOpen]         = useState(false)
   const [lastPayment,       setLastPayment]       = useState({ payment_method: 'efectivo' })
   const [error,             setError]             = useState('')
+  // Producto por peso que se está pesando (modal "¿cuántas lb?") y lo que se teclea.
+  const [weighing,          setWeighing]          = useState(null)
+  const [weighInput,        setWeighInput]        = useState('')
   const [queuedOffline,     setQueuedOffline]     = useState(false)
   const [rejected,          setRejected]          = useState([])
   const pendingCountRef = useRef(0)
@@ -81,6 +89,13 @@ export default function POS() {
   )
 
   const addToCart = (product) => {
+    // Un producto por peso no se suma de uno en uno: se pregunta cuánto pesa.
+    if (product.unit) {
+      const inCart = cart.find(i => i.id === product.id)
+      setWeighInput(inCart ? String(inCart.quantity) : '')
+      setWeighing(product)
+      return
+    }
     setCart(prev => {
       const existing = prev.find(i => i.id === product.id)
       if (existing) {
@@ -91,13 +106,28 @@ export default function POS() {
     })
   }
 
+  // Confirma el peso: fija la cantidad del producto en el carrito (no la suma —
+  // volver a tocar el producto sirve para corregir el peso).
+  const weighQty = parseFloat(String(weighInput).replace(',', '.'))
+  const weighValid = weighing && Number.isFinite(weighQty) && weighQty >= 0.001 && weighQty <= weighing.stock
+    && Math.abs(roundQty(weighQty) - weighQty) < 1e-9
+  const confirmWeight = () => {
+    if (!weighValid) return
+    const product = weighing
+    setCart(prev => prev.some(i => i.id === product.id)
+      ? prev.map(i => i.id === product.id ? { ...i, quantity: weighQty } : i)
+      : [...prev, { ...product, quantity: weighQty }])
+    setWeighing(null)
+  }
+
   const updateQty = (id, delta) =>
     setCart(prev => prev.map(i => i.id === id ? { ...i, quantity: i.quantity + delta } : i).filter(i => i.quantity > 0))
 
   const removeFromCart = (id) => setCart(prev => prev.filter(i => i.id !== id))
 
-  const total     = cart.reduce((s, i) => s + i.sale_price * i.quantity, 0)
-  const itemCount = cart.reduce((s, i) => s + i.quantity, 0)
+  const total     = cart.reduce((s, i) => s + lineTotal(i.quantity, i.sale_price), 0)
+  // Un producto por peso cuenta como una línea, no como "2,35 artículos".
+  const itemCount = cart.reduce((s, i) => s + (i.unit ? 1 : i.quantity), 0)
 
   // El límite lo configura el dueño desde la app móvil (PUT /api/auth/settings).
   // La UI lo bloquea por adelantado, pero la validación definitiva está en el
@@ -166,8 +196,18 @@ export default function POS() {
     <div className="flex items-center gap-3 py-3 border-b border-gray-50 last:border-0">
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
-        <p className="text-xs text-gray-400">{fmt(item.sale_price)} c/u</p>
+        <p className="text-xs text-gray-400">{item.unit ? `${fmt(item.sale_price)} por ${item.unit}` : `${fmt(item.sale_price)} c/u`}</p>
       </div>
+      {item.unit ? (
+        <button
+          onClick={() => addToCart(item)}
+          className="flex items-center gap-1.5 px-3 h-8 rounded-lg bg-blue-50 text-[#007AFF] text-sm font-bold active:scale-95 transition-all"
+          title="Cambiar el peso"
+        >
+          {formatQty(item.quantity, item.unit)}
+          <Pencil size={12} />
+        </button>
+      ) : (
       <div className="flex items-center gap-2">
         <button
           onClick={() => updateQty(item.id, -1)}
@@ -184,8 +224,9 @@ export default function POS() {
           <Plus size={13} />
         </button>
       </div>
+      )}
       <div className="text-right min-w-[56px]">
-        <p className="text-sm font-semibold text-gray-900">{fmt(item.sale_price * item.quantity)}</p>
+        <p className="text-sm font-semibold text-gray-900">{fmt(lineTotal(item.quantity, item.sale_price))}</p>
         <button onClick={() => removeFromCart(item.id)} className="text-gray-300 hover:text-red-400 transition-colors">
           <Trash2 size={12} />
         </button>
@@ -216,6 +257,69 @@ export default function POS() {
           <button onClick={() => setError('')} className="flex-shrink-0 opacity-70 hover:opacity-100">
             <X size={16} />
           </button>
+        </div>
+      )}
+
+      {/* Producto por peso: cuántas lb/kg/g se lleva el cliente */}
+      {weighing && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setWeighing(null)} />
+          <form
+            onSubmit={(e) => { e.preventDefault(); confirmWeight() }}
+            className="relative bg-white rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl w-full sm:w-96 sm:mx-4"
+          >
+            <div className="flex items-start justify-between mb-1">
+              <div className="min-w-0">
+                <h3 className="text-lg font-bold text-gray-900 truncate">{weighing.name}</h3>
+                <p className="text-sm text-gray-400">{fmt(weighing.sale_price)} por {weighing.unit} · quedan {formatQty(weighing.stock, weighing.unit)}</p>
+              </div>
+              <button type="button" onClick={() => setWeighing(null)} className="p-2 -mr-2 hover:bg-gray-100 rounded-xl">
+                <X size={20} className="text-gray-500" />
+              </button>
+            </div>
+            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mt-4 mb-1.5">
+              ¿Cuántas {weighing.unit}?
+            </label>
+            <input
+              autoFocus
+              type="number" step="any" min="0" inputMode="decimal"
+              value={weighInput}
+              onChange={e => setWeighInput(e.target.value)}
+              placeholder="0"
+              className="w-full text-center text-4xl font-bold border-2 border-gray-200 rounded-2xl py-4 focus:outline-none focus:border-[#007AFF] transition-colors"
+            />
+            <div className="grid grid-cols-4 gap-2 mt-3">
+              {(QUICK[weighing.unit] || []).map(q => (
+                <button
+                  type="button" key={q}
+                  onClick={() => setWeighInput(String(q))}
+                  className="py-2.5 rounded-xl bg-gray-100 text-sm font-bold text-gray-700 hover:bg-gray-200 active:scale-95 transition-all"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-baseline justify-between mt-5">
+              <span className="text-gray-500 font-medium">Total</span>
+              <span className="text-3xl font-bold text-[#007AFF]">
+                {weighValid ? fmt(lineTotal(weighQty, weighing.sale_price)) : '—'}
+              </span>
+            </div>
+            {weighInput !== '' && !weighValid && (
+              <p className="text-xs text-red-500 mt-2">
+                {weighQty > weighing.stock
+                  ? `Solo quedan ${formatQty(weighing.stock, weighing.unit)}.`
+                  : 'Escribe una cantidad válida (hasta 3 decimales).'}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={!weighValid}
+              className="w-full bg-[#007AFF] text-white py-4 rounded-2xl font-bold text-lg mt-4 active:scale-95 transition-all disabled:opacity-40 shadow-lg shadow-blue-200"
+            >
+              Agregar a la venta
+            </button>
+          </form>
         </div>
       )}
 
@@ -376,12 +480,12 @@ export default function POS() {
                   <p className="text-sm font-semibold text-gray-900 mb-1.5 line-clamp-2 leading-tight min-h-[2.5rem]">
                     {p.name}
                   </p>
-                  <p className="text-[#007AFF] font-bold text-base">{fmt(p.sale_price)}</p>
-                  <p className="text-xs text-gray-400 mt-1">Stock: {p.stock}</p>
+                  <p className="text-[#007AFF] font-bold text-base">{fmt(p.sale_price)}{priceSuffix(p.unit)}</p>
+                  <p className="text-xs text-gray-400 mt-1">Stock: {formatQty(p.stock, p.unit)}</p>
                   {inCart && (
                     <div className="mt-2">
                       <span className="bg-[#007AFF] text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">
-                        {inCart.quantity} en carrito
+                        {inCart.unit ? `${formatQty(inCart.quantity, inCart.unit)} en carrito` : `${inCart.quantity} en carrito`}
                       </span>
                     </div>
                   )}

@@ -64,9 +64,24 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     const snapshot = await ctx.api('GET', '/api/sync/snapshot', { token });
     assert.equal(snapshot.body.inventory_counts[0].items[0].counted, 15);
   });
-  await t.test('cajero puede crear productos pero no editar mediante el sincronizador', async () => {
+  await t.test('cajero crea productos y edita solo precio de venta mediante el sincronizador', async () => {
     const body = { operation_id: 'cashier-create', method: 'POST', product: { name: 'Agua', stock: 3, sale_price: 5 } };
     assert.equal((await operation(body, cashier.token)).status, 200);
-    assert.equal((await operation({ ...body, operation_id: 'cashier-edit', method: 'PUT', product_id: product }, cashier.token)).status, 403);
+    assert.equal((await operation({ ...body, operation_id: 'cashier-edit-forbidden', method: 'PUT', product_id: product }, cashier.token)).status, 403);
+    const before = (await ctx.api('GET', '/api/products', { token })).body.find((p) => Number(p.id) === product);
+    const edit = { operation_id: 'cashier-price', method: 'PUT', product_id: product, product: { sale_price: 12.5 }, expected: { sale_price: before.sale_price } };
+    const saved = await operation(edit, cashier.token);
+    assert.equal(saved.status, 200);
+    assert.equal(Number(saved.body.sale_price), 12.5);
+    assert.equal(saved.body.stock, before.stock);
+    assert.equal(saved.body.name, before.name);
+    assert.equal(saved.body.purchase_price, before.purchase_price);
+    assert.deepEqual((await operation(edit, cashier.token)).body, saved.body, 'el reintento devuelve el mismo recibo');
+    assert.equal((await operation({ ...edit, operation_id: 'stale-price', product: { sale_price: 14 } }, cashier.token)).status, 409);
+    for (const sale_price of [-1, '', null, 'abc']) {
+      assert.equal((await operation({ ...edit, operation_id: `bad-price-${sale_price}`, product: { sale_price } }, cashier.token)).status, 400);
+    }
+    assert.equal((await operation({ ...edit, operation_id: 'cashier-delete', method: 'DELETE' }, cashier.token)).status, 403);
+    assert.equal((await operation({ ...edit, operation_id: 'missing-product', product_id: 999999, expected: undefined }, cashier.token)).status, 404);
   });
 });

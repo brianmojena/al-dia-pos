@@ -156,7 +156,7 @@ test('down-sync del escritorio', async (t) => {
         return { ok: false, status: 404, data: null };
       };
       const summary = await syncOnce();
-      assert.deepEqual(summary.downSync, { sales: 5000, closes: 0, counts: 0, more: false, error: null });
+      assert.deepEqual(summary.downSync, { sales: 5000, closes: 0, counts: 0, purchases: 0, more: false, error: null });
       assert.equal(ctx.db.prepare('SELECT COUNT(*) AS n FROM sales').get().n, 5000);
       assert.equal(ctx.queries.getSyncState('delta_after_sale'), '5000');
       assert.equal(ctx.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'syncing'").get().n, 0);
@@ -218,8 +218,9 @@ test('down-sync del escritorio', async (t) => {
       ctx.queries.setSyncState('delta_after_sale', 50);
       ctx.queries.setSyncState('delta_after_close', 7);
       ctx.queries.setSyncState('delta_after_count', 3);
-      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, close: 7, count: 3 });
-      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, close: 0, count: 0 });
+      ctx.queries.setSyncState('delta_after_purchase', 9);
+      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, close: 7, count: 3 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, close: 0, count: 0 });
     } finally {
       ctx.close();
     }

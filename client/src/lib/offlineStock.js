@@ -19,7 +19,7 @@ export function applyPendingSales(products, pendingSales) {
     for (const item of sale?.items || []) {
       const id = Number(item.product_id)
       const quantity = Number(item.quantity)
-      if (Number.isFinite(id) && Number.isInteger(quantity) && quantity > 0) {
+      if (Number.isFinite(id) && quantity > 0) {
         pending.set(id, (pending.get(id) || 0) + quantity)
       }
     }
@@ -28,6 +28,6 @@ export function applyPendingSales(products, pendingSales) {
 
   return products.map((p) => {
     const sold = pending.get(Number(p.id))
-    return sold ? { ...p, stock: Math.max(0, Number(p.stock) - sold) } : p
+    return sold ? { ...p, stock: Math.max(0, Math.round((Number(p.stock) - sold) * 1000) / 1000) } : p
   })
 }

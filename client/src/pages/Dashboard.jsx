@@ -1,3 +1,4 @@
+import { formatQty } from '../lib/units'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
@@ -178,7 +179,7 @@ export default function Dashboard() {
                 <span className={`font-bold text-sm px-2 py-0.5 rounded-lg ${
                   p.stock === 0 ? 'bg-red-100 text-red-600' : 'bg-orange-100 text-orange-700'
                 }`}>
-                  {p.stock === 0 ? 'AGOTADO' : `${p.stock} uds`}
+                  {p.stock === 0 ? 'AGOTADO' : `${formatQty(p.stock, p.unit || 'uds')}`}
                 </span>
               </div>
             ))}

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
 const { todayBounds, boundsForDate } = require('../lib/businessDay');
-const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
+const { PAYMENT_METHODS, paymentSplit, foreignFields, round2, purchaseSplit, purchaseFields } = require('../lib/payment');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -68,6 +68,7 @@ function prepareDeltaSession(userId) {
     const reset = db.transaction(() => {
       setSyncState('delta_user_id', userId);
       setSyncState('delta_after_sale', 0);
+      setSyncState('delta_after_purchase', 0);
       setSyncState('delta_after_close', 0);
       setSyncState('delta_after_count', 0);
     });
@@ -75,6 +76,7 @@ function prepareDeltaSession(userId) {
   }
   return {
     sale: Number(getSyncState('delta_after_sale') || 0),
+    purchase: Number(getSyncState('delta_after_purchase') || 0),
     close: Number(getSyncState('delta_after_close') || 0),
     count: Number(getSyncState('delta_after_count') || 0),
   };
@@ -125,8 +127,38 @@ const findProductByName = (db, name) => {
     .find((p) => normalizeName(p.name) === key) || null;
 };
 
-function createProduct({ name, purchase_price = 0, sale_price, stock = 0 }) {
+const UNITS = ['kg', 'g', 'lb'];
+
+// Cantidades por peso con hasta 3 decimales (misma regla que el servidor).
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
+/** undefined/null/'' = por unidad (null); 'kg' | 'g' | 'lb' = por peso. */
+function normalizeUnit(unit) {
+  if (unit === undefined || unit === null || unit === '') return null;
+  if (!UNITS.includes(unit)) {
+    throw new Error("La unidad debe ser kg, g o lb (o dejarla vacía para vender por unidad)");
+  }
+  return unit;
+}
+
+/** Stock o cantidad: decimal (3 como máximo) si el producto es por peso, entero si no. */
+function normalizeQuantity(value, unit, { allowZero }) {
+  const n = Number(value);
+  const bad = !Number.isFinite(n) || n < 0 || (!allowZero && n <= 0) || value === null || value === '';
+  if (bad) return NaN;
+  return unit ? round3(n) : (Number.isInteger(n) ? n : NaN);
+}
+
+function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit }) {
   const db = getLocalDb();
+  const cleanUnit = normalizeUnit(unit);
+  const cleanStock = normalizeQuantity(stock, cleanUnit, { allowZero: true });
+  if (Number.isNaN(cleanStock)) {
+    throw new Error(cleanUnit
+      ? 'El stock debe ser un número mayor o igual a 0'
+      : 'El stock debe ser un número entero mayor o igual a 0');
+  }
+  stock = cleanStock;
   const clientOpId = crypto.randomUUID();
   const cleanName = String(name ?? '').trim().replace(/\s+/g, ' ');
 
@@ -144,15 +176,15 @@ function createProduct({ name, purchase_price = 0, sale_price, stock = 0 }) {
 
   const insert = db.transaction(() => {
     const result = db.prepare(`
-      INSERT INTO products (name, purchase_price, sale_price, stock) VALUES (?, ?, ?, ?)
-    `).run(cleanName, purchase_price, sale_price, stock);
+      INSERT INTO products (name, purchase_price, sale_price, stock, unit) VALUES (?, ?, ?, ?, ?)
+    `).run(cleanName, purchase_price, sale_price, stock, cleanUnit);
     const localId = result.lastInsertRowid;
 
     enqueueOutbox(db, {
       op_type: 'product.create',
       client_op_id: clientOpId,
       local_ref_id: localId,
-      payload: { local_product_id: localId, name: cleanName, purchase_price, sale_price, stock },
+      payload: { local_product_id: localId, name: cleanName, purchase_price, sale_price, stock, unit: cleanUnit },
     });
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(localId);
@@ -161,19 +193,30 @@ function createProduct({ name, purchase_price = 0, sale_price, stock = 0 }) {
   return insert();
 }
 
-function updateProduct(id, { name, purchase_price, sale_price, stock }) {
+function updateProduct(id, { name, purchase_price, sale_price, stock, unit }) {
+  if (sale_price !== undefined && (sale_price === null || sale_price === '' || !Number.isFinite(Number(sale_price)) || Number(sale_price) < 0)) {
+    throw new Error('El precio de venta no es válido');
+  }
   const db = getLocalDb();
   const existing = db.prepare('SELECT * FROM products WHERE id = ? AND deleted = 0').get(id);
   if (!existing) return null;
-  if (stock !== undefined && (!Number.isInteger(Number(stock)) || Number(stock) < 0)) {
-    throw new Error('El stock debe ser un número entero mayor o igual a 0');
+  const nextUnit = unit === undefined ? existing.unit : normalizeUnit(unit);
+  // Se valida el stock que va a quedar (el nuevo o el que ya había) contra la
+  // unidad que va a quedar: pasar un producto con decimales a "por unidad"
+  // sin corregir el stock lo dejaría con medio producto.
+  const nextStock = normalizeQuantity(stock ?? existing.stock, nextUnit, { allowZero: true });
+  if (Number.isNaN(nextStock)) {
+    throw new Error(nextUnit
+      ? 'El stock debe ser un número mayor o igual a 0'
+      : 'El stock debe ser un número entero mayor o igual a 0');
   }
 
   const next = {
     name: name ?? existing.name,
     purchase_price: purchase_price ?? existing.purchase_price,
     sale_price: sale_price ?? existing.sale_price,
-    stock: stock ?? existing.stock,
+    stock: nextStock,
+    unit: nextUnit,
   };
 
   // Solo viaja al servidor lo que de verdad cambió. El formulario manda todos
@@ -182,6 +225,7 @@ function updateProduct(id, { name, purchase_price, sale_price, stock }) {
   // que entraron entretanto desde la web u otra caja.
   const changed = {};
   if (String(next.name) !== String(existing.name)) changed.name = next.name;
+  if (next.unit !== (existing.unit ?? null)) changed.unit = next.unit;
   for (const key of ['purchase_price', 'sale_price', 'stock']) {
     if (Number(next[key]) !== Number(existing[key])) changed[key] = next[key];
   }
@@ -189,8 +233,8 @@ function updateProduct(id, { name, purchase_price, sale_price, stock }) {
 
   const update = db.transaction(() => {
     db.prepare(`
-      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ? WHERE id = ?
-    `).run(next.name, next.purchase_price, next.sale_price, next.stock, id);
+      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE id = ?
+    `).run(next.name, next.purchase_price, next.sale_price, next.stock, next.unit, id);
 
     enqueueOutbox(db, {
       op_type: 'product.update',
@@ -272,10 +316,6 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
     const lines = [];
 
     for (const item of items) {
-      const quantity = Number(item.quantity);
-      if (!Number.isInteger(quantity) || quantity <= 0) {
-        throw Object.assign(new Error('Cantidad inválida'), { code: 'BAD_QUANTITY' });
-      }
       const unitPrice = Number(item.unit_price);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
         throw Object.assign(new Error('Precio inválido'), { code: 'BAD_PRICE' });
@@ -286,8 +326,15 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
         throw Object.assign(new Error('Producto no existe'), { code: 'NO_PRODUCT' });
       }
 
+      // Decimal sólo si el producto se vende por peso; si no, entero.
+      const quantity = normalizeQuantity(item.quantity, product.unit, { allowZero: false });
+      if (Number.isNaN(quantity) || quantity <= 0) {
+        throw Object.assign(new Error('Cantidad inválida'), { code: 'BAD_QUANTITY' });
+      }
+
+      // ROUND evita que 12.5 - 2.35 deje 10.149999999999999 en el stock.
       const updated = db.prepare(
-        'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?'
+        'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND stock >= ?'
       ).run(quantity, item.product_id, quantity);
       if (updated.changes !== 1) {
         throw Object.assign(
@@ -296,8 +343,9 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
         );
       }
 
-      total  += quantity * unitPrice;
-      profit += quantity * (unitPrice - (product.purchase_price || 0));
+      // Cada línea se redondea a centavos y el total es la suma de líneas.
+      total  += round2(quantity * unitPrice);
+      profit += round2(quantity * (unitPrice - (product.purchase_price || 0)));
       lines.push({
         product_id: product.id,
         product_name: product.name,
@@ -306,6 +354,8 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
         unit_cost: product.purchase_price || 0,
       });
     }
+    total = round2(total);
+    profit = round2(profit);
 
     // El total recién se conoce aquí: un mixto que no deja efectivo no es
     // mixto, y aceptarlo pondría efectivo negativo en el arqueo.
@@ -374,6 +424,72 @@ function getSale(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Compra de divisa
+// ---------------------------------------------------------------------------
+
+/**
+ * Registra sin red una compra de dólares o euros: los pesos que salen de la
+ * gaveta (monto × tasa) los calcula esta función, no el cliente. Fila y outbox
+ * se guardan en una sola transacción, igual que una venta.
+ */
+function createCurrencyPurchaseLocal(body = {}) {
+  let fields;
+  try { fields = purchaseFields(body); }
+  catch (error) { throw Object.assign(error, { code: 'BAD_PURCHASE' }); }
+
+  const db = getLocalDb();
+  const clientPurchaseId = crypto.randomUUID();
+  const registerId = getRegisterId();
+  const session = getSession();
+  const accountEmail = session?.email ?? null;
+  // Sin shop_rate del cliente se compara contra la tasa de la tienda que
+  // tiene guardada esta caja, igual que en los cobros en divisa.
+  if (fields.shop_rate == null && !('shop_rate' in body)) {
+    fields.shop_rate = session?.[fields.foreign_currency === 'USD' ? 'usd_rate' : 'eur_rate'] ?? null;
+  }
+
+  const create = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO currency_purchases
+        (client_purchase_id, origin, register_id, account_email, foreign_currency, foreign_amount,
+         exchange_rate, shop_rate, cup_amount)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?)
+    `).run(clientPurchaseId, registerId, accountEmail, fields.foreign_currency, fields.foreign_amount,
+      fields.exchange_rate, fields.shop_rate, fields.cup_amount);
+    const purchaseId = result.lastInsertRowid;
+    const row = db.prepare('SELECT * FROM currency_purchases WHERE id = ?').get(purchaseId);
+
+    enqueueOutbox(db, {
+      op_type: 'currency_purchase.create',
+      client_op_id: clientPurchaseId,
+      local_ref_id: purchaseId,
+      payload: {
+        client_purchase_id: clientPurchaseId,
+        foreign_currency: fields.foreign_currency,
+        foreign_amount: fields.foreign_amount,
+        exchange_rate: fields.exchange_rate,
+        shop_rate: fields.shop_rate,
+        register_id: registerId,
+        // Hora real de la operación (UTC, ISO) para que el servidor la ponga en
+        // el día correcto aunque suba horas después.
+        sold_at: `${row.created_at.replace(' ', 'T')}Z`,
+      },
+    });
+    return row;
+  });
+  return create();
+}
+
+function listCurrencyPurchases({ date } = {}) {
+  const db = getLocalDb();
+  if (!date) return db.prepare('SELECT * FROM currency_purchases ORDER BY created_at DESC, id DESC LIMIT 200').all();
+  const { start, end } = boundsForDate(date);
+  return db.prepare(
+    'SELECT * FROM currency_purchases WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC, id DESC'
+  ).all(start, end);
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
@@ -411,13 +527,17 @@ function getDashboard() {
     const split = paymentSplit(sale);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
+  for (const purchase of periodPurchases(db)) {
+    const split = purchaseSplit(purchase);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inv = db.prepare(`
     SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(stock), 0) AS units
     FROM products WHERE deleted = 0
   `).get();
-  const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: inv.units };
+  const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: round3(inv.units) };
 
   return { today: todayStats, holdings, inventory, lowStock, recentSales, audit: { offRateSales: offRate.n } };
 }
@@ -446,6 +566,13 @@ const periodSales = (db, periodStart) =>
      FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
+// Compras de divisa de esta caja que ningún arqueo ha cubierto todavía.
+const periodPurchases = (db) =>
+  db.prepare(
+    `SELECT id, client_purchase_id, foreign_currency, foreign_amount, cup_amount, created_at
+     FROM currency_purchases WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all();
+
 /**
  * Describe el período abierto SIN revelar cuánto debería haber.
  *
@@ -458,12 +585,14 @@ function getCurrentCashPeriod() {
   const db = getLocalDb();
   const periodStart = getPeriodStart(db);
   const sales = periodSales(db, periodStart);
+  const purchases = periodPurchases(db);
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
+  const firstAt = [sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? null;
 
   return {
-    opened_at: isFirstClose ? (sales[0]?.created_at ?? null) : periodStart,
+    opened_at: isFirstClose ? firstAt : periodStart,
     is_first_close: isFirstClose,
-    has_sales: sales.length > 0,
+    has_sales: sales.length > 0 || purchases.length > 0,
   };
 }
 
@@ -507,10 +636,14 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
   const create = db.transaction(() => {
     const periodStart = getPeriodStart(db);
     const sales = periodSales(db, periodStart);
+    const purchases = periodPurchases(db);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
     // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
-    const sumOf = (key) => round2(sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0));
+    const sumOf = (key) => round2(
+      sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0)
+      + purchases.reduce((sum, p) => sum + purchaseSplit(p)[key], 0)
+    );
     const cash = sumOf('cash');
     const transfer = sumOf('transfer');
     const usd = sumOf('usd');
@@ -518,7 +651,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
 
     const expectedCash = float + cash;
     const openedAt = periodStart === BEGINNING_OF_TIME
-      ? (sales[0]?.created_at ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
+      ? ([sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
       : periodStart;
 
     const result = db.prepare(`
@@ -542,6 +675,12 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         .run(closeId, ...sales.map((sale) => sale.client_sale_id));
     }
 
+    if (purchases.length > 0) {
+      const placeholders = purchases.map(() => '?').join(',');
+      db.prepare(`UPDATE currency_purchases SET cash_close_id = ? WHERE client_purchase_id IN (${placeholders}) AND cash_close_id IS NULL`)
+        .run(closeId, ...purchases.map((p) => p.client_purchase_id));
+    }
+
     enqueueOutbox(db, {
       op_type: 'cash_close.create',
       client_op_id: clientCloseId,
@@ -555,6 +694,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         note,
         closed_at: db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at,
         client_sale_ids: sales.map(s => s.client_sale_id),
+        client_purchase_ids: purchases.map(p => p.client_purchase_id),
       },
     });
 
@@ -599,15 +739,6 @@ function createInventoryCountLocal({ items, note = null }) {
   if (!Array.isArray(items) || items.length === 0) {
     throw Object.assign(new Error('Hay que contar al menos un producto'), { code: 'EMPTY_COUNT' });
   }
-  for (const item of items) {
-    const counted = Number(item.counted);
-    if (!Number.isInteger(counted) || counted < 0) {
-      throw Object.assign(
-        new Error('Las cantidades contadas deben ser números enteros mayores o iguales a 0'),
-        { code: 'BAD_COUNT' }
-      );
-    }
-  }
   const ids = items.map(i => Number(i.product_id));
   if (new Set(ids).size !== ids.length) {
     throw Object.assign(new Error('Un producto aparece repetido en el conteo'), { code: 'DUPLICATE' });
@@ -625,14 +756,24 @@ function createInventoryCountLocal({ items, note = null }) {
     let withDifference = 0;
 
     for (const item of items) {
-      const counted = Number(item.counted);
       const product = db.prepare('SELECT * FROM products WHERE id = ? AND deleted = 0').get(item.product_id);
       if (!product) {
         throw Object.assign(new Error('Producto no existe'), { code: 'NO_PRODUCT' });
       }
 
+      // Lo contado es decimal (3 como máximo) en productos por peso; entero en el resto.
+      const counted = normalizeQuantity(item.counted, product.unit, { allowZero: true });
+      if (Number.isNaN(counted)) {
+        throw Object.assign(
+          new Error(product.unit
+            ? `La cantidad contada de ${product.name} debe ser un número mayor o igual a 0`
+            : `La cantidad contada de ${product.name} debe ser un número entero mayor o igual a 0`),
+          { code: 'BAD_COUNT' }
+        );
+      }
+
       const expected = product.stock;
-      const difference = counted - expected;
+      const difference = round3(counted - expected);
 
       if (difference !== 0) {
         withDifference += 1;
@@ -640,7 +781,7 @@ function createInventoryCountLocal({ items, note = null }) {
           unitsMissing += -difference;
           // A precio de VENTA: si la unidad se fue por una venta que nadie
           // registró, eso es el dinero que debió entrar a la caja.
-          valueMissing += -difference * (product.sale_price || 0);
+          valueMissing += round2(-difference * (product.sale_price || 0));
         } else {
           unitsExtra += difference;
         }
@@ -663,7 +804,7 @@ function createInventoryCountLocal({ items, note = null }) {
         (client_count_id, origin, lines_count, products_with_difference,
          units_missing, units_extra, value_missing, note, account_email)
       VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?)
-    `).run(clientCountId, lines.length, withDifference, unitsMissing, unitsExtra, valueMissing, note, email);
+    `).run(clientCountId, lines.length, withDifference, round3(unitsMissing), round3(unitsExtra), round2(valueMissing), note, email);
     const countId = result.lastInsertRowid;
 
     for (const line of lines) {
@@ -731,7 +872,7 @@ function applyServerDelta(page) {
     throw new Error('Delta del servidor inválido');
   }
   const db = getLocalDb();
-  const stats = { sales: 0, closes: 0, counts: 0 };
+  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0 };
   const apply = db.transaction(() => {
     const insertSale = db.prepare(`
       INSERT INTO sales
@@ -765,6 +906,29 @@ function applyServerDelta(page) {
         );
       }
       stats.sales++;
+    }
+
+    // Compras de divisa de otras cajas: solo historial; sin vínculo de cierre
+    // local ni outbox (el arqueo local solo cubre origin = 'local').
+    const insertPurchase = db.prepare(`
+      INSERT INTO currency_purchases
+        (server_id, client_purchase_id, origin, register_id, account_email, foreign_currency,
+         foreign_amount, exchange_rate, shop_rate, cup_amount, created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const purchase of page.currency_purchases || []) {
+      const clientPurchaseId = purchase.client_purchase_id || `srv-${purchase.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM currency_purchases WHERE client_purchase_id = ?').get(clientPurchaseId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE currency_purchases SET server_id = ? WHERE id = ?').run(Number(purchase.id), existing.id);
+        continue;
+      }
+      insertPurchase.run(
+        Number(purchase.id), clientPurchaseId, purchase.register_id ?? null, purchase.account_email ?? null,
+        purchase.foreign_currency, Number(purchase.foreign_amount) || 0, Number(purchase.exchange_rate) || 0,
+        purchase.shop_rate ?? null, Number(purchase.cup_amount) || 0, purchase.created_at,
+      );
+      stats.purchases++;
     }
 
     const insertClose = db.prepare(`
@@ -830,6 +994,8 @@ function applyServerDelta(page) {
     }
 
     setSyncState('delta_after_sale', page.cursors.sale);
+    // Un servidor anterior a esta función no manda el cursor de compras.
+    if (page.cursors.purchase != null) setSyncState('delta_after_purchase', page.cursors.purchase);
     setSyncState('delta_after_close', page.cursors.close);
     setSyncState('delta_after_count', page.cursors.count);
   });
@@ -898,22 +1064,27 @@ function applyServerCatalog(serverProducts) {
     for (const p of locals) if (!byServerId.has(p.server_id)) byServerId.set(p.server_id, p);
 
     const insert = db.prepare(`
-      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, unit, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     const update = db.prepare(`
-      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, deleted = 0 WHERE id = ?
+      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, deleted = 0 WHERE id = ?
     `);
 
     const seen = new Set();
     for (const s of serverProducts) {
       const serverId = Number(s.id);
       seen.add(serverId);
+      // Una unidad que esta versión no conoce se trata como "por unidad": mejor
+      // vender de menos precisión que bloquear el catálogo entero.
+      const unit = UNITS.includes(s.unit) ? s.unit : null;
+      const stock = Math.max(0, Number(s.stock) || 0);
       const values = [
         String(s.name),
         Number(s.purchase_price) || 0,
         Number(s.sale_price) || 0,
-        Math.max(0, Math.trunc(Number(s.stock) || 0)),
+        unit ? round3(stock) : Math.trunc(stock),
+        unit,
       ];
 
       const local = byServerId.get(serverId);
@@ -930,7 +1101,8 @@ function applyServerCatalog(serverProducts) {
         local.name !== values[0] ||
         local.purchase_price !== values[1] ||
         local.sale_price !== values[2] ||
-        local.stock !== values[3];
+        local.stock !== values[3] ||
+        (local.unit ?? null) !== values[4];
       if (differs) {
         update.run(...values, local.id);
         stats.updated++;
@@ -974,6 +1146,7 @@ module.exports = {
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
   listProducts, createProduct, updateProduct, deleteProduct, applyServerCatalog,
   createSaleLocal, listSales, getSale,
+  createCurrencyPurchaseLocal, listCurrencyPurchases,
   getDashboard,
   getCurrentCashPeriod, createCashCloseLocal, listCashCloses, cashCloseSummary,
   createInventoryCountLocal, listInventoryCounts, getInventoryCount,

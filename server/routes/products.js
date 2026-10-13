@@ -4,13 +4,14 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
+const { parseUnit, validQuantity } = require('../lib/units');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
 //
 // DAR DE ALTA un producto nuevo también lo puede hacer un empleado: muchos
 // dueños delegan la carga de la mercancía que llega. Lo que queda para el
-// dueño es EDITAR y BORRAR los que ya existen — un empleado que pudiera bajar
-// un precio tendría la forma más simple de quedarse con la diferencia.
+// dueño es editar otros datos y borrar productos; el cajero puede cambiar
+// únicamente el precio de venta de los que ya existen.
 router.get('/', asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name ASC',
@@ -39,6 +40,8 @@ router.get('/', asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ') : '';
   const { purchase_price, sale_price, stock } = req.body;
+  const unit = parseUnit(req.body.unit);
+  if (unit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
 
   if (!name || sale_price === undefined || sale_price === null || sale_price === '') {
     return res.status(400).json({ error: 'Nombre y precio de venta son requeridos' });
@@ -52,8 +55,12 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!Number.isFinite(purchase) || purchase < 0) {
     return res.status(400).json({ error: 'El precio de compra no es válido' });
   }
-  if (stock !== undefined && stock !== null && (!Number.isInteger(Number(stock)) || Number(stock) < 0)) {
-    return res.status(400).json({ error: 'El stock debe ser un número entero mayor o igual a 0' });
+  if (stock !== undefined && stock !== null && stock !== '' && !validQuantity(stock, unit)) {
+    return res.status(400).json({
+      error: unit
+        ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)'
+        : 'El stock debe ser un número entero mayor o igual a 0',
+    });
   }
 
   const db = getDb();
@@ -72,9 +79,9 @@ router.post('/', asyncHandler(async (req, res) => {
   const account = await describeAccount(db, req);
   const insertResult = await db.execute({
     sql: `INSERT INTO products
-            (user_id, name, purchase_price, sale_price, stock, created_by_account_id, created_by_email)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [req.userId, name, purchase, sale, Number(stock) || 0, account.id, account.email],
+            (user_id, name, purchase_price, sale_price, stock, unit, created_by_account_id, created_by_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [req.userId, name, purchase, sale, Number(stock) || 0, unit ?? null, account.id, account.email],
   });
   const result = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ?',
@@ -188,7 +195,14 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
   res.json({ created, updated, total: clean.length });
 }));
 
-router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
+router.put('/:id', asyncHandler(async (req, res) => {
+  if (req.role !== 'dueño' && Object.keys(req.body).some((key) => key !== 'sale_price')) {
+    return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta' });
+  }
+  if ('sale_price' in req.body && (req.body.sale_price === null || req.body.sale_price === ''
+      || !Number.isFinite(Number(req.body.sale_price)) || Number(req.body.sale_price) < 0)) {
+    return res.status(400).json({ error: 'El precio de venta no es válido' });
+  }
   const db = getDb();
   const existingResult = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
@@ -198,16 +212,28 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Producto no encontrado' });
 
   const { name, purchase_price, sale_price, stock } = req.body;
-  if (stock !== undefined && (!Number.isInteger(Number(stock)) || Number(stock) < 0)) {
-    return res.status(400).json({ error: 'El stock debe ser un número entero mayor o igual a 0' });
+  const parsedUnit = parseUnit(req.body.unit);
+  if (parsedUnit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
+  const unit = parsedUnit === undefined ? (existing.unit ?? null) : parsedUnit;
+  if (stock !== undefined && !validQuantity(stock, unit)) {
+    return res.status(400).json({
+      error: unit
+        ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)'
+        : 'El stock debe ser un número entero mayor o igual a 0',
+    });
+  }
+  // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
+  if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {
+    return res.status(400).json({ error: 'Al quitar la unidad de medida hay que poner el stock en piezas enteras' });
   }
   await db.execute({
-    sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ? WHERE id = ?',
+    sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE id = ?',
     args: [
       name           ?? existing.name,
       purchase_price ?? existing.purchase_price,
       sale_price     ?? existing.sale_price,
       stock          ?? existing.stock,
+      unit,
       req.params.id,
     ],
   });

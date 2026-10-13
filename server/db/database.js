@@ -193,6 +193,28 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Compra de divisa: la tienda le compra dólares o euros en billetes a
+    -- alguien y le paga en pesos de la gaveta (ver server/lib/payment.js). Como
+    -- una venta, queda cubierta por el arqueo de la caja que la hizo
+    -- (cash_close_id) y guarda congelada la tasa usada y la de la tienda. Lleva
+    -- atribución congelada y sin clave foránea, igual que las ventas.
+    CREATE TABLE IF NOT EXISTS currency_purchases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_purchase_id TEXT,
+      foreign_currency TEXT NOT NULL,
+      foreign_amount REAL NOT NULL,
+      exchange_rate REAL NOT NULL,
+      shop_rate REAL,
+      cup_amount REAL NOT NULL,
+      register_id TEXT,
+      cash_close_id INTEGER,
+      account_id INTEGER,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -271,6 +293,10 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN expected_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN counted_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN difference_eur REAL NOT NULL DEFAULT 0',
+    // Productos fraccionados: NULL = por pieza; 'kg' | 'g' | 'lb' = precio,
+    // costo y stock vienen por esa unidad y el stock puede ser decimal
+    // (SQLite guarda el decimal en la columna INTEGER sin tocar el esquema).
+    'ALTER TABLE products ADD COLUMN unit TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -323,6 +349,11 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_cash_closes_user_closed ON cash_closes(user_id, closed_at);
 
     CREATE INDEX IF NOT EXISTS idx_users_owner ON users(owner_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_currency_purchases_client_id
+      ON currency_purchases(user_id, client_purchase_id) WHERE client_purchase_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_currency_purchases_user ON currency_purchases(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_currency_purchases_open ON currency_purchases(user_id, register_id, cash_close_id);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
       ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;

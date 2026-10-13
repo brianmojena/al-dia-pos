@@ -78,7 +78,19 @@ test('el día y mes del negocio usan Cuba incluso cerca de medianoche y cambio d
 })
 test('cajero conserva restricciones locales y no descarga auditoría por una ruta alternativa', () => {
   const state = fixture(), cashier = { ...user, role: 'cajero' }
-  assert.throws(() => add(state, 'PUT', '/api/products/10', { stock: 90 }, { user: cashier }), /Solo el dueño/)
+  const edited = add(state, 'PUT', '/api/products/10', { sale_price: 12.5 }, { user: cashier })
+  assert.equal(project(state).products[0].sale_price, 12.5)
+  assert.equal(project(state).products[0].stock, 20)
+  assert.equal(project(state).products[0].purchase_price, 6)
+  assert.deepEqual(edited.body, { sale_price: 12.5 })
+  assert.deepEqual(edited.before, { sale_price: 10 })
+  for (const body of [{ stock: 90 }, { name: 'Otro' }, { purchase_price: 0 }, { sale_price: 1, stock: 90 }]) {
+    assert.throws(() => add(state, 'PUT', '/api/products/10', body, { user: cashier }), /Solo el dueño/)
+  }
+  for (const sale_price of [-1, null, '', 'abc']) {
+    assert.throws(() => add(state, 'PUT', '/api/products/10', { sale_price }, { user: cashier }), /precio de venta/)
+  }
+  assert.throws(() => add(state, 'DELETE', '/api/products/10', {}, { user: cashier }), /Solo el dueño/)
   assert.throws(() => readLocal(project(state), '/api/dashboard', '1:2', cashier), /Solo el dueño/)
   assert.throws(() => readLocal(project(state), '/api/reports/days', '1:2', cashier), /Solo el dueño/)
   assert.equal(readLocal(project(state), '/api/products', '1:2', cashier).length, 1)
@@ -117,4 +129,20 @@ test('cobro en divisa sin internet: vuelto en pesos, arqueo por moneda y aviso d
   assert.equal(close.result.expected_usd, 20)
   assert.equal(close.result.difference_usd, -5)
   assert.ok(monthCsv(project(state).sales, '2026-09').includes('20 USD a 350'))
+})
+
+test('producto por peso: se vende en fracciones, el total se redondea y el stock decimal se descuenta', () => {
+  const state = fixture()
+  const created = add(state, 'POST', '/api/products', { name: 'Frijoles', purchase_price: 80, sale_price: 120, stock: 10, unit: 'lb' })
+  assert.equal(created.body.unit, 'lb')
+  const local = created.result.id
+  const sale = add(state, 'POST', '/api/sales', { client_sale_id: 'peso-1', payment_method: 'efectivo', items: [{ product_id: local, unit_price: 120, quantity: 2.35 }] })
+  assert.equal(sale.result.total, 282)
+  assert.equal(sale.result.profit, 94)
+  assert.equal(project(state).products.find((p) => p.id === local).stock, 7.65)
+  assert.throws(() => add(state, 'POST', '/api/sales', { client_sale_id: 'peso-2', payment_method: 'efectivo', items: [{ product_id: local, unit_price: 120, quantity: 8 }] }), /Stock insuficiente/)
+  assert.throws(() => add(state, 'POST', '/api/sales', { client_sale_id: 'peso-3', payment_method: 'efectivo', items: [{ product_id: 10, unit_price: 10, quantity: 1.5 }] }), /unidades enteras/)
+  assert.throws(() => add(state, 'POST', '/api/products', { name: 'Raro', sale_price: 1, stock: 1, unit: 'oz' }), /unidad/)
+  const count = add(state, 'POST', '/api/inventory-counts', { items: [{ product_id: local, counted: 7.25 }] })
+  assert.equal(count.result.units_missing, 0.4)
 })
