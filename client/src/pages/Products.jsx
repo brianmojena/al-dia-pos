@@ -5,10 +5,13 @@ import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTr
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { accountLabel } from '../lib/accountLabel'
-import { UNITS, formatQty, priceSuffix } from '../lib/units'
+import { UNITS, formatQty, priceSuffix, hasPack, formatPackStock } from '../lib/units'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '' }
+const fmt2 = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Number(n) || 0)
+const round4 = (n) => Math.round(Number(n) * 10000) / 10000
+const round2 = (n) => Math.round(Number(n) * 100) / 100
+const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '', pack_size: '', pack_price: '', pack_cost: '', pack_on: false, stock_packs: '', stock_loose: '', add_stock_packs: '', add_stock_loose: '' }
 
 // Cada movimiento del registro de stock: mercancía recibida, stock puesto a
 // mano por la cuenta principal o unidades que volvieron al anular una venta.
@@ -64,7 +67,28 @@ export default function Products() {
   const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
-    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', track_stock: !p.unit || Number(p.track_stock) === 1, add_stock: '', stock_reason: '' })
+    const hasPack = p.pack_size && Number(p.pack_size) > 1
+    const packCost = hasPack ? round2(Number(p.purchase_price) * Number(p.pack_size)) : ''
+    const stockPacks = hasPack ? Math.floor(Number(p.stock) / Number(p.pack_size)) : ''
+    const stockLoose = hasPack ? (Number(p.stock) % Number(p.pack_size)) : ''
+    setForm({
+      name: p.name,
+      purchase_price: p.purchase_price,
+      sale_price: p.sale_price,
+      stock: p.stock,
+      unit: p.unit || '',
+      track_stock: !p.unit || Number(p.track_stock) === 1,
+      add_stock: '',
+      stock_reason: '',
+      pack_size: p.pack_size || '',
+      pack_price: p.pack_price || '',
+      pack_cost: packCost,
+      pack_on: hasPack,
+      stock_packs: stockPacks,
+      stock_loose: stockLoose,
+      add_stock_packs: '',
+      add_stock_loose: ''
+    })
     setFormError('')
     setShowForm(true)
   }
@@ -83,22 +107,84 @@ export default function Products() {
     } catch (_) { setEntriesError('No se pudo cargar el historial. Hace falta conexión.') }
   }
 
-  const addPreview = parseFloat(String(form.add_stock ?? '').replace(',', '.')) || 0
+  // Para productos con paquete, el add_stock viene en paquetes + sueltos
+  const hasPack_ = !form.unit && form.pack_on
+  const addPreview = hasPack_
+    ? (Number(form.add_stock_packs || 0) * Number(form.pack_size)) + (parseFloat(String(form.add_stock_loose ?? '').replace(',', '.')) || 0)
+    : parseFloat(String(form.add_stock ?? '').replace(',', '.')) || 0
+
+  // Compute effective stock for stock correction detection
+  const effectiveStock = hasPack_
+    ? (Number(form.stock_packs || 0) * Number(form.pack_size)) + (Number(form.stock_loose || 0))
+    : (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock))
+
   // La cuenta principal cambió el stock a mano: se le pide (opcional) el motivo.
-  const stockChanged = !!editing && isOwner && !addPreview && String(form.stock) !== '' && Number(String(form.stock).replace(',', '.')) !== Number(editing.stock)
+  const stockChanged = !!editing && isOwner && !addPreview && effectiveStock !== Number(editing.stock)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
     setFormError('')
-    const addStock = form.add_stock === '' || form.add_stock == null ? 0 : parseFloat(String(form.add_stock).replace(',', '.'))
+
+    // Validar paquete si está activado
+    if (hasPack_) {
+      const packSize = parseInt(form.pack_size || 0)
+      const packPrice = parseFloat(form.pack_price || 0)
+      if (packSize < 2) {
+        setFormError('Unidades por paquete debe ser 2 o más.')
+        setSaving(false)
+        return
+      }
+      if (!Number.isFinite(packPrice) || packPrice < 0) {
+        setFormError('Precio del paquete debe ser un valor válido.')
+        setSaving(false)
+        return
+      }
+
+      // Validar stock de paquete (empty = 0, must be non-negative integers)
+      const stockPacksVal = Number(form.stock_packs || 0)
+      const stockLooseVal = Number(form.stock_loose || 0)
+      if (!Number.isInteger(stockPacksVal) || stockPacksVal < 0 || !Number.isInteger(stockLooseVal) || stockLooseVal < 0) {
+        setFormError('Paquetes y sueltos deben ser números enteros no negativos.')
+        setSaving(false)
+        return
+      }
+
+      // Validar add_stock de paquete (empty = 0, must be non-negative integers)
+      if (addPreview > 0) {
+        const addPacksVal = Number(form.add_stock_packs || 0)
+        const addLooseVal = Number(form.add_stock_loose || 0)
+        if (!Number.isInteger(addPacksVal) || addPacksVal < 0 || !Number.isInteger(addLooseVal) || addLooseVal < 0) {
+          setFormError('Paquetes y sueltos a añadir deben ser números enteros no negativos.')
+          setSaving(false)
+          return
+        }
+      }
+    }
+
+    const addStock = hasPack_
+      ? (Number(form.add_stock_packs || 0) * Number(form.pack_size)) + (parseFloat(String(form.add_stock_loose ?? '').replace(',', '.')) || 0)
+      : form.add_stock === '' || form.add_stock == null ? 0 : parseFloat(String(form.add_stock).replace(',', '.'))
+
+    const computedStock = hasPack_
+      ? (Number(form.stock_packs || 0) * Number(form.pack_size)) + (Number(form.stock_loose || 0))
+      : (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock)) || 0
+
+    // Cost calculation: if pack_cost is provided, compute per-unit cost; otherwise use purchase_price
+    let finalPurchasePrice = parseFloat(form.purchase_price) || 0
+    if (hasPack_ && form.pack_cost && Number(form.pack_cost) > 0 && Number(form.pack_size) >= 2) {
+      finalPurchasePrice = round4(Number(form.pack_cost) / Number(form.pack_size))
+    }
+
     const body = editing && !isOwner ? { sale_price: parseFloat(form.sale_price), ...(addStock > 0 && { add_stock: addStock }) } : {
       name: form.name,
-      purchase_price: parseFloat(form.purchase_price) || 0,
+      purchase_price: finalPurchasePrice,
       sale_price: parseFloat(form.sale_price),
-      stock: (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock)) || 0,
+      stock: computedStock,
       unit: form.unit || null,
       ...(form.unit && { track_stock: !!form.track_stock }),
+      ...(hasPack_ && { pack_size: parseInt(form.pack_size), pack_price: parseFloat(form.pack_price) }),
+      ...(!hasPack_ && { pack_size: null, pack_price: null }),
       ...(editing && addStock > 0 && { add_stock: addStock }),
       ...(stockChanged && form.stock_reason.trim() && { stock_reason: form.stock_reason.trim() }),
     }
@@ -142,6 +228,26 @@ export default function Products() {
     onChange: (e) => setForm(f => ({ ...f, [key]: e.target.value })),
     className: 'w-full border border-gray-200 rounded-xl px-4 py-3 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors',
   })
+
+  // Custom handler for pack_size: re-split stock when size changes
+  const handlePackSizeChange = (e) => {
+    const newSize = e.target.value
+    setForm(f => {
+      // Compute current total stock with old pack_size
+      const currentTotal = (Number(f.stock_packs || 0) * Number(f.pack_size || 1)) + (Number(f.stock_loose || 0))
+
+      // If new size is not valid, put everything in stock_loose
+      const newSizeNum = Number(newSize || 0)
+      if (!Number.isInteger(newSizeNum) || newSizeNum < 2) {
+        return { ...f, pack_size: newSize, stock_packs: '', stock_loose: String(currentTotal) }
+      }
+
+      // Re-split with new size
+      const newPacks = Math.floor(currentTotal / newSizeNum)
+      const newLoose = currentTotal % newSizeNum
+      return { ...f, pack_size: newSize, stock_packs: String(newPacks), stock_loose: String(newLoose) }
+    })
+  }
 
   if (loading) return (
     <div className="flex items-center justify-center h-full">
@@ -262,8 +368,8 @@ export default function Products() {
 
       {showForm && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
-            <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[calc(100dvh-2rem)] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 {editing ? (isOwner ? 'Editar producto' : 'Editar precio y stock') : 'Nuevo producto'}
               </h3>
@@ -271,7 +377,7 @@ export default function Products() {
                 <X size={20} className="text-gray-500" />
               </button>
             </div>
-            <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+            <form onSubmit={handleSubmit} className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 space-y-4">
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
                   Nombre del producto
@@ -302,7 +408,7 @@ export default function Products() {
                             type="button"
                             key={u.value}
                             onClick={() => setForm(f => ({ ...f, unit: u.value }))}
-                            className={`py-2.5 rounded-xl text-sm font-bold border-2 transition-colors ${
+                            className={`min-w-0 py-2.5 rounded-xl text-sm font-bold border-2 transition-colors ${
                               form.unit === u.value
                                 ? 'border-[#007AFF] bg-blue-50 text-[#007AFF]'
                                 : 'border-gray-200 text-gray-500 hover:bg-gray-50'
@@ -334,64 +440,166 @@ export default function Products() {
                   )}
                 </div>
               )}
-              <div className={editing && !isOwner ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-2 gap-3'}>
-                {(!editing || isOwner) && <div>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                    Precio compra{form.unit ? ` por ${form.unit}` : ''}
+              {/* Venta por paquete: solo para productos sin peso, en la web, y si es dueño */}
+              {(!editing || isOwner) && !form.unit && !isElectron() && (
+                <div className="rounded-xl border border-gray-200 px-4 py-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={form.pack_on}
+                      onChange={(e) => setForm(f => e.target.checked
+                        ? { ...f, pack_on: true, stock_packs: '', stock_loose: String(f.stock || 0) }
+                        : { ...f, pack_on: false, pack_size: '', pack_price: '', pack_cost: '', add_stock_packs: '', add_stock_loose: '', stock_packs: '', stock_loose: '' }
+                      )}
+                      className="w-5 h-5 accent-[#007AFF]"
+                    />
+                    <span className="text-sm font-semibold text-gray-800">También se vende por paquete</span>
                   </label>
-                  <input type="number" step="0.01" min="0" placeholder="0.00" {...field('purchase_price')} />
-                </div>}
-                <div>
+                  {hasPack_ && (
+                    <div className="mt-3 space-y-3">
+                      <p className="text-xs text-gray-400">
+                        Ej.: cajetilla de 20 cigarros o paquete de galletas
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="min-w-0">
+                          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                            Unidades por paquete *
+                          </label>
+                          <input type="number" required min="2" step="1" placeholder="20" value={form.pack_size} onChange={handlePackSizeChange} className='w-full border border-gray-200 rounded-xl px-4 py-3 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors' />
+                        </div>
+                        <div className="min-w-0">
+                          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                            Precio del paquete *
+                          </label>
+                          <input type="number" required step="0.01" min="0" placeholder="0.00" {...field('pack_price')} />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                          Costo del paquete
+                        </label>
+                        <input type="number" step="0.01" min="0" placeholder="0.00" {...field('pack_cost')} />
+                        {form.pack_cost && Number(form.pack_cost) > 0 && Number(form.pack_size) > 0 && (
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Cada suelto te cuesta {fmt2(Number(form.pack_cost) / Number(form.pack_size))}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className={editing && !isOwner ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-2 gap-3'}>
+                {(!editing || isOwner) && <div className="min-w-0">
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                    Precio venta{form.unit ? ` por ${form.unit}` : ''} *
+                    Precio compra{form.unit ? ` por ${form.unit}` : hasPack_ ? ' del suelto' : ''}
+                  </label>
+                  {hasPack_ && form.pack_cost && Number(form.pack_cost) > 0 && Number(form.pack_size) >= 2 ? (
+                    <div className="w-full border border-gray-200 rounded-xl px-4 py-3 text-base bg-gray-50 text-gray-600 select-none">
+                      {fmt2(round4(Number(form.pack_cost) / Number(form.pack_size)))}
+                    </div>
+                  ) : (
+                    <input type="number" step="0.01" min="0" placeholder="0.00" {...field('purchase_price')} />
+                  )}
+                </div>}
+                <div className="min-w-0">
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                    Precio venta{form.unit ? ` por ${form.unit}` : hasPack_ ? ' del suelto' : ''} *
                   </label>
                   <input required type="number" step="0.01" min="0" placeholder="0.00" {...field('sale_price')} />
                 </div>
               </div>
-              {(!form.unit || form.track_stock) && <div>
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                  {editing ? 'Stock' : 'Stock inicial'}{form.unit ? ` (${form.unit})` : ''}
-                </label>
-                <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
-                {stockChanged && (
-                  <>
-                    <p className="text-xs text-gray-400 mt-1.5">
-                      Corrección: {Number(editing.stock)} → {Number(String(form.stock).replace(',', '.'))}. Queda anotada a tu nombre.
-                    </p>
-                    <div className="mt-1.5">
-                      <input type="text" maxLength={200} placeholder="Motivo (opcional): conteo, se rompieron..." {...field('stock_reason')} />
+              {(!form.unit || form.track_stock) && (
+                <>
+                  {!hasPack_ ? (
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                        {editing ? 'Stock' : 'Stock inicial'}{form.unit ? ` (${form.unit})` : ''}
+                      </label>
+                      <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
+                      {stockChanged && (
+                        <>
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Corrección: {Number(editing.stock)} → {effectiveStock}. Queda anotada a tu nombre.
+                          </p>
+                          <div className="mt-1.5">
+                            <input type="text" maxLength={200} placeholder="Motivo (opcional): conteo, se rompieron..." {...field('stock_reason')} />
+                          </div>
+                        </>
+                      )}
                     </div>
-                  </>
-                )}
-              </div>}
+                  ) : (
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                        {editing ? 'Stock actual' : 'Stock inicial'}
+                      </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="min-w-0">
+                          <label className="text-xs text-gray-400 mb-1 block">Paquetes</label>
+                          <input disabled={!!editing && !isOwner} type="number" min="0" step="1" inputMode="numeric" placeholder="0" {...field('stock_packs')} />
+                        </div>
+                        <div className="min-w-0">
+                          <label className="text-xs text-gray-400 mb-1 block">Sueltos</label>
+                          <input disabled={!!editing && !isOwner} type="number" min="0" step="1" inputMode="numeric" placeholder="0" {...field('stock_loose')} />
+                        </div>
+                      </div>
+                      {stockChanged && (
+                        <>
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Corrección: {formatPackStock(Number(editing.stock), Number(form.pack_size))} → {formatPackStock(effectiveStock, Number(form.pack_size))}. Queda anotada a tu nombre.
+                          </p>
+                          <div className="mt-1.5">
+                            <input type="text" maxLength={200} placeholder="Motivo (opcional): conteo, se rompieron..." {...field('stock_reason')} />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
               {editing && (!form.unit || form.track_stock) && (
                 <div>
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                    Añadir al stock{form.unit ? ` (${form.unit})` : ''}
+                    {hasPack_ ? '¿Cuántos llegaron?' : `Añadir al stock${form.unit ? ` (${form.unit})` : ''}`}
                   </label>
-                  <input type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="Cantidad que llegó" {...field('add_stock')} />
+                  {hasPack_ ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="min-w-0">
+                        <label className="text-xs text-gray-400 mb-1 block">Paquetes</label>
+                        <input type="number" min="0" step="1" inputMode="numeric" placeholder="0" {...field('add_stock_packs')} />
+                      </div>
+                      <div className="min-w-0">
+                        <label className="text-xs text-gray-400 mb-1 block">Sueltos (opcional)</label>
+                        <input type="number" min="0" step="1" inputMode="numeric" placeholder="0" {...field('add_stock_loose')} />
+                      </div>
+                    </div>
+                  ) : (
+                    <input type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="Cantidad que llegó" {...field('add_stock')} />
+                  )}
                   {addPreview > 0 && (
                     <p className="text-xs text-gray-400 mt-1.5">
-                      Quedará en {Math.round((Number(form.stock || 0) + addPreview) * 1000) / 1000}{form.unit ? ` ${form.unit}` : ''}
+                      Quedará en {hasPack_ ? formatPackStock(effectiveStock + addPreview, Number(form.pack_size)) : Math.round((effectiveStock + addPreview) * 1000) / 1000}{form.unit ? ` ${form.unit}` : ''}
                     </p>
                   )}
                 </div>
               )}
 
-              {formError && (
-                <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium">
-                  <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
-                  <span>{formError}</span>
-                </div>
-              )}
+              <div className="sticky bottom-0 bg-white -mx-6 px-6 pt-3 pb-1 border-t border-gray-100">
+                {formError && (
+                  <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium mb-3">
+                    <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
+                    <span>{formError}</span>
+                  </div>
+                )}
 
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold text-base hover:bg-blue-600 active:scale-95 transition-all disabled:opacity-50 mt-2"
-              >
-                {saving ? 'Guardando...' : editing ? 'Guardar cambios' : 'Agregar producto'}
-              </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold text-base hover:bg-blue-600 active:scale-95 transition-all disabled:opacity-50"
+                >
+                  {saving ? 'Guardando...' : editing ? 'Guardar cambios' : 'Agregar producto'}
+                </button>
+              </div>
             </form>
           </div>
         </div>
@@ -432,7 +640,12 @@ export default function Products() {
                     {isOwner && (
                       <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}{priceSuffix(p.unit)}</td>
                     )}
-                    <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">{fmt(p.sale_price)}{priceSuffix(p.unit)}</td>
+                    <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">
+                      <div>{fmt(p.sale_price)}{priceSuffix(p.unit)}</div>
+                      {hasPack(p) && (
+                        <div className="text-xs text-gray-400 mt-0.5">paquete ×{p.pack_size} {fmt(p.pack_price)}</div>
+                      )}
+                    </td>
                     <td className="px-5 py-4 text-right">
                       <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
                         p.unit && Number(p.track_stock) !== 1 ? 'bg-gray-100 text-gray-500' :
@@ -440,7 +653,7 @@ export default function Products() {
                         p.stock <= 5  ? 'bg-orange-50 text-orange-600' :
                                         'bg-green-50 text-green-700'
                       }`}>
-                        {p.unit && Number(p.track_stock) !== 1 ? 'Sin control' : formatQty(p.stock, p.unit)}
+                        {p.unit && Number(p.track_stock) !== 1 ? 'Sin control' : hasPack(p) ? formatPackStock(p.stock, p.pack_size) : formatQty(p.stock, p.unit)}
                       </span>
                     </td>
                     <td className="px-5 py-4">

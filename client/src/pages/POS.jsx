@@ -12,13 +12,22 @@ import DeviceRatesEditor from '../components/DeviceRatesEditor'
 import { useExchangeRates } from '../lib/exchangeRates'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
-import { formatQty, lineTotal, priceSuffix, roundQty } from '../lib/units'
+import { formatQty, lineTotal, priceSuffix, roundQty, hasPack, lineUnits, formatPackStock } from '../lib/units'
 
 // Hasta 2 decimales: 1,3 lb a $55 son $71,50 y el cliente tiene que ver ese importe.
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Math.round((n || 0) * 100) / 100)
 
 // Atajos de peso para el modal: lo más común en cada unidad.
 const QUICK = { lb: [0.5, 1, 2, 5], kg: [0.5, 1, 2, 5], g: [100, 250, 500, 1000] }
+
+// Clave única para una línea del carrito.
+const lineKey = (i) => i.pack ? `${i.id}:paq` : i.id
+
+// Cantidad de sueltos en carrito para un producto (incluye paquetes expandidos).
+const unitsInCart = (cart, productId) =>
+  cart
+    .filter(i => i.id === productId)
+    .reduce((s, i) => s + lineUnits(i), 0)
 
 export default function POS() {
   const { user } = useAuth()
@@ -88,7 +97,7 @@ export default function POS() {
     p.name.toLowerCase().includes(search.toLowerCase()) && (p.unit || p.stock > 0)
   )
 
-  const addToCart = (product) => {
+  const addToCart = (product, isPack = false) => {
     // Un producto por peso no se suma de uno en uno: se pregunta cuánto pesa.
     if (product.unit) {
       const inCart = cart.find(i => i.id === product.id)
@@ -96,13 +105,35 @@ export default function POS() {
       setWeighing(product)
       return
     }
+
     setCart(prev => {
-      const existing = prev.find(i => i.id === product.id)
-      if (existing) {
-        if (existing.quantity >= product.stock) return prev
-        return prev.map(i => i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i)
+      // Contar sueltos en carrito para verificar límite de stock
+      const unitsUsed = unitsInCart(prev, product.id)
+      const existing = prev.find(i => i.id === product.id && !!(i.pack || false) === isPack)
+
+      if (isPack) {
+        // Agregar un paquete
+        if (unitsUsed + product.pack_size > product.stock) return prev
+        if (existing) {
+          return prev.map(i =>
+            i.id === product.id && (i.pack || false)
+              ? { ...i, quantity: i.quantity + 1 }
+              : i
+          )
+        }
+        return [...prev, { ...product, quantity: 1, pack: true, price: product.pack_price }]
+      } else {
+        // Agregar un suelto
+        if (unitsUsed + 1 > product.stock) return prev
+        if (existing) {
+          return prev.map(i =>
+            i.id === product.id && !(i.pack || false)
+              ? { ...i, quantity: i.quantity + 1 }
+              : i
+          )
+        }
+        return [...prev, { ...product, quantity: 1, price: product.sale_price }]
       }
-      return [...prev, { ...product, quantity: 1 }]
     })
   }
 
@@ -120,13 +151,31 @@ export default function POS() {
     setWeighing(null)
   }
 
-  const updateQty = (id, delta) =>
-    setCart(prev => prev.map(i => i.id === id ? { ...i, quantity: i.quantity + delta } : i).filter(i => i.quantity > 0))
+  const updateQty = (cartKey, delta) => {
+    setCart(prev => {
+      const line = prev.find(i => lineKey(i) === cartKey)
+      if (!line) return prev
 
-  const removeFromCart = (id) => setCart(prev => prev.filter(i => i.id !== id))
+      const product = products.find(p => p.id === line.id)
+      if (!product) return prev
 
-  const total     = cart.reduce((s, i) => s + lineTotal(i.quantity, i.sale_price), 0)
-  // Un producto por peso cuenta como una línea, no como "2,35 artículos".
+      const newQty = line.quantity + delta
+      if (newQty <= 0) return prev.filter(i => lineKey(i) !== cartKey)
+
+      // Verificar límite de stock: sumar todas las líneas del producto
+      const otherUnits = unitsInCart(prev.filter(i => lineKey(i) !== cartKey), product.id)
+      const newLineUnits = lineUnits({ ...line, quantity: newQty })
+
+      if (otherUnits + newLineUnits > product.stock) return prev
+
+      return prev.map(i => lineKey(i) === cartKey ? { ...i, quantity: newQty } : i)
+    })
+  }
+
+  const removeFromCart = (cartKey) => setCart(prev => prev.filter(i => lineKey(i) !== cartKey))
+
+  const total     = cart.reduce((s, i) => s + lineTotal(i.quantity, i.price ?? i.sale_price), 0)
+  // Un producto por peso cuenta como una línea. Un paquete = 1 item, como hoy los sueltos.
   const itemCount = cart.reduce((s, i) => s + (i.unit ? 1 : i.quantity), 0)
 
   // El límite lo configura el dueño desde la app móvil (PUT /api/auth/settings).
@@ -156,7 +205,11 @@ export default function POS() {
       const res = await apiFetch('/api/sales', {
         method: 'POST',
         body: JSON.stringify({
-          items: cart.map(i => ({ product_id: i.id, quantity: i.quantity, unit_price: i.sale_price })),
+          items: cart.map(i =>
+            i.pack
+              ? { product_id: i.id, quantity: i.quantity, unit_price: i.pack_price, pack_size: i.pack_size }
+              : { product_id: i.id, quantity: i.quantity, unit_price: i.sale_price }
+          ),
           ...payment,
           client_sale_id: saleIdRef.current,
           register_id: 'web',
@@ -192,47 +245,60 @@ export default function POS() {
     </div>
   )
 
-  const CartItem = ({ item }) => (
-    <div className="flex items-center gap-3 py-3 border-b border-gray-50 last:border-0">
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
-        <p className="text-xs text-gray-400">{item.unit ? `${fmt(item.sale_price)} por ${item.unit}` : `${fmt(item.sale_price)} c/u`}</p>
+  const CartItem = ({ item }) => {
+    const cartKey = lineKey(item)
+    const price = item.price ?? item.sale_price
+    const currentProduct = products.find(p => p.id === item.id) || item
+
+    return (
+      <div className="flex items-center gap-3 py-3 border-b border-gray-50 last:border-0">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+          <p className="text-xs text-gray-400">
+            {item.unit
+              ? `${fmt(item.sale_price)} por ${item.unit}`
+              : item.pack
+              ? `Paquete de ${item.pack_size} · ${fmt(price)} c/u`
+              : `${fmt(price)} c/u`
+            }
+          </p>
+        </div>
+        {item.unit ? (
+          <button
+            onClick={() => addToCart(item)}
+            className="flex items-center gap-1.5 px-3 h-8 rounded-lg bg-blue-50 text-[#007AFF] text-sm font-bold active:scale-95 transition-all"
+            title="Cambiar el peso"
+          >
+            {formatQty(item.quantity, item.unit)}
+            <Pencil size={12} />
+          </button>
+        ) : (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => updateQty(cartKey, -1)}
+            className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 active:scale-90 transition-all"
+          >
+            <Minus size={13} />
+          </button>
+          <span className="w-5 text-center text-sm font-bold text-gray-900">{item.quantity}</span>
+          <button
+            onClick={() => updateQty(cartKey, 1)}
+            disabled={unitsInCart(cart, item.id) + (item.pack ? Number(item.pack_size) : 1) > currentProduct.stock}
+            className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 active:scale-90 transition-all disabled:opacity-30"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+        )}
+        <div className="text-right min-w-[56px]">
+          <p className="text-sm font-semibold text-gray-900">{fmt(lineTotal(item.quantity, price))}</p>
+          <button onClick={() => removeFromCart(cartKey)} className="text-gray-300 hover:text-red-400 transition-colors">
+            <Trash2 size={12} />
+          </button>
+        </div>
       </div>
-      {item.unit ? (
-        <button
-          onClick={() => addToCart(item)}
-          className="flex items-center gap-1.5 px-3 h-8 rounded-lg bg-blue-50 text-[#007AFF] text-sm font-bold active:scale-95 transition-all"
-          title="Cambiar el peso"
-        >
-          {formatQty(item.quantity, item.unit)}
-          <Pencil size={12} />
-        </button>
-      ) : (
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => updateQty(item.id, -1)}
-          className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 active:scale-90 transition-all"
-        >
-          <Minus size={13} />
-        </button>
-        <span className="w-5 text-center text-sm font-bold text-gray-900">{item.quantity}</span>
-        <button
-          onClick={() => updateQty(item.id, 1)}
-          disabled={item.quantity >= item.stock}
-          className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 active:scale-90 transition-all disabled:opacity-30"
-        >
-          <Plus size={13} />
-        </button>
-      </div>
-      )}
-      <div className="text-right min-w-[56px]">
-        <p className="text-sm font-semibold text-gray-900">{fmt(lineTotal(item.quantity, item.sale_price))}</p>
-        <button onClick={() => removeFromCart(item.id)} className="text-gray-300 hover:text-red-400 transition-colors">
-          <Trash2 size={12} />
-        </button>
-      </div>
-    </div>
-  )
+    )
+  }
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -466,29 +532,88 @@ export default function POS() {
         <div className="flex-1 overflow-auto">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 pb-24 md:pb-4">
             {filtered.map(p => {
-              const inCart = cart.find(i => i.id === p.id)
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => addToCart(p)}
-                  className={`bg-white rounded-2xl p-4 text-left shadow-sm hover:shadow-md active:scale-95 transition-all border-2 ${
-                    inCart ? 'border-[#007AFF] bg-blue-50/30' : 'border-transparent'
-                  }`}
-                >
-                  <p className="text-sm font-semibold text-gray-900 mb-1.5 line-clamp-2 leading-tight min-h-[2.5rem]">
-                    {p.name}
-                  </p>
-                  <p className="text-[#007AFF] font-bold text-base">{fmt(p.sale_price)}{priceSuffix(p.unit)}</p>
-                  {(!p.unit || Number(p.track_stock) === 1) && <p className="text-xs text-gray-400 mt-1">Stock: {formatQty(p.stock, p.unit)}</p>}
-                  {inCart && (
-                    <div className="mt-2">
-                      <span className="bg-[#007AFF] text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">
-                        {inCart.unit ? `${formatQty(inCart.quantity, inCart.unit)} en carrito` : `${inCart.quantity} en carrito`}
-                      </span>
+              const looseLine = cart.find(i => i.id === p.id && !(i.pack || false))
+              const packLine = cart.find(i => i.id === p.id && (i.pack || false))
+              const hasPackVariant = hasPack(p)
+
+              if (hasPackVariant) {
+                return (
+                  <div
+                    key={p.id}
+                    className={`bg-white rounded-2xl p-4 text-left shadow-sm border-2 transition-all ${
+                      looseLine || packLine ? 'border-[#007AFF] bg-blue-50/30' : 'border-transparent'
+                    }`}
+                  >
+                    <p className="text-sm font-semibold text-gray-900 mb-1.5 line-clamp-2 leading-tight min-h-[2.5rem]">
+                      {p.name}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-1">Stock: {formatPackStock(p.stock, p.pack_size)}</p>
+
+                    <div className="flex flex-col gap-2 mt-3">
+                      <button
+                        onClick={() => addToCart(p, false)}
+                        disabled={unitsInCart(cart, p.id) >= p.stock}
+                        className={`text-left py-2 px-2.5 rounded-lg font-semibold text-sm transition-all active:scale-95 ${
+                          unitsInCart(cart, p.id) >= p.stock
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-blue-50 text-[#007AFF] hover:bg-blue-100'
+                        }`}
+                      >
+                        {fmt(p.sale_price)} c/u
+                      </button>
+                      <button
+                        onClick={() => addToCart(p, true)}
+                        disabled={unitsInCart(cart, p.id) + p.pack_size > p.stock}
+                        className={`text-left py-2 px-2.5 rounded-lg font-semibold text-sm transition-all active:scale-95 ${
+                          unitsInCart(cart, p.id) + p.pack_size > p.stock
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+                        }`}
+                      >
+                        Paquete ×{p.pack_size} · {fmt(p.pack_price)}
+                      </button>
                     </div>
-                  )}
-                </button>
-              )
+
+                    {(looseLine || packLine) && (
+                      <div className="mt-2.5 space-y-1.5">
+                        {looseLine && (
+                          <span className="inline-block bg-blue-500 text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                            {looseLine.quantity} c/u en carrito
+                          </span>
+                        )}
+                        {packLine && (
+                          <span className="inline-block bg-amber-600 text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                            {packLine.quantity} paq en carrito
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              } else {
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => addToCart(p)}
+                    className={`bg-white rounded-2xl p-4 text-left shadow-sm hover:shadow-md active:scale-95 transition-all border-2 ${
+                      looseLine ? 'border-[#007AFF] bg-blue-50/30' : 'border-transparent'
+                    }`}
+                  >
+                    <p className="text-sm font-semibold text-gray-900 mb-1.5 line-clamp-2 leading-tight min-h-[2.5rem]">
+                      {p.name}
+                    </p>
+                    <p className="text-[#007AFF] font-bold text-base">{fmt(p.sale_price)}{priceSuffix(p.unit)}</p>
+                    {(!p.unit || Number(p.track_stock) === 1) && <p className="text-xs text-gray-400 mt-1">Stock: {formatQty(p.stock, p.unit)}</p>}
+                    {looseLine && (
+                      <div className="mt-2">
+                        <span className="bg-[#007AFF] text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                          {looseLine.unit ? `${formatQty(looseLine.quantity, looseLine.unit)} en carrito` : `${looseLine.quantity} en carrito`}
+                        </span>
+                      </div>
+                    )}
+                  </button>
+                )
+              }
             })}
             {filtered.length === 0 && (
               <div className="col-span-full py-16 text-center text-gray-400">
@@ -518,7 +643,7 @@ export default function POS() {
               <p className="text-sm">Toca un producto para agregarlo</p>
             </div>
           ) : (
-            cart.map(item => <CartItem key={item.id} item={item} />)
+            cart.map(item => <CartItem key={lineKey(item)} item={item} />)
           )}
         </div>
 
@@ -569,7 +694,7 @@ export default function POS() {
               </button>
             </div>
             <div className="flex-1 overflow-auto px-5 py-2">
-              {cart.map(item => <CartItem key={item.id} item={item} />)}
+              {cart.map(item => <CartItem key={lineKey(item)} item={item} />)}
             </div>
             <div className="px-5 py-5 border-t border-gray-100">
               <div className="flex justify-between items-center mb-4">

@@ -5,7 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
 const { stockChangeStatement } = require('../lib/stockLog');
-const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
 //
@@ -53,6 +53,8 @@ router.post('/', asyncHandler(async (req, res) => {
   const { purchase_price, sale_price, stock } = req.body;
   const unit = parseUnit(req.body.unit);
   if (unit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
+  const pack = parsePack(req.body, unit) ?? { pack_size: null, pack_price: null };
+  if (pack.error) return res.status(400).json({ error: pack.error });
 
   if (!name || sale_price === undefined || sale_price === null || sale_price === '') {
     return res.status(400).json({ error: 'Nombre y precio de venta son requeridos' });
@@ -93,9 +95,11 @@ router.post('/', asyncHandler(async (req, res) => {
   const trackStock = trackStockFor(unit, req.body.track_stock, 0);
   const insertResult = await db.execute({
     sql: `INSERT INTO products
-            (user_id, name, purchase_price, sale_price, stock, unit, track_stock, created_by_account_id, created_by_email)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [req.userId, name, purchase, sale, trackStock ? Number(stock) || 0 : 0, unit ?? null, trackStock, account.id, account.email],
+            (user_id, name, purchase_price, sale_price, stock, unit, track_stock, pack_size, pack_price,
+             created_by_account_id, created_by_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [req.userId, name, purchase, sale, trackStock ? Number(stock) || 0 : 0, unit ?? null, trackStock,
+           pack.pack_size, pack.pack_price, account.id, account.email],
   });
   const result = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ?',
@@ -230,6 +234,11 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const parsedUnit = parseUnit(req.body.unit);
   if (parsedUnit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
   const unit = parsedUnit === undefined ? (existing.unit ?? null) : parsedUnit;
+  // Si no viene, el paquete se conserva (la app de escritorio no lo conoce);
+  // un producto que pasa a venderse por peso deja de tener paquete.
+  const pack = parsePack(req.body, unit)
+    ?? (unit ? { pack_size: null, pack_price: null } : { pack_size: existing.pack_size ?? null, pack_price: existing.pack_price ?? null });
+  if (pack.error) return res.status(400).json({ error: pack.error });
   if (stock !== undefined && !validQuantity(stock, unit)) {
     return res.status(400).json({
       error: unit
@@ -263,7 +272,8 @@ router.put('/:id', asyncHandler(async (req, res) => {
     // Con add_stock la suma la hace la base de datos, no el valor leído arriba:
     // dos entradas simultáneas no se pisan.
     sql: `UPDATE products SET name = ?, purchase_price = ?, sale_price = ?,
-            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ?, track_stock = ? WHERE id = ?`,
+            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ?, track_stock = ?,
+            pack_size = ?, pack_price = ? WHERE id = ?`,
     args: [
       name           ?? existing.name,
       purchase_price ?? existing.purchase_price,
@@ -271,6 +281,8 @@ router.put('/:id', asyncHandler(async (req, res) => {
       addedQty > 0 ? addedQty : (trackStock ? (stock ?? existing.stock) : 0),
       unit,
       trackStock,
+      pack.pack_size,
+      pack.pack_price,
       req.params.id,
     ],
   }];

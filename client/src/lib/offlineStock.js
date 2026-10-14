@@ -1,3 +1,5 @@
+import { lineUnits } from './units.js'
+
 // Stock que muestra la web: la última foto del servidor MENOS las ventas que
 // se cobraron sin internet y todavía no subieron.
 //
@@ -18,7 +20,8 @@ export function applyPendingSales(products, pendingSales) {
   for (const sale of pendingSales || []) {
     for (const item of sale?.items || []) {
       const id = Number(item.product_id)
-      const quantity = Number(item.quantity)
+      // Un paquete descuenta todos sus sueltos.
+      const quantity = lineUnits(item)
       if (Number.isFinite(id) && quantity > 0) {
         pending.set(id, (pending.get(id) || 0) + quantity)
       }

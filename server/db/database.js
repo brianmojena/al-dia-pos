@@ -394,6 +394,14 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN corrected_at TEXT',
     'ALTER TABLE cash_closes ADD COLUMN original_expected_cash REAL',
     'ALTER TABLE cash_closes ADD COLUMN original_difference REAL',
+    // Venta por paquete (ver lib/units.js, parsePack): cuántos sueltos trae y
+    // su precio entero. NULL = solo se vende suelto.
+    'ALTER TABLE products ADD COLUMN pack_size INTEGER',
+    'ALTER TABLE products ADD COLUMN pack_price REAL',
+    // Una línea vendida como paquete: quantity son paquetes, unit_price y
+    // unit_cost son por paquete, y pack_size los sueltos que salieron por cada
+    // uno (congelado: si mañana el paquete trae otra cantidad, la venta no cambia).
+    'ALTER TABLE sale_items ADD COLUMN pack_size INTEGER',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

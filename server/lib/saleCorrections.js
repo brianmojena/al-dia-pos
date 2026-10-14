@@ -16,6 +16,7 @@
  */
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('./payment');
 const { logStockChange } = require('./stockLog');
+const { lineUnits } = require('./units');
 
 class CorrectionError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -133,7 +134,8 @@ async function correctSale(db, { userId, saleId, body, account }) {
         })).rows[0];
         if (!product || (product.unit && Number(product.track_stock) !== 1)) continue;
         const before = Number(product.stock);
-        const restored = Math.round((before + Number(item.quantity)) * 1000) / 1000;
+        // Un paquete devuelve todos sus sueltos.
+        const restored = Math.round((before + lineUnits(item)) * 1000) / 1000;
         await tx.execute({ sql: 'UPDATE products SET stock = ? WHERE id = ?', args: [restored, product.id] });
         await logStockChange(tx, {
           userId, product, before, after: restored, account, kind: 'anulacion',

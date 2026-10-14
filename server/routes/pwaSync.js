@@ -5,7 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
-const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 // Una fotografía bajo la misma transacción: no mezclar stock anterior a una
@@ -112,20 +112,23 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
       const current = hasAdd ? (await tx.execute({ sql: 'SELECT stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
       const sale = Number(product.sale_price), purchase = Number(product.purchase_price ?? 0), stock = hasAdd ? Number(current?.stock ?? 0) : Number(product.stock ?? 0);
       const unit = parseUnit(product.unit) ?? null;
-      const prior = method === 'PUT' ? (await tx.execute({ sql: 'SELECT track_stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
+      const prior = method === 'PUT' ? (await tx.execute({ sql: 'SELECT track_stock, pack_size, pack_price FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
       const trackStock = trackStockFor(unit, product.track_stock, method === 'PUT' ? Number(prior?.track_stock ?? 1) : 0);
       if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || unit === false || !validQuantity(trackStock ? stock : 0, unit)) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
+      // Paquete: si la operación no lo trae (una app antigua) se conserva el que había.
+      const pack = parsePack(product, unit) ?? (unit || !prior ? { pack_size: null, pack_price: null } : { pack_size: prior.pack_size ?? null, pack_price: prior.pack_price ?? null });
+      if (pack.error) { await tx.rollback(); return res.status(400).json({ error: pack.error }); }
       let id = product_id;
       if (method === 'POST') {
         const existing = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ?', args: [req.userId] })).rows.find((p) => normalize(p.name) === normalize(name));
         if (existing) result = { ...existing, merged: true };
         else {
-          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, track_stock, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, trackStock ? stock : 0, unit, trackStock, account.id, account.email] });
+          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, track_stock, pack_size, pack_price, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, trackStock ? stock : 0, unit, trackStock, pack.pack_size, pack.pack_price, account.id, account.email] });
           id = Number(insert.lastInsertRowid);
         }
       } else {
         const before = hasAdd ? null : (await tx.execute({ sql: 'SELECT stock, track_stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, id] })).rows[0];
-        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, trackStock ? stock : 0, unit, trackStock, req.userId, id] });
+        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ?, pack_size = ?, pack_price = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, trackStock ? stock : 0, unit, trackStock, pack.pack_size, pack.pack_price, req.userId, id] });
         if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
         // Stock puesto a mano por la cuenta principal: queda anotado (ver lib/stockLog.js).
         if (before && trackStock && Number(before.track_stock ?? 1) === 1) {

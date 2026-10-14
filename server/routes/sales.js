@@ -8,7 +8,7 @@ const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { notifySale } = require('../lib/push');
-const { roundQty, validQuantity } = require('../lib/units');
+const { roundQty, validQuantity, lineUnits } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 const { correctSale, parseCorrection, CorrectionError } = require('../lib/saleCorrections');
 
@@ -103,6 +103,7 @@ router.post('/rejected', asyncHandler(async (req, res) => {
       product_name: givenName || names.get(productId) || `Producto #${productId ?? '?'}`,
       quantity: roundQty(quantity),
       unit_price: unitPrice,
+      ...(Number(item.pack_size) > 1 && { pack_size: Number(item.pack_size) }),
     });
   }
   const total = round2(lines.reduce((sum, l) => sum + round2(l.quantity * l.unit_price), 0));
@@ -320,6 +321,20 @@ router.post('/', asyncHandler(async (req, res) => {
         await tx.rollback();
         return res.status(400).json({ error: 'Producto no existe' });
       }
+
+      // Línea vendida como paquete: quantity son paquetes enteros y del stock
+      // salen quantity × pack_size sueltos. El tamaño viaja en la línea (el que
+      // vio la caja al cobrar), no se relee del producto: una venta sin internet
+      // no cambia si después el dueño cambia el paquete.
+      const packSize = item.pack_size == null || item.pack_size === '' ? null : Number(item.pack_size);
+      if (packSize !== null) {
+        if (product.unit || !Number.isInteger(packSize) || packSize < 2 || packSize > 10000 || !Number.isInteger(quantity)) {
+          await tx.rollback();
+          return res.status(400).json({ error: `Paquete inválido para ${product.name}` });
+        }
+      }
+      const stockQty = lineUnits({ quantity, pack_size: packSize });
+      const unitCost = packSize ? round2(product.purchase_price * packSize) : (product.purchase_price || 0);
       // Solo un producto por peso admite fracciones (hasta 3 decimales); uno por
       // pieza sigue vendiéndose en unidades enteras.
       if (!validQuantity(quantity, product.unit, { min: 0.001 })) {
@@ -347,7 +362,7 @@ router.post('/', asyncHandler(async (req, res) => {
       } else {
         const updated = await tx.execute({
           sql: 'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND user_id = ? AND ROUND(stock, 3) >= ?',
-          args: [quantity, item.product_id, req.userId, quantity],
+          args: [stockQty, item.product_id, req.userId, stockQty],
         });
         if (updated.rowsAffected !== 1) {
           await tx.rollback();
@@ -358,13 +373,14 @@ router.post('/', asyncHandler(async (req, res) => {
       // Cada línea se redondea a centavos: es el importe que el cliente ve y
       // paga, y el total tiene que ser exactamente la suma de lo que se ve.
       total  += round2(quantity * unitPrice);
-      profit += round2(quantity * (unitPrice - (product.purchase_price || 0)));
+      profit += round2(quantity * (unitPrice - unitCost));
       lines.push({
         product_id: product.id,
-        product_name: product.name,
+        product_name: packSize ? `${product.name} (paquete de ${packSize})` : product.name,
         quantity: roundQty(quantity),
         unit_price: unitPrice,
-        unit_cost: product.purchase_price || 0,
+        unit_cost: packSize ? unitCost : product.purchase_price || 0,
+        pack_size: packSize,
       });
     }
 
@@ -406,10 +422,18 @@ router.post('/', asyncHandler(async (req, res) => {
     const saleId = Number(saleResult.lastInsertRowid);
 
     for (const line of lines) {
-      await tx.execute({
-        sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost) VALUES (?, ?, ?, ?, ?, ?)',
-        args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost],
-      });
+      // Una venta normal no depende de la columna nueva.
+      if (line.pack_size == null) {
+        await tx.execute({
+          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost) VALUES (?, ?, ?, ?, ?, ?)',
+          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost],
+        });
+      } else {
+        await tx.execute({
+          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost, pack_size) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost, line.pack_size],
+        });
+      }
     }
 
     await tx.commit();

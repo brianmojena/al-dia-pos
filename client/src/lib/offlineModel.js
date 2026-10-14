@@ -1,6 +1,6 @@
 import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES } from './payment.js'
 import { parseServerDate } from './dates.js'
-import { isValidUnit, validQuantity, roundQty, lineTotal } from './units.js'
+import { isValidUnit, validQuantity, roundQty, lineTotal, lineUnits } from './units.js'
 
 export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], rejected_sales: [], cashiers: [], current_period: null })
 export const businessDate = (value = new Date()) => {
@@ -27,7 +27,7 @@ export function applyOperation(data, op, result = op.result) {
     if (!data.sales.some((s) => s.client_sale_id === op.body.client_sale_id)) {
       for (const item of op.result.items) {
         const p = data.products.find((p) => p.id === item.product_id)
-        if (p && (!p.unit || Number(p.track_stock ?? 1) === 1)) p.stock = Math.max(0, roundQty(p.stock - item.quantity))
+        if (p && (!p.unit || Number(p.track_stock ?? 1) === 1)) p.stock = Math.max(0, roundQty(p.stock - lineUnits(item)))
       }
     }
     upsert(data.sales, { ...op.result, ...result, items: op.result.items }, 'client_sale_id')
@@ -135,6 +135,29 @@ export function prepareOperation(data, method, path, body, ctx) {
     const trackStock = !p.unit ? 1 : (body.track_stock === undefined ? (previous ? (Number(previous.track_stock ?? 1) === 1 ? 1 : 0) : 0) : (body.track_stock ? 1 : 0))
     if (!trackStock) p.stock = 0
     assert(validQuantity(p.stock ?? 0, p.unit || null), p.unit ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)' : 'El stock debe ser un entero mayor o igual a 0')
+    // Paquete: solo productos sin unidad, pack_size >= 2, pack_price >= 0.
+    let packSize = undefined, packPrice = undefined
+    if ('pack_size' in body) {
+      const raw = body.pack_size
+      if (raw === null || raw === '' || Number(raw) === 0) {
+        packSize = null
+        packPrice = null
+      } else {
+        const size = Number(raw)
+        assert(Number.isInteger(size) && size >= 2 && size <= 10000, 'El paquete debe traer un número entero de unidades (2 o más)')
+        assert(!p.unit, 'Un producto por peso no se vende por paquete')
+        const price = Number(body.pack_price)
+        assert(Number.isFinite(price) && price >= 0, 'Falta el precio del paquete')
+        packSize = size
+        packPrice = price
+      }
+    } else if (previous) {
+      // No vino pack_size: conservar lo que había.
+      packSize = previous.pack_size
+      packPrice = previous.pack_price
+    }
+    // Si el producto se convierte a peso, eliminar paquete.
+    if (p.unit) { packSize = null; packPrice = null }
     if (!previous) {
       const existing = data.products.find((p) => normalize(p.name) === normalize(body.name))
       if (existing) return { ...op, kind: 'noop', result: { ...existing, merged: true } }
@@ -143,11 +166,11 @@ export function prepareOperation(data, method, path, body, ctx) {
     if (previous) op.before = owner ? { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null } : { sale_price: previous.sale_price }
     // La unidad viaja siempre en las altas y ediciones del dueño: si se omitiera,
     // una edición que no la menciona (p. ej. la importación) la dejaría en blanco.
-    if (!previous || owner) { op.body.unit = p.unit || null; op.body.track_stock = trackStock }
+    if (!previous || owner) { op.body.unit = p.unit || null; op.body.track_stock = trackStock; op.body.pack_size = packSize; op.body.pack_price = packPrice }
     // La entrada de mercancía sube como cantidad a sumar, nunca como stock final:
     // si otra caja vendió mientras tanto, un total absoluto pisaría esas ventas.
     if (addStock != null && addStock !== '') { delete op.body.stock; op.body.add_stock = Number(addStock) }
-    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, created_by_email: previous?.created_by_email ?? ctx.user.email }
+    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, pack_size: packSize ?? null, pack_price: packPrice ?? null, created_by_email: previous?.created_by_email ?? ctx.user.email }
   } else if (path === '/api/sales') {
     op.kind = 'sale'
     op.body.client_sale_id ||= ctx.newId()
@@ -173,9 +196,14 @@ export function prepareOperation(data, method, path, body, ctx) {
       const p = productById(data, item.product_id)
       assert(validQuantity(item.quantity, p.unit || null, 0.001), p.unit ? `Cantidad inválida para ${p.name} (usa hasta 3 decimales)` : `${p.name} se vende por unidades enteras`)
       assert(number(item.unit_price), 'Precio inválido')
+      // Paquete: quantity son paquetes enteros, precio y costo van por paquete.
+      const pack = item.pack_size == null ? null : Number(item.pack_size)
+      if (pack !== null) assert(!p.unit && Number.isInteger(pack) && pack >= 2, `Paquete inválido para ${p.name}`)
+      const units = lineUnits(item)
       // Un producto por peso nunca bloquea la venta (igual que el servidor).
-      if (!p.unit) assert(remaining.get(p.id) >= item.quantity, `Stock insuficiente para ${p.name}`)
-      remaining.set(p.id, Math.max(0, roundQty(remaining.get(p.id) - item.quantity)))
+      if (!p.unit) assert(remaining.get(p.id) >= units, `Stock insuficiente para ${p.name}`)
+      remaining.set(p.id, Math.max(0, roundQty(remaining.get(p.id) - units)))
+      if (pack) return { ...item, id: index, pack_size: pack, product_name: `${p.name} (paquete de ${pack})`, unit_cost: round(Number(p.purchase_price || 0) * pack) }
       return { ...item, id: index, product_name: p.name, unit_cost: Number(p.purchase_price || 0) }
     })
     const total = round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price), 0))
