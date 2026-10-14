@@ -75,6 +75,7 @@ function prepareDeltaSession(userId) {
       setSyncState('delta_after_purchase', 0);
       setSyncState('delta_after_close', 0);
       setSyncState('delta_after_count', 0);
+      setSyncState('delta_after_correction', 0);
     });
     reset();
   }
@@ -83,6 +84,7 @@ function prepareDeltaSession(userId) {
     purchase: Number(getSyncState('delta_after_purchase') || 0),
     close: Number(getSyncState('delta_after_close') || 0),
     count: Number(getSyncState('delta_after_count') || 0),
+    correction: Number(getSyncState('delta_after_correction') || 0),
   };
 }
 
@@ -210,7 +212,8 @@ function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit, 
   return insert();
 }
 
-function updateProduct(id, { name, purchase_price, sale_price, stock, unit, track_stock, add_stock }) {
+function updateProduct(id, { name, purchase_price, sale_price, stock, unit, track_stock, add_stock, stock_reason }) {
+  const stockReason = typeof stock_reason === 'string' && stock_reason.trim() ? stock_reason.trim().slice(0, 200) : null;
   if (sale_price !== undefined && (sale_price === null || sale_price === '' || !Number.isFinite(Number(sale_price)) || Number(sale_price) < 0)) {
     throw new Error('El precio de venta no es válido');
   }
@@ -275,7 +278,11 @@ function updateProduct(id, { name, purchase_price, sale_price, stock, unit, trac
       op_type: 'product.update',
       client_op_id: crypto.randomUUID(),
       local_ref_id: id,
-      payload: { local_product_id: id, ...changed, ...(addedQty > 0 && { add_stock: addedQty }) },
+      payload: {
+        local_product_id: id, ...changed,
+        ...(addedQty > 0 && { add_stock: addedQty }),
+        ...(changed.stock !== undefined && stockReason && { stock_reason: stockReason }),
+      },
     });
 
     if (addedQty > 0) {
@@ -283,6 +290,13 @@ function updateProduct(id, { name, purchase_price, sale_price, stock, unit, trac
         INSERT INTO stock_entries (product_id, product_name, quantity, stock_before, stock_after, account_email)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(id, next.name, addedQty, Number(existing.stock), next.stock, getSession()?.email ?? null);
+    } else if (changed.stock !== undefined) {
+      // Stock puesto a mano (58 → 55): queda anotado, con el motivo si lo hay.
+      db.prepare(`
+        INSERT INTO stock_entries (product_id, product_name, quantity, stock_before, stock_after, account_email, kind, reason)
+        VALUES (?, ?, ?, ?, ?, ?, 'correccion', ?)
+      `).run(id, next.name, round3(next.stock - Number(existing.stock)), Number(existing.stock), next.stock,
+        getSession()?.email ?? null, stockReason);
     }
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(id);
@@ -1235,9 +1249,62 @@ function applyServerDelta(page) {
     if (page.cursors.purchase != null) setSyncState('delta_after_purchase', page.cursors.purchase);
     setSyncState('delta_after_close', page.cursors.close);
     setSyncState('delta_after_count', page.cursors.count);
+
+    // Correcciones de la cuenta principal: van después de ventas y cierres para
+    // encontrar ya en la base lo que corrigen. Un servidor anterior no las manda.
+    for (const correction of page.sale_corrections || []) {
+      applySaleCorrection(db, correction);
+      stats.corrections = (stats.corrections || 0) + 1;
+    }
+    if (page.cursors.correction != null) setSyncState('delta_after_correction', page.cursors.correction);
   });
   apply();
   return stats;
+}
+
+/**
+ * Refleja aquí una corrección hecha en el servidor: la venta cambia de forma
+ * de pago o desaparece (anulada) y su cierre queda con las cifras recalculadas.
+ * El stock devuelto llega con el catálogo, como cualquier otro cambio de stock.
+ * Es idempotente: aplicarla dos veces deja lo mismo.
+ */
+function applySaleCorrection(db, correction) {
+  const local = db.prepare('SELECT id FROM sales WHERE server_id = ? OR client_sale_id = ?')
+    .get(Number(correction.sale_id), correction.client_sale_id || `srv-${correction.sale_id}`);
+  if (local) {
+    const sale = correction.sale;
+    if (!sale) {
+      db.prepare('DELETE FROM sale_items WHERE sale_id = ?').run(local.id);
+      db.prepare('DELETE FROM sales WHERE id = ?').run(local.id);
+    } else {
+      db.prepare(`
+        UPDATE sales SET payment_method = ?, transfer_amount = ?, foreign_currency = ?,
+          foreign_amount = ?, exchange_rate = ?, shop_rate = ? WHERE id = ?
+      `).run(sale.payment_method || 'efectivo', sale.transfer_amount ?? null, sale.foreign_currency ?? null,
+        sale.foreign_amount ?? null, sale.exchange_rate ?? null, sale.shop_rate ?? null, local.id);
+    }
+  }
+  const close = correction.cash_close;
+  if (close) {
+    db.prepare(`
+      UPDATE cash_closes SET expected_cash = ?, difference = ?, expected_transfer = ?, sales_count = ?,
+        expected_usd = ?, difference_usd = ?, expected_eur = ?, difference_eur = ?,
+        corrected_at = ?, original_difference = ?
+      WHERE server_id = ? OR client_close_id = ?
+    `).run(
+      Number(close.expected_cash) || 0, Number(close.difference) || 0, Number(close.expected_transfer) || 0,
+      Number(close.sales_count) || 0, Number(close.expected_usd) || 0, Number(close.difference_usd) || 0,
+      Number(close.expected_eur) || 0, Number(close.difference_eur) || 0,
+      close.corrected_at ?? null, close.original_difference ?? null,
+      Number(close.id), close.client_close_id || `srv-${close.id}`,
+    );
+  }
+}
+
+/** Corrección recién hecha desde esta caja: se aplica sin esperar al delta. */
+function applySaleCorrectionLocal(correction) {
+  const db = getLocalDb();
+  db.transaction(() => applySaleCorrection(db, correction))();
 }
 
 // ---------------------------------------------------------------------------
@@ -1382,7 +1449,7 @@ function resetStuckSyncing() {
 
 module.exports = {
   getSession, setSession, updateSessionSettings, clearSession,
-  getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta,
+  getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta, applySaleCorrectionLocal,
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
   listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog,
   createSaleLocal, listSales, getSale,

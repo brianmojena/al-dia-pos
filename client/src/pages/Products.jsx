@@ -8,7 +8,15 @@ import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix } from '../lib/units'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '' }
+const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '' }
+
+// Cada movimiento del registro de stock: mercancía recibida, stock puesto a
+// mano por la cuenta principal o unidades que volvieron al anular una venta.
+const ENTRY_KIND = {
+  entrada:    { label: 'Entrada',    color: 'text-green-600' },
+  correccion: { label: 'Corrección', color: 'text-[#007AFF]' },
+  anulacion:  { label: 'Venta anulada', color: 'text-orange-600' },
+}
 
 export default function Products() {
   const { user } = useAuth()
@@ -56,7 +64,7 @@ export default function Products() {
   const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
-    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', track_stock: !p.unit || Number(p.track_stock) === 1, add_stock: '' })
+    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', track_stock: !p.unit || Number(p.track_stock) === 1, add_stock: '', stock_reason: '' })
     setFormError('')
     setShowForm(true)
   }
@@ -76,6 +84,8 @@ export default function Products() {
   }
 
   const addPreview = parseFloat(String(form.add_stock ?? '').replace(',', '.')) || 0
+  // La cuenta principal cambió el stock a mano: se le pide (opcional) el motivo.
+  const stockChanged = !!editing && isOwner && !addPreview && String(form.stock) !== '' && Number(String(form.stock).replace(',', '.')) !== Number(editing.stock)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -90,6 +100,7 @@ export default function Products() {
       unit: form.unit || null,
       ...(form.unit && { track_stock: !!form.track_stock }),
       ...(editing && addStock > 0 && { add_stock: addStock }),
+      ...(stockChanged && form.stock_reason.trim() && { stock_reason: form.stock_reason.trim() }),
     }
     try {
       const res = await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
@@ -159,7 +170,7 @@ export default function Products() {
           {isOwner && (
             <button
               onClick={openEntries}
-              title="Historial de stock añadido"
+              title="Historial de movimientos de stock"
               className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
             >
               <Info size={17} />
@@ -219,7 +230,7 @@ export default function Products() {
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[80vh] flex flex-col">
             <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
-              <h3 className="text-lg font-semibold text-gray-900">Stock añadido</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Movimientos de stock</h3>
               <button onClick={() => setShowEntries(false)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
                 <X size={20} className="text-gray-500" />
               </button>
@@ -227,18 +238,23 @@ export default function Products() {
             <div className="overflow-y-auto px-6 py-4">
               {entriesError && <p className="text-sm text-red-600 font-medium">{entriesError}</p>}
               {!entriesError && entries === null && <p className="text-sm text-gray-400">Cargando...</p>}
-              {entries && entries.length === 0 && <p className="text-sm text-gray-400">Todavía nadie ha añadido stock.</p>}
-              {entries && entries.map(e => (
-                <div key={e.id} className="py-3 border-b border-gray-100 last:border-0">
-                  <div className="flex justify-between gap-3">
-                    <span className="font-semibold text-gray-900 text-sm">{e.product_name}</span>
-                    <span className="font-bold text-green-600 text-sm">+{Number(e.quantity)}</span>
+              {entries && entries.length === 0 && <p className="text-sm text-gray-400">Todavía no hay movimientos de stock.</p>}
+              {entries && entries.map(e => {
+                const kind = ENTRY_KIND[e.kind] || ENTRY_KIND.entrada
+                const qty = Number(e.quantity)
+                return (
+                  <div key={e.id} className="py-3 border-b border-gray-100 last:border-0">
+                    <div className="flex justify-between gap-3">
+                      <span className="font-semibold text-gray-900 text-sm">{e.product_name}</span>
+                      <span className={`font-bold text-sm ${qty < 0 ? 'text-red-600' : kind.color}`}>{qty > 0 ? '+' : ''}{qty}</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      <span className={`font-semibold ${kind.color}`}>{kind.label}</span> · {Number(e.stock_before)} → {Number(e.stock_after)} · {e.account_email || 'cuenta desconocida'} · {new Date(String(e.created_at).replace(' ', 'T') + 'Z').toLocaleString()}
+                    </p>
+                    {e.reason && <p className="text-xs text-gray-500 italic mt-0.5">«{e.reason}»</p>}
                   </div>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    {Number(e.stock_before)} → {Number(e.stock_after)} · {e.account_email || 'cuenta desconocida'} · {new Date(String(e.created_at).replace(' ', 'T') + 'Z').toLocaleString()}
-                  </p>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         </div>
@@ -337,6 +353,16 @@ export default function Products() {
                   {editing ? 'Stock' : 'Stock inicial'}{form.unit ? ` (${form.unit})` : ''}
                 </label>
                 <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
+                {stockChanged && (
+                  <>
+                    <p className="text-xs text-gray-400 mt-1.5">
+                      Corrección: {Number(editing.stock)} → {Number(String(form.stock).replace(',', '.'))}. Queda anotada a tu nombre.
+                    </p>
+                    <div className="mt-1.5">
+                      <input type="text" maxLength={200} placeholder="Motivo (opcional): conteo, se rompieron..." {...field('stock_reason')} />
+                    </div>
+                  </>
+                )}
               </div>}
               {editing && (!form.unit || form.track_stock) && (
                 <div>

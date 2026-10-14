@@ -228,6 +228,13 @@ function initLocalDb(dbPath) {
     'ALTER TABLE cash_closes ADD COLUMN expected_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN counted_eur REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN difference_eur REAL NOT NULL DEFAULT 0',
+    // Cierre recalculado en el servidor porque la cuenta principal corrigió
+    // una de sus ventas (ver server/lib/saleCorrections.js).
+    'ALTER TABLE cash_closes ADD COLUMN corrected_at TEXT',
+    'ALTER TABLE cash_closes ADD COLUMN original_difference REAL',
+    // Las entradas de stock locales también distinguen la corrección a mano.
+    "ALTER TABLE stock_entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'entrada'",
+    'ALTER TABLE stock_entries ADD COLUMN reason TEXT',
     // Productos por peso: NULL = por unidad; 'kg' | 'g' | 'lb' = precio y stock
     // por esa unidad, con decimales. Las columnas stock/quantity/expected/counted
     // se declararon INTEGER, pero la afinidad INTEGER de SQLite guarda un REAL

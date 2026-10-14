@@ -219,8 +219,9 @@ test('down-sync del escritorio', async (t) => {
       ctx.queries.setSyncState('delta_after_close', 7);
       ctx.queries.setSyncState('delta_after_count', 3);
       ctx.queries.setSyncState('delta_after_purchase', 9);
-      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, close: 7, count: 3 });
-      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, close: 0, count: 0 });
+      ctx.queries.setSyncState('delta_after_correction', 4);
+      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, close: 7, count: 3, correction: 4 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, close: 0, count: 0, correction: 0 });
     } finally {
       ctx.close();
     }

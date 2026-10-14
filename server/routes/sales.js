@@ -10,6 +10,7 @@ const { resolveRegisterId } = require('../lib/register');
 const { notifySale } = require('../lib/push');
 const { roundQty, validQuantity } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
+const { correctSale, parseCorrection, CorrectionError } = require('../lib/saleCorrections');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -168,6 +169,42 @@ router.post('/rejected/:id/review', requireOwner, asyncHandler(async (req, res) 
   if (updated.rowsAffected === 0) return res.status(404).json({ error: 'Venta rechazada no encontrada' });
   const row = await db.execute({ sql: 'SELECT * FROM rejected_sales WHERE id = ?', args: [req.params.id] });
   res.json(parseRejected(row.rows[0]));
+}));
+
+// --- Correcciones de la cuenta principal ------------------------------------
+// También antes de /:id. Con ?date= son las de las ventas de ese día del
+// negocio (incluidas las anuladas, que ya no aparecen en la lista de ventas).
+router.get('/corrections', requireOwner, asyncHandler(async (req, res) => {
+  const dia = req.query.date ? boundsForDate(req.query.date) : null;
+  const result = await getDb().execute(dia
+    ? {
+        sql: `SELECT * FROM sale_corrections WHERE user_id = ? AND sale_created_at >= ? AND sale_created_at < ?
+              ORDER BY id DESC`,
+        args: [req.userId, dia.start, dia.end],
+      }
+    : { sql: 'SELECT * FROM sale_corrections WHERE user_id = ? ORDER BY id DESC LIMIT 100', args: [req.userId] });
+  res.json(result.rows.map(parseCorrection));
+}));
+
+router.get('/:id/corrections', requireOwner, asyncHandler(async (req, res) => {
+  const result = await getDb().execute({
+    sql: 'SELECT * FROM sale_corrections WHERE user_id = ? AND sale_id = ? ORDER BY id DESC',
+    args: [req.userId, req.params.id],
+  });
+  res.json(result.rows.map(parseCorrection));
+}));
+
+// Cambiar la forma de pago o anular la venta. Ver server/lib/saleCorrections.js.
+router.post('/:id/correct', requireOwner, asyncHandler(async (req, res) => {
+  const db = getDb();
+  const account = await describeAccount(db, req);
+  try {
+    const result = await correctSale(db, { userId: req.userId, saleId: req.params.id, body: req.body, account });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof CorrectionError) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 }));
 
 router.get('/:id', requireOwner, asyncHandler(async (req, res) => {

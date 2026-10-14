@@ -13,6 +13,7 @@ import { formatDayLabel, formatTime } from '../lib/dates'
 import { shiftMonth, monthLabel, dayLabel, closeStatus } from '../lib/months'
 import { accountLabel } from '../lib/accountLabel'
 import RejectedSalesPanel from '../components/RejectedSalesPanel'
+import SaleCorrection, { VoidedSales } from '../components/SaleCorrection'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -105,6 +106,18 @@ function HistorialPorMes() {
       .finally(() => setDayLoading(false))
   }
 
+  // Tras corregir una venta: se vuelven a leer el día y el mes (totales y
+  // cierre cambian) y se cierra el detalle, que ya no vale.
+  const [correctedAt, setCorrectedAt] = useState(0)
+  const afterCorrection = async () => {
+    setExpandedId(null)
+    setDetails({})
+    setCorrectedAt(Date.now())
+    const res = await apiFetch(`/api/sales?date=${selectedDate}`).catch(() => null)
+    if (res?.ok) setDaySales(await res.json())
+    loadMonth(viewMonth)
+  }
+
   // El botón "Historial" de DayDetail solo limpia selectedDate: viewMonth no
   // se toca, así que se vuelve al mismo mes que se estaba mirando.
   const closeDay = () => setSelectedDate(null)
@@ -167,6 +180,8 @@ function HistorialPorMes() {
         details={details}
         onToggle={toggleExpand}
         onBack={closeDay}
+        onCorrected={afterCorrection}
+        correctedAt={correctedAt}
       />
     )
   }
@@ -392,7 +407,7 @@ function CloseBadge({ status }) {
 
 // Detalle de un día: mismas filas de venta expandibles que tenía Historial,
 // solo que ahora acotadas a un día (antes eran las últimas 200 ventas).
-function DayDetail({ date, sales, loading, error, expandedId, details, onToggle, onBack }) {
+function DayDetail({ date, sales, loading, error, expandedId, details, onToggle, onBack, onCorrected, correctedAt }) {
   const total = sales.reduce((s, sale) => s + sale.total, 0)
 
   return (
@@ -475,6 +490,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                         <span className="text-xs text-gray-400 font-medium">Ganancia estimada</span>
                         <span className="text-xs font-bold text-green-600">{fmt(sale.profit)}</span>
                       </div>
+                      <SaleCorrection sale={sale} items={details[sale.id].items} onChanged={onCorrected} />
                     </>
                   ) : (
                     <div className="flex justify-center py-2">
@@ -487,6 +503,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
           ))}
         </div>
       )}
+      <VoidedSales date={date} refreshKey={correctedAt} />
     </div>
   )
 }
@@ -506,13 +523,24 @@ function ElectronHistorial() {
   const [expandedId, setExpandedId] = useState(null)
   const [details,    setDetails]    = useState({})
 
+  const [correctedAt, setCorrectedAt] = useState(0)
+  const fetchSales = () => apiFetch('/api/sales')
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad response'))))
+    .then((d) => setSales(Array.isArray(d) ? d : []))
+
   useEffect(() => {
-    apiFetch('/api/sales')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad response'))))
-      .then((d) => setSales(Array.isArray(d) ? d : []))
+    fetchSales()
       .catch(() => setError('No se pudo cargar el historial.'))
       .finally(() => setLoading(false))
   }, [])
+
+  // Tras corregir una venta se vuelve a leer la lista y se cierra el detalle.
+  const load = () => {
+    setExpandedId(null)
+    setDetails({})
+    setCorrectedAt(Date.now())
+    fetchSales().catch(() => {})
+  }
 
   const toggleExpand = async (id) => {
     if (expandedId === id) { setExpandedId(null); return }
@@ -560,6 +588,7 @@ function ElectronHistorial() {
       </div>
 
       <RejectedSalesPanel />
+      <div className="mb-4"><VoidedSales refreshKey={correctedAt} /></div>
 
       {sales.length === 0 ? (
         <div className="bg-white rounded-2xl py-20 text-center text-gray-400 shadow-sm">
@@ -625,6 +654,7 @@ function ElectronHistorial() {
                                 <span className="text-xs text-gray-400 font-medium">Ganancia estimada</span>
                                 <span className="text-xs font-bold text-green-600">{fmt(sale.profit)}</span>
                               </div>
+                              <SaleCorrection sale={sale} items={details[sale.id].items} onChanged={load} />
                             </>
                           ) : (
                             <div className="flex justify-center py-2">

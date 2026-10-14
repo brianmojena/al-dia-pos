@@ -173,6 +173,39 @@ async function routeRequest(method, fullPath, body) {
 
     // --- sales ---
     if (parts[0] === 'api' && parts[1] === 'sales') {
+      // Correcciones de la cuenta principal (cambiar forma de pago, anular).
+      // Se hacen en el servidor, que es quien tiene la venta y el cierre de
+      // todas las cajas: hace falta internet. Aquí los ids son locales.
+      const isCorrections = parts.length === 3 && parts[2] === 'corrections' && method === 'GET';
+      const isSaleCorrections = parts.length === 4 && parts[3] === 'corrections' && method === 'GET';
+      const isCorrect = parts.length === 4 && parts[3] === 'correct' && method === 'POST';
+      if (isCorrections || isSaleCorrections || isCorrect) {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede corregir ventas');
+        const { apiRequest } = require('./sync/apiClient');
+        let path = '/api/sales/corrections' + (query.date ? `?date=${encodeURIComponent(query.date)}` : '');
+        if (!isCorrections) {
+          const sale = queries.getSale(Number(parts[2]));
+          if (!sale) return fail(404, 'Venta no encontrada');
+          if (sale.server_id == null) {
+            return fail(409, 'Esta venta todavía no subió al servidor. Espera a que sincronice para corregirla.');
+          }
+          path = `/api/sales/${sale.server_id}/${parts[3]}`;
+        }
+        let res;
+        try {
+          res = await apiRequest(method, path, { token: session.token, body });
+        } catch (_) {
+          return fail(503, 'Para corregir ventas hace falta internet.');
+        }
+        if (res.ok && isCorrect) {
+          queries.applySaleCorrectionLocal({
+            ...res.data.correction,
+            sale: res.data.sale,
+            cash_close: res.data.cash_close,
+          });
+        }
+        return { ok: res.ok, status: res.status, data: res.data };
+      }
       if (parts.length === 2 && method === 'GET') {
         if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
         return ok(200, queries.listSales({ date: query.date }));

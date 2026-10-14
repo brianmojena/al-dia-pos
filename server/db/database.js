@@ -168,6 +168,28 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Correcciones de la cuenta principal sobre ventas ya hechas: cambio de
+    -- forma de pago o anulación. Guarda la venta antes y después (una anulada
+    -- ya no existe en sales, así que esta fila es lo único que queda de ella)
+    -- y, si la venta estaba en un cierre de caja, cómo quedó ese cierre.
+    CREATE TABLE IF NOT EXISTS sale_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      sale_id INTEGER NOT NULL,
+      client_sale_id TEXT,
+      sale_created_at TEXT,
+      action TEXT NOT NULL,
+      before TEXT NOT NULL,
+      after TEXT,
+      cash_close_id INTEGER,
+      close_before TEXT,
+      close_after TEXT,
+      reason TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Almacén: mercancía guardada aparte de la tienda. Solo lleva costo y
     -- cantidad (su importe es cantidad x costo); no tiene precio de venta.
     CREATE TABLE IF NOT EXISTS warehouse_items (
@@ -362,6 +384,16 @@ async function initDb() {
     // El almacén se puede apagar para una tienda concreta que no lo usa (1 =
     // visible, que es lo que tienen todas). Se cambia a mano en la base.
     'ALTER TABLE users ADD COLUMN warehouse_enabled INTEGER NOT NULL DEFAULT 1',
+    // stock_entries deja de ser solo "mercancía recibida": 'correccion' es la
+    // cuenta principal poniendo el stock a mano (58 → 55) y 'anulacion' las
+    // unidades que vuelven al anular una venta. reason es el motivo opcional.
+    "ALTER TABLE stock_entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'entrada'",
+    'ALTER TABLE stock_entries ADD COLUMN reason TEXT',
+    // Un cierre recalculado por una corrección: cuándo y cuánto había dado
+    // originalmente (se fija la primera vez y no se vuelve a tocar).
+    'ALTER TABLE cash_closes ADD COLUMN corrected_at TEXT',
+    'ALTER TABLE cash_closes ADD COLUMN original_expected_cash REAL',
+    'ALTER TABLE cash_closes ADD COLUMN original_difference REAL',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -427,6 +459,8 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_warehouse_transfers_client
       ON warehouse_transfers(user_id, client_transfer_id) WHERE client_transfer_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_stock_entries_user ON stock_entries(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_sale_corrections_user ON sale_corrections(user_id, id);
+    CREATE INDEX IF NOT EXISTS idx_sale_corrections_sale ON sale_corrections(user_id, sale_id);
     CREATE INDEX IF NOT EXISTS idx_warehouse_changes_user ON warehouse_changes(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_counts_user  ON inventory_counts(user_id, counted_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_items_count  ON inventory_count_items(count_id);

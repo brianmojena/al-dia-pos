@@ -84,6 +84,8 @@ function buildRequest(db, row) {
           purchase_price: payload.purchase_price,
           sale_price: payload.sale_price,
           stock: payload.stock,
+          // Motivo de un stock puesto a mano; solo viaja con el stock.
+          stock_reason: payload.stock !== undefined ? payload.stock_reason : undefined,
           add_stock: payload.add_stock,
           unit: payload.unit,
           track_stock: payload.track_stock,
@@ -271,7 +273,8 @@ async function pullDelta(session, summary) {
     do {
       const query = new URLSearchParams({
         after_sale: String(cursors.sale), after_close: String(cursors.close),
-        after_count: String(cursors.count), after_purchase: String(cursors.purchase), since: sinceLast60Days(), limit: '500',
+        after_count: String(cursors.count), after_purchase: String(cursors.purchase),
+        after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500',
       });
       const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
       if (!res.ok) {

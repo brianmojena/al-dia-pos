@@ -297,6 +297,12 @@ export default function Caja() {
                     {c.sales_count} {c.sales_count === 1 ? 'venta' : 'ventas'} · esperado {fmt(c.expected_cash)}
                   </p>
                   {c.note && <p className="text-xs text-gray-400 mt-1 italic truncate">{c.note}</p>}
+                  {/* Una venta de este cierre se corrigió después (forma de pago o anulada). */}
+                  {c.corrected_at && (
+                    <p className="text-xs text-[#007AFF] font-medium mt-1">
+                      Corregido{c.original_difference != null && <> · al cerrar dio {isSquare(c.original_difference) ? 'cuadrado' : `${c.original_difference < 0 ? 'faltante de' : 'sobrante de'} ${fmt(Math.abs(c.original_difference))}`}</>}
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-col items-end gap-1">
                   <DifferenceBadge value={c.difference} />

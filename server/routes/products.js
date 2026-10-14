@@ -4,6 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
+const { stockChangeStatement } = require('../lib/stockLog');
 const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
@@ -273,6 +274,17 @@ router.put('/:id', asyncHandler(async (req, res) => {
       req.params.id,
     ],
   }];
+  // La cuenta principal pone el stock a mano: queda anotado de cuánto a cuánto
+  // y, si lo escribió, por qué.
+  const finalStock = trackStock ? Number(stock ?? existing.stock) : 0;
+  if (addedQty === 0 && stock !== undefined && trackStock && finalStock !== Number(existing.stock)) {
+    const account = await describeAccount(db, req);
+    const correction = stockChangeStatement({
+      userId: req.userId, product: { id: existing.id, name: name ?? existing.name },
+      before: existing.stock, after: finalStock, account, kind: 'correccion', reason: req.body.stock_reason,
+    });
+    if (correction) statements.push(correction);
+  }
   if (addedQty > 0) {
     const account = await describeAccount(db, req);
     statements.push({

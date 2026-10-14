@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
+const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
 const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -123,8 +124,13 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
           id = Number(insert.lastInsertRowid);
         }
       } else {
+        const before = hasAdd ? null : (await tx.execute({ sql: 'SELECT stock, track_stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, id] })).rows[0];
         const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, trackStock ? stock : 0, unit, trackStock, req.userId, id] });
         if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
+        // Stock puesto a mano por la cuenta principal: queda anotado (ver lib/stockLog.js).
+        if (before && trackStock && Number(before.track_stock ?? 1) === 1) {
+          await logStockChange(tx, { userId: req.userId, product: { id, name }, before: before.stock, after: stock, account, kind: 'correccion', reason: product.stock_reason });
+        }
         if (hasAdd) {
           const failure = await addStock(tx, req, account, id, addQty);
           if (failure) { await tx.rollback(); return res.status(failure.status).json({ error: failure.error }); }
