@@ -20,7 +20,7 @@ const navItems = [
   // Editar y borrar sigue siendo del dueño (lo decide el servidor y la caja).
   { to: '/products',  icon: Package,         label: 'Productos'                    },
   { to: '/almacen',   icon: Warehouse,       label: 'Almacén',   warehouse: true   },
-  { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
+  { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: false   },
 ]
 
 export default function Layout() {

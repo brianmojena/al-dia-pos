@@ -10,7 +10,7 @@ const { validQuantity, roundQty } = require('../lib/units');
 /**
  * Arqueo de inventario.
  *
- * El dueño cuenta lo que hay en el estante; el sistema compara contra lo que
+ * El dueño o cajero cuenta lo que hay en el estante; el sistema compara contra lo que
  * creía tener, deja constancia de la diferencia y ajusta el stock a la
  * realidad. Ese ajuste es el punto: sin él la base se queda equivocada para
  * siempre y el mismo faltante reaparece en cada conteo. Pero ajustar sin dejar
@@ -21,8 +21,8 @@ const { validQuantity, roundQty } = require('../lib/units');
  * hay que barrer las 200 referencias para cerrar un arqueo. En una tienda real
  * se cuenta lo caro y lo que se sospecha, no todo cada noche.
  *
- * Todo es de dueño: un cajero que pudiera declarar el conteo taparía su propio
- * faltante escribiendo el número que el sistema espera.
+ * Dueños y cajeros pueden contar; el historial es exclusivo del dueño.
+ * Cada conteo registra la cuenta que lo realizó.
  */
 
 const isUniqueViolation = (err) => {
@@ -42,9 +42,7 @@ const loadItems = (db, countId) =>
     args: [countId],
   });
 
-router.use(requireOwner);
-
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', requireOwner, asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'SELECT * FROM inventory_counts WHERE user_id = ? ORDER BY counted_at DESC LIMIT 100',
     args: [req.userId],
@@ -52,7 +50,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.get('/:id', asyncHandler(async (req, res) => {
+router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const countResult = await db.execute({
     sql: 'SELECT * FROM inventory_counts WHERE id = ? AND user_id = ?',

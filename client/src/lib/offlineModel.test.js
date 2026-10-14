@@ -167,3 +167,36 @@ test('añadir stock sin internet sube como cantidad a sumar, no como stock final
   assert.equal(project(state).products[0].stock, 27)
   assert.throws(() => add(state, 'PUT', '/api/products/10', { add_stock: 0 }), /no es válida/)
 })
+
+test('cajero offline consulta solo ventas de hoy sin costes ni ganancias', () => {
+  const cashier = { ...user, role: 'cajero' }
+  const data = emptyData()
+  const sale = { id: 1, created_at: new Date().toISOString(), total: 100, profit: 40, items: [{ id: 1, product_name: 'Pan', quantity: 1, unit_price: 100, unit_cost: 60 }] }
+  data.sales = [sale, { ...sale, id: 2, created_at: '2000-01-01 12:00:00' }]
+  const visible = readLocal(data, '/api/sales', '1:2', cashier)
+  assert.equal(visible.length, 1)
+  assert.equal(visible[0].id, 1)
+  assert.equal('profit' in visible[0], false)
+  assert.equal('unit_cost' in visible[0].items[0], false)
+  assert.equal(readLocal(data, '/api/sales/1', '1:2', cashier).items[0].product_name, 'Pan')
+  assert.equal(readLocal(data, '/api/sales/2', '1:2', cashier), undefined)
+  assert.throws(() => readLocal(data, '/api/sales?date=2000-01-01', '1:2', cashier), /historial de hoy/)
+  assert.throws(() => readLocal(data, '/api/reports/days', '1:2', cashier), /Solo el dueño/)
+  assert.equal(data.sales[0].profit, 40)
+})
+
+test('cajero realiza arqueo offline con atribución, ajuste e idempotencia sin acceso al historial', () => {
+  const state = fixture(), cashier = { ...user, id: 2, role: 'cajero', email: 'caja@test.local' }
+  const overrides = { user: cashier, account: '1:2' }
+  const body = { client_count_id: 'cashier-count', items: [{ product_id: 10, counted: 17 }], note: 'Cierre del turno' }
+  const count = add(state, 'POST', '/api/inventory-counts', body, overrides)
+  const data = project(state)
+  assert.equal(count.result.account_email, cashier.email)
+  assert.equal(count.result.units_missing, 3)
+  assert.equal(data.products[0].stock, 17)
+  assert.equal(data.inventory_counts[0].note, body.note)
+  const replay = add(state, 'POST', '/api/inventory-counts', body, overrides)
+  assert.equal(replay.kind, 'noop')
+  assert.equal(project(state).inventory_counts.length, 1)
+  assert.throws(() => readLocal(data, '/api/inventory-counts', '1:2', cashier), /Solo el dueño/)
+})

@@ -3,10 +3,8 @@ const assert = require('node:assert/strict');
 const { startTestServer, registerUser, createProduct } = require('./helpers');
 
 /**
- * El conteo a ciegas del cierre de caja solo vale si el cajero no puede
- * averiguar por otra vía cuánto debería haber. Estos tests fijan esa frontera:
- * el cajero cobra, cierra la caja, crea productos y cambia su precio de venta,
- * pero no accede a la auditoría del dueño.
+ * El cajero consulta las ventas de hoy, cobra y cierra la caja,
+ * pero las correcciones y la auditoría siguen reservadas al dueño.
  */
 
 const crearCajero = async (api, tokenDueño, email, password = 'cajero1234') => {
@@ -25,14 +23,13 @@ test('roles: dueño y cajero', async (t) => {
   const ctx = await startTestServer();
   t.after(() => ctx.close());
 
-  await t.test('un cajero no puede ver el dashboard, el historial ni los cierres', async () => {
+  await t.test('un cajero no puede ver el dashboard ni los cierres', async () => {
     const dueño = await registerUser(ctx.api);
     const cajero = await crearCajero(ctx.api, dueño, `caja1${Date.now()}@test.local`);
 
-    // Justo las tres pantallas donde se podría leer el total esperado.
+    // La auditoría sigue reservada al dueño.
     const prohibidas = [
       ['GET', '/api/dashboard'],
-      ['GET', '/api/sales'],
       ['GET', '/api/cash-closes'],
     ];
     for (const [method, path] of prohibidas) {

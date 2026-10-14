@@ -1,3 +1,4 @@
+import { useAuth } from '../context/AuthContext'
 import { validQuantity } from '../lib/units'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useMemo, useRef } from 'react'
@@ -13,6 +14,8 @@ import { accountLabel } from '../lib/accountLabel'
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Inventario() {
+  const { user } = useAuth()
+  const isOwner = user?.role !== 'cajero'
   const [products,   setProducts]   = useState([])
   const [history,    setHistory]    = useState([])
   const [counts,     setCounts]     = useState({})   // product_id -> texto tecleado
@@ -28,7 +31,7 @@ export default function Inventario() {
     try {
       const [p, h] = await Promise.all([
         apiFetch('/api/products').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
-        apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
+        isOwner ? apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }) : Promise.resolve([]),
       ])
       setProducts(Array.isArray(p) ? p : [])
       setHistory(Array.isArray(h) ? h : [])
@@ -36,7 +39,7 @@ export default function Inventario() {
     finally { setLoading(false) }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [isOwner])
   useLocalRefresh(load)
 
   const filtered = useMemo(

@@ -4,6 +4,7 @@ const {
   getRegisterId, prepareDeltaSession, applyServerDelta, applyServerWarehouse, setSyncState,
 } = require('../db/queries');
 const { apiRequest } = require('./apiClient');
+const { saveHistory } = require('../cashierHistory');
 const { businessToday } = require('../lib/businessDay');
 
 // ---------------------------------------------------------------------------
@@ -412,6 +413,16 @@ async function syncOnce() {
       const wh = await apiRequest('GET', '/api/warehouse', { token: session.token });
       if (wh.ok && Array.isArray(wh.data)) applyServerWarehouse(wh.data);
     } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
+  }
+
+  if (!summary.authExpired && session.role === 'cajero') {
+    try {
+      const snapshot = await apiRequest('GET', '/api/sync/snapshot', { token: session.token });
+      if (snapshot.ok && Array.isArray(snapshot.data?.sales)) {
+        saveHistory(session, snapshot.data.sales);
+        summary.historyRefreshed = true;
+      }
+    } catch (_) { /* sin red: conservar el último historial descargado */ }
   }
 
   if (!summary.authExpired) await pullDelta(session, summary);

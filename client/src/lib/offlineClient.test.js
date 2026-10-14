@@ -284,3 +284,49 @@ test('una edición de cajero guardada con el producto entero por una versión an
   assert.deepEqual(sent, ['product', 'sale'])
   assert.equal((await localSyncStatus()).pending, 0)
 })
+
+test('arqueo del cajero con respuesta perdida se reintenta sin perderlo ni bloquear la venta siguiente', async () => {
+  resetStore(); seed(); navigator.onLine = false
+  setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' })
+  const key = 'mypimes_local_v1:1:2'
+  records.set(key, structuredClone(records.get(stateKey(1))))
+  const countResponse = await write('/api/inventory-counts', {
+    client_count_id: 'cashier-count-release', items: [{ product_id: 10, counted: 17 }], note: 'Turno',
+  })
+  assert.equal(countResponse.status, 202)
+  assert.equal((await write('/api/sales', saleBody('sale-after-count'))).status, 202)
+  const saved = structuredClone(records.get(key))
+  const reopened = await import('./offlineClient.js?cashier-count-release')
+  assert.equal((await reopened.localSyncStatus()).pending, 2)
+  assert.deepEqual(records.get(key), saved)
+  navigator.onLine = true
+  const sent = [], receipts = new Map()
+  let loseResponse = true
+  globalThis.fetch = async (path, options) => {
+    if (path === '/api/inventory-counts') {
+      const body = JSON.parse(options.body)
+      sent.push(body.client_count_id)
+      assert.equal(body.items[0].counted, 17)
+      assert.equal(options.headers.Authorization, `Bearer ${tokenFor(1, 2)}`)
+      if (!receipts.has(body.client_count_id)) receipts.set(body.client_count_id, { ...saved.outbox[0].result, id: 41, pending: false })
+      if (loseResponse) { loseResponse = false; throw new TypeError('Respuesta perdida después de guardar') }
+      return jsonResponse(receipts.get(body.client_count_id))
+    }
+    if (path === '/api/sales') {
+      const body = JSON.parse(options.body)
+      sent.push(body.client_sale_id)
+      assert.equal(body.client_sale_id, 'sale-after-count')
+      return jsonResponse({ ...saved.outbox[1].result, id: 42, pending: false })
+    }
+    assert.equal(path, '/api/sync/snapshot')
+    return jsonResponse({ products: [{ ...saved.base.products[0], stock: 15 }], sales: [{ ...saved.outbox[1].result, id: 42, pending: false }], current_period: {} })
+  }
+  await reopened.syncOffline()
+  assert.equal((await reopened.localSyncStatus()).pending, 2, 'sin recibo se conserva la cola completa')
+  await reopened.syncOffline()
+  assert.deepEqual(sent, ['cashier-count-release', 'cashier-count-release', 'sale-after-count'])
+  assert.equal(receipts.size, 1)
+  assert.equal((await reopened.localSyncStatus()).pending, 0)
+  assert.equal((await (await apiFetch('/api/products')).json())[0].stock, 15)
+  assert.equal((await (await apiFetch('/api/sales')).json())[0].id, 42)
+})

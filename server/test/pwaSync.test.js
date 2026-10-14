@@ -44,7 +44,8 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     assert.equal(own.body.sales.length, 0);
     const limited = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
     assert.equal(limited.status, 200); assert.ok(limited.body.products.length);
-    for (const key of ['sales', 'cash_closes', 'inventory_counts', 'rejected_sales', 'cashiers']) assert.equal(limited.body[key], undefined);
+    assert.ok(Array.isArray(limited.body.sales));
+    for (const key of ['cash_closes', 'inventory_counts', 'rejected_sales', 'cashiers']) assert.equal(limited.body[key], undefined);
   });
   await t.test('cierre exacto deja abierta una venta posterior y conserva la fecha offline', async () => {
     const next = await call('/api/sales', { client_sale_id: 'next-sale', register_id: 'web', items: [{ product_id: product, quantity: 1, unit_price: 10 }] });

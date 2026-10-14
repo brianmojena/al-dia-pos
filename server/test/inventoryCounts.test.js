@@ -191,7 +191,7 @@ test('arqueo de inventario', async (t) => {
     assert.equal(await stockDe(ctx, productId), 60, 'ningún intento inválido tocó el stock');
   });
 
-  await t.test('un cajero no puede hacer ni ver arqueos de inventario', async () => {
+  await t.test('un cajero puede hacer arqueos, pero no consultar el historial', async () => {
     const dueño = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, dueño, { name: 'Sal', stock: 10, sale_price: 40 });
 
@@ -200,11 +200,27 @@ test('arqueo de inventario', async (t) => {
     const login = await ctx.api('POST', '/api/auth/login', { body: { email, password: 'caja1234' } });
     const cajero = login.body.token;
 
-    // Si el cajero pudiera declarar el conteo, taparía su propio faltante
-    // escribiendo justo el número que el sistema espera.
-    const intento = await contar(ctx.api, cajero, [{ product_id: productId, counted: 3 }]);
-    assert.equal(intento.status, 403);
-    assert.equal(await stockDe(ctx, productId), 10);
+    const clientCountId = randomUUID();
+    const intento = await contar(ctx.api, cajero, [{ product_id: productId, counted: 3 }], { client_count_id: clientCountId });
+    assert.equal(intento.status, 201);
+    assert.equal(await stockDe(ctx, productId), 3);
+    assert.equal(intento.body.account_email, email);
+    assert.equal(Number(intento.body.items[0].expected), 10);
+    assert.equal(Number(intento.body.units_missing), 7);
+    await ctx.db.execute({ sql: 'UPDATE products SET stock = 2 WHERE id = ?', args: [productId] });
+    const replay = await contar(ctx.api, cajero, [{ product_id: productId, counted: 3 }], { client_count_id: clientCountId });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.id, intento.body.id);
+    assert.equal(await stockDe(ctx, productId), 2, 'el reintento no repone stock vendido después del arqueo');
+    const duenoHistorial = await ctx.api('GET', '/api/inventory-counts', { token: dueño });
+    assert.equal(duenoHistorial.body[0].account_email, email);
+    const detalle = await ctx.api('GET', `/api/inventory-counts/${intento.body.id}`, { token: cajero });
+    assert.equal(detalle.status, 403);
+    const ajeno = await registerUser(ctx.api);
+    const productoAjeno = await createProduct(ctx.api, ajeno, { stock: 9 });
+    const intentoAjeno = await contar(ctx.api, cajero, [{ product_id: productoAjeno, counted: 0 }]);
+    assert.equal(intentoAjeno.status, 400);
+    assert.equal(await stockDe(ctx, productoAjeno), 9);
 
     const historial = await ctx.api('GET', '/api/inventory-counts', { token: cajero });
     assert.equal(historial.status, 403);

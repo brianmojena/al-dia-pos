@@ -33,12 +33,7 @@ function requireAuth(req, res, next) {
   }
 }
 
-/**
- * Cierra el paso a todo lo que le diría a un cajero cuánto dinero debería
- * haber en la caja: el dashboard, el historial de ventas y el historial de
- * cierres. Sin esto el conteo a ciegas sería decorativo — bastaría con abrir
- * otra pantalla para ver el total antes de declarar lo contado.
- */
+/** Auditoría, correcciones y administración exclusivas de la cuenta principal. */
 function requireOwner(req, res, next) {
   if (req.role !== OWNER) {
     return res.status(403).json({ error: 'Solo el dueño puede ver esto' });

@@ -230,7 +230,6 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.register_id = 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
   } else if (path === '/api/inventory-counts') {
-    assert(owner, 'Solo el dueño puede contar inventario')
     op.kind = 'count'
     op.body.client_count_id ||= ctx.newId()
     const existing = data.inventory_counts.find((c) => c.client_count_id === op.body.client_count_id)
@@ -310,6 +309,15 @@ export function readLocal(data, path, account, user) {
   if (route === '/api/cash-closes/current') {
     const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
     return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || null, has_sales: sales.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
+  }
+  if (!owner && (route === '/api/sales' || /^\/api\/sales\/-?\d+$/.test(route))) {
+    const today = businessDate()
+    assert(!url.searchParams.has('date') || url.searchParams.get('date') === today, 'Solo puedes consultar el historial de hoy')
+    const visible = data.sales.filter((sale) => businessDate(sale.created_at) === today)
+    const clean = ({ profit, items, ...sale }) => ({ ...sale, ...(items && { items: items.map(({ unit_cost, ...item }) => item) }) })
+    if (route === '/api/sales') return newest(visible, 'created_at').map(clean)
+    const sale = visible.find((s) => s.id === Number(route.split('/').pop()))
+    return sale ? clean(sale) : undefined
   }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))

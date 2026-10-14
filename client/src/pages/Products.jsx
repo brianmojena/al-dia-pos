@@ -283,16 +283,14 @@ export default function Products() {
               <span className="hidden sm:inline">Entradas</span>
             </button>
           )}
-          {isOwner && (
-            <Link
-              to="/inventario"
-              title="Contar inventario"
-              className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
-            >
-              <ClipboardCheck size={17} />
-              <span className="hidden sm:inline">Contar</span>
-            </Link>
-          )}
+          <Link
+            to="/inventario"
+            title="Contar inventario"
+            className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+          >
+            <ClipboardCheck size={17} />
+            <span>Contar</span>
+          </Link>
           <button
             onClick={openNew}
             className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"

@@ -2,6 +2,8 @@
 // locales. Devuelve siempre {ok, status, data} — la misma forma que ya usa
 // apiClient.js — así client/src/lib/api.js puede tratar ambos modos igual.
 const queries = require('./db/queries');
+const { listHistory } = require('./cashierHistory');
+const { businessToday } = require('./lib/businessDay');
 const auth = require('./auth');
 
 function ok(status, data) { return { ok: true, status, data }; }
@@ -207,11 +209,18 @@ async function routeRequest(method, fullPath, body) {
         return { ok: res.ok, status: res.status, data: res.data };
       }
       if (parts.length === 2 && method === 'GET') {
-        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        if (session.role === 'cajero') {
+          const today = businessToday();
+          if (query.date && query.date !== today) return fail(403, 'Solo puedes consultar el historial de hoy');
+          return ok(200, listHistory(session));
+        }
         return ok(200, queries.listSales({ date: query.date }));
       }
       if (parts.length === 3 && method === 'GET') {
-        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        if (session.role === 'cajero') {
+          const sale = listHistory(session).find((s) => s.id === Number(parts[2]));
+          return sale ? ok(200, sale) : fail(404, 'Venta no encontrada');
+        }
         const sale = queries.getSale(Number(parts[2]));
         return sale ? ok(200, sale) : fail(404, 'Venta no encontrada');
       }

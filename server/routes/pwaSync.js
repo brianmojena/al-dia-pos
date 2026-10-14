@@ -1,3 +1,5 @@
+const { todayBounds } = require('../lib/businessDay');
+const { cashierSale } = require('../lib/salesVisibility');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -19,6 +21,14 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
     const openPurchase = (await tx.execute({ sql: 'SELECT created_at FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL) ORDER BY created_at LIMIT 1', args: [req.userId, register] })).rows[0];
     const last = (await tx.execute({ sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1', args: [req.userId, register] })).rows[0];
     const snapshot = { products, current_period: { opened_at: last?.closed_at || open?.created_at || openPurchase?.created_at || null, has_sales: !!(open || openPurchase), is_first_close: !last } };
+    if (req.role === 'cajero') {
+      const { start, end } = todayBounds();
+      const sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY id', args: [req.userId, start, end] })).rows;
+      const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? AND s.created_at >= ? AND s.created_at < ?', args: [req.userId, start, end] })).rows;
+      const bySale = new Map();
+      for (const item of items) { if (!bySale.has(item.sale_id)) bySale.set(item.sale_id, []); bySale.get(item.sale_id).push(item); }
+      snapshot.sales = sales.map((sale) => cashierSale({ ...sale, items: bySale.get(sale.id) || [] }));
+    }
     if (req.role === 'dueño') {
       snapshot.sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? ORDER BY i.id', args: [req.userId] })).rows;

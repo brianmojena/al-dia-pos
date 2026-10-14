@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { boundsForDate } = require('../lib/businessDay');
+const { boundsForDate, businessToday, shopLocalDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
@@ -11,6 +11,8 @@ const { notifySale } = require('../lib/push');
 const { roundQty, validQuantity, lineUnits } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 const { correctSale, parseCorrection, CorrectionError } = require('../lib/saleCorrections');
+
+const { cashierSale } = require('../lib/salesVisibility');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -23,9 +25,12 @@ const findByClientSaleId = (db, userId, clientSaleId) =>
     args: [userId, clientSaleId],
   });
 
-router.get('/', requireOwner, asyncHandler(async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
-  const { date } = req.query;
+  const cashier = req.role === 'cajero';
+  const today = businessToday();
+  if (cashier && req.query.date && req.query.date !== today) return res.status(403).json({ error: 'Solo puedes consultar el historial de hoy' });
+  const date = cashier ? today : req.query.date;
   // El filtro por fecha usa el día del negocio en Cuba, igual que el dashboard.
   const dia = date ? boundsForDate(date) : null;
   const result = dia
@@ -37,7 +42,7 @@ router.get('/', requireOwner, asyncHandler(async (req, res) => {
         sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY created_at DESC LIMIT 200',
         args: [req.userId],
       });
-  res.json(result.rows);
+  res.json(cashier ? result.rows.map(cashierSale) : result.rows);
 }));
 
 // --- Ventas rechazadas -------------------------------------------------------
@@ -208,19 +213,20 @@ router.post('/:id/correct', requireOwner, asyncHandler(async (req, res) => {
   }
 }));
 
-router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
   const db = getDb();
   const saleResult = await db.execute({
     sql: 'SELECT * FROM sales WHERE id = ? AND user_id = ?',
     args: [req.params.id, req.userId],
   });
   const sale = saleResult.rows[0];
-  if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+  if (!sale || (req.role === 'cajero' && shopLocalDate(sale.created_at) !== businessToday())) return res.status(404).json({ error: 'Venta no encontrada' });
   const itemsResult = await db.execute({
     sql: 'SELECT * FROM sale_items WHERE sale_id = ?',
     args: [req.params.id],
   });
-  res.json({ ...sale, items: itemsResult.rows });
+  const detail = { ...sale, items: itemsResult.rows };
+  res.json(req.role === 'cajero' ? cashierSale(detail) : detail);
 }));
 
 router.post('/', asyncHandler(async (req, res) => {

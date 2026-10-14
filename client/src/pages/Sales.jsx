@@ -1,3 +1,4 @@
+import { useAuth } from '../context/AuthContext'
 import { businessDate } from '../lib/offlineModel.js'
 import { monthCsv } from '../lib/offlineExport.js'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
@@ -18,12 +19,59 @@ import SaleCorrection, { VoidedSales } from '../components/SaleCorrection'
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Sales() {
+  const { user } = useAuth()
+  if (user?.role === 'cajero') return <CashierHistory />
   // La caja de escritorio (Electron) todavía no tiene /api/reports/* — vive
   // local en desktop/src/router.js y esa ruta no está ahí. En vez de romper
   // el Historial en la app de escritorio, se deja tal cual funcionaba antes:
   // la lista simple de ventas recientes, sin navegación por mes ni Excel.
   if (isElectron()) return <ElectronHistorial />
   return <HistorialPorMes />
+}
+
+function CashierHistory() {
+  const [sales, setSales] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [expandedId, setExpandedId] = useState(null)
+  const [details, setDetails] = useState({})
+  const [date, setDate] = useState(businessDate())
+  const load = async () => {
+    setError('')
+    setExpandedId(null)
+    setDetails({})
+    setDate(businessDate())
+    try {
+      const res = await apiFetch('/api/sales')
+      if (!res.ok) throw new Error('No se pudo cargar el historial de hoy.')
+      setSales(await res.json())
+    } catch (err) { setError(err.message) }
+    finally { setLoading(false) }
+  }
+  useEffect(() => {
+    load()
+    const refresh = () => { load() }
+    window.addEventListener('focus', refresh)
+    const unsubscribe = isElectron() ? window.electronAPI.onSyncStatus((status) => { if (status.historyRefreshed) refresh() }) : null
+    return () => { window.removeEventListener('focus', refresh); unsubscribe?.() }
+  }, [])
+  useLocalRefresh(load)
+  const toggle = async (id) => {
+    if (expandedId === id) { setExpandedId(null); return }
+    setExpandedId(id)
+    if (details[id]) return
+    try {
+      const res = await apiFetch(`/api/sales/${id}`)
+      if (!res.ok) throw new Error('No se pudo cargar el detalle de la venta.')
+      const detail = await res.json()
+      setDetails((prev) => ({ ...prev, [id]: detail }))
+    } catch (err) { setError(err.message); setExpandedId(null) }
+  }
+  return <>
+    <DayDetail date={date} sales={sales} loading={loading} error={error}
+      expandedId={expandedId} details={details} onToggle={toggle} readOnly />
+    <div className="text-center pb-6"><button onClick={load} className="text-sm font-semibold text-[#007AFF]">Actualizar historial</button></div>
+  </>
 }
 
 // ---------------------------------------------------------------------------
@@ -407,17 +455,18 @@ function CloseBadge({ status }) {
 
 // Detalle de un día: mismas filas de venta expandibles que tenía Historial,
 // solo que ahora acotadas a un día (antes eran las últimas 200 ventas).
-function DayDetail({ date, sales, loading, error, expandedId, details, onToggle, onBack, onCorrected, correctedAt }) {
+function DayDetail({ date, sales, loading, error, expandedId, details, onToggle, onBack, onCorrected, correctedAt, readOnly = false }) {
   const total = sales.reduce((s, sale) => s + sale.total, 0)
 
   return (
     <div className="p-5 md:p-8 max-w-2xl mx-auto">
-      <button
+      {readOnly && <p className="text-sm text-gray-500 mb-4">Historial de hoy · Solo lectura</p>}
+      {!readOnly && <button
         onClick={onBack}
         className="flex items-center gap-1.5 text-sm font-semibold text-[#007AFF] mb-4 hover:opacity-70 transition-opacity"
       >
         <ArrowLeft size={16} /> Historial
-      </button>
+      </button>}
 
       <div className="flex items-center justify-between mb-6 gap-2">
         <h2 className="text-2xl font-bold text-gray-900 capitalize truncate">{dayLabel(date)}</h2>
@@ -451,7 +500,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                 }`}
               >
                 <div>
-                  <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.id}`}</p>
+                  <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.server_id ?? sale.id}`}</p>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {formatTime(sale.created_at)}
                     {accountLabel(sale.account_email) && (
@@ -486,11 +535,11 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                           </div>
                         ))}
                       </div>
-                      <div className="flex justify-between pt-2 border-t border-gray-200">
+                      {!readOnly && <div className="flex justify-between pt-2 border-t border-gray-200">
                         <span className="text-xs text-gray-400 font-medium">Ganancia estimada</span>
                         <span className="text-xs font-bold text-green-600">{fmt(sale.profit)}</span>
-                      </div>
-                      <SaleCorrection sale={sale} items={details[sale.id].items} onChanged={onCorrected} />
+                      </div>}
+                      {!readOnly && <SaleCorrection sale={sale} items={details[sale.id].items} onChanged={onCorrected} />}
                     </>
                   ) : (
                     <div className="flex justify-center py-2">
@@ -503,7 +552,7 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
           ))}
         </div>
       )}
-      <VoidedSales date={date} refreshKey={correctedAt} />
+      {!readOnly && <VoidedSales date={date} refreshKey={correctedAt} />}
     </div>
   )
 }
@@ -615,7 +664,7 @@ function ElectronHistorial() {
                         }`}
                       >
                         <div>
-                          <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.id}`}</p>
+                          <p className="font-semibold text-gray-900 text-sm">{sale.pending ? 'Venta pendiente' : `Venta #${sale.server_id ?? sale.id}`}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
                             {formatTime(sale.created_at)}
                             {accountLabel(sale.account_email) && (
