@@ -23,6 +23,7 @@ const publicUser = (account, shop = account) => ({
   transfer_limit: shop.transfer_limit ?? null,
   usd_rate: shop.usd_rate ?? null,
   eur_rate: shop.eur_rate ?? null,
+  warehouse_enabled: Number(shop.warehouse_enabled ?? 1) !== 0,
 });
 
 // userId es la TIENDA (para un dueño, él mismo); accountId es quien inicia

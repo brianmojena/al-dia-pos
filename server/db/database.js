@@ -359,6 +359,9 @@ async function initDb() {
     // Un producto por peso puede NO llevar control de stock (0): se vende siempre
     // y el stock se ignora. Los productos por pieza siempre lo llevan (1).
     'ALTER TABLE products ADD COLUMN track_stock INTEGER NOT NULL DEFAULT 1',
+    // El almacén se puede apagar para una tienda concreta que no lo usa (1 =
+    // visible, que es lo que tienen todas). Se cambia a mano en la base.
+    'ALTER TABLE users ADD COLUMN warehouse_enabled INTEGER NOT NULL DEFAULT 1',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

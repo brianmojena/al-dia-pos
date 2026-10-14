@@ -14,20 +14,24 @@ function getSession() {
 
 function setSession({
   user_id, email, store_name, plan, token,
-  transfer_limit = null, usd_rate = null, eur_rate = null, role = null,
+  transfer_limit = null, usd_rate = null, eur_rate = null, role = null, warehouse_enabled = null,
 }) {
   const db = getLocalDb();
   db.prepare(`
-    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, updated_at)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, warehouse_enabled, updated_at)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id, email = excluded.email, store_name = excluded.store_name,
       plan = excluded.plan, token = excluded.token,
       transfer_limit = excluded.transfer_limit, usd_rate = excluded.usd_rate,
       eur_rate = excluded.eur_rate, role = excluded.role,
+      warehouse_enabled = excluded.warehouse_enabled,
       updated_at = datetime('now')
-  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role);
+  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, toFlag(warehouse_enabled));
 }
+
+// true/false del servidor → 1/0; sin dato → NULL (se muestra el almacén).
+const toFlag = (value) => (value == null ? null : value ? 1 : 0);
 
 /**
  * Actualiza SOLO transfer_limit y las tasas de la sesión ya guardada, sin tocar
@@ -35,11 +39,11 @@ function setSession({
  * cambió desde su teléfono, sin tener que volver a loguearse. No crea sesión
  * si no hay una activa: no tendría a quién actualizar.
  */
-function updateSessionSettings({ transfer_limit = null, usd_rate = null, eur_rate = null }) {
+function updateSessionSettings({ transfer_limit = null, usd_rate = null, eur_rate = null, warehouse_enabled = null }) {
   const db = getLocalDb();
   db.prepare(`
-    UPDATE session SET transfer_limit = ?, usd_rate = ?, eur_rate = ?, updated_at = datetime('now') WHERE id = 1
-  `).run(transfer_limit, usd_rate, eur_rate);
+    UPDATE session SET transfer_limit = ?, usd_rate = ?, eur_rate = ?, warehouse_enabled = ?, updated_at = datetime('now') WHERE id = 1
+  `).run(transfer_limit, usd_rate, eur_rate, toFlag(warehouse_enabled));
 }
 
 function clearSession() {

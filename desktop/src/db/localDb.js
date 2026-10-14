@@ -214,6 +214,9 @@ function initLocalDb(dbPath) {
     // Cobro en divisa: billetes, moneda y la tasa con que se tomaron, más la
     // tasa de la tienda que conocía la caja — ver src/lib/payment.js.
     'ALTER TABLE session ADD COLUMN eur_rate REAL',
+    // Almacén apagado para esta tienda (lo decide el servidor). NULL = sesión
+    // anterior a la columna: se muestra, como en todas las tiendas.
+    'ALTER TABLE session ADD COLUMN warehouse_enabled INTEGER',
     'ALTER TABLE sales ADD COLUMN foreign_currency TEXT',
     'ALTER TABLE sales ADD COLUMN foreign_amount REAL',
     'ALTER TABLE sales ADD COLUMN exchange_rate REAL',

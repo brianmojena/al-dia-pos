@@ -426,6 +426,7 @@ async function syncOnce() {
         transfer_limit: me.data.user.transfer_limit,
         usd_rate: me.data.user.usd_rate,
         eur_rate: me.data.user.eur_rate ?? null,
+        warehouse_enabled: me.data.user.warehouse_enabled,
       });
       summary.settingsRefreshed = true;
     }

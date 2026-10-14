@@ -19,7 +19,7 @@ const navItems = [
   // Productos lo ve también el empleado: puede dar de alta mercancía nueva.
   // Editar y borrar sigue siendo del dueño (lo decide el servidor y la caja).
   { to: '/products',  icon: Package,         label: 'Productos'                    },
-  { to: '/almacen',   icon: Warehouse,       label: 'Almacén'                      },
+  { to: '/almacen',   icon: Warehouse,       label: 'Almacén',   warehouse: true   },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
 ]
 
@@ -27,7 +27,9 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const isOwner = user?.role !== 'cajero'
-  const visibleNav = navItems.filter(item => isOwner || !item.ownerOnly)
+  // Una tienda puede tener el almacén apagado (users.warehouse_enabled en el servidor).
+  const visibleNav = navItems.filter(item =>
+    (isOwner || !item.ownerOnly) && !(item.warehouse && user?.warehouse_enabled === false))
 
   // Cerrar sesión con ventas sin subir no las borra, pero las deja esperando
   // hasta que ESTA cuenta vuelva a entrar en este teléfono — y mientras, el

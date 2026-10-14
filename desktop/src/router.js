@@ -37,6 +37,7 @@ async function routeRequest(method, fullPath, body) {
             store_name: res.data.user.store_name, plan: res.data.user.plan, token: res.data.token,
             transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
             eur_rate: res.data.user.eur_rate ?? null, role: res.data.user.role,
+            warehouse_enabled: res.data.user.warehouse_enabled,
           });
           await auth.pullCatalog(res.data.token).catch(() => {});
         }
@@ -54,6 +55,7 @@ async function routeRequest(method, fullPath, body) {
             // Sin rol guardado son sesiones anteriores a que existieran los
             // cajeros: eran dueños, así que se interpretan como tales.
             role: session.role || 'dueño',
+            warehouse_enabled: session.warehouse_enabled !== 0,
           },
         });
       }

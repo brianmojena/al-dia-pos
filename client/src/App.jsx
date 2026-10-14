@@ -2,6 +2,7 @@ import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router
 import Layout from './components/Layout'
 import RequireAuth from './components/RequireAuth'
 import RequireOwner from './components/RequireOwner'
+import RequireWarehouse from './components/RequireWarehouse'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
@@ -42,8 +43,10 @@ export default function App() {
             {/* Todas las cuentas usan el almacén (alta, edición, importación,
                 borrado y transferencia); el servidor registra quién lo hizo
                 y solo la principal ve ese historial. */}
-            <Route path="almacen" element={<Almacen />} />
-            <Route path="almacen/importar" element={<ImportarProductos target="almacen" />} />
+            <Route element={<RequireWarehouse />}>
+              <Route path="almacen" element={<Almacen />} />
+              <Route path="almacen/importar" element={<ImportarProductos target="almacen" />} />
+            </Route>
 
             {/* Un cajero solo cobra y cierra la caja: el resto ni lo ve. */}
             <Route element={<RequireOwner />}>
