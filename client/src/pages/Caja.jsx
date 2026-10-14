@@ -113,6 +113,7 @@ export default function Caja() {
 
       {result ? (
         <div>
+          {result.offline_notice && <p className="text-xs text-amber-700 bg-amber-50 rounded-xl px-3 py-2 mb-3">{result.offline_notice}</p>}
           {result.pending && <p className="text-xs text-amber-700 mb-3">Cierre guardado en este dispositivo. El resultado se confirmará al sincronizar con la nube.</p>}
           <ResultCard result={result} onNew={startNew} />
         </div>

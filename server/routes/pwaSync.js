@@ -4,7 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { resolveRegisterId } = require('../lib/register');
-const { parseUnit, validQuantity } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 // Una fotografía bajo la misma transacción: no mezclar stock anterior a una
@@ -44,11 +44,12 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
 async function addStock(tx, req, account, productId, quantity) {
   const target = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? AND id = ?', args: [req.userId, productId] })).rows[0];
   if (!target) return { status: 404, error: 'Producto no encontrado' };
-  if (!validQuantity(quantity, target.unit || null)) {
+  if (target.unit && Number(target.track_stock) !== 1) return { status: 400, error: 'Este producto no lleva control de stock' };
+  if (!validQuantity(quantity, target.unit || null, target.unit ? 0.001 : 1)) {
     return { status: 400, error: target.unit ? 'La cantidad a añadir admite hasta 3 decimales' : 'La cantidad a añadir debe ser un número entero' };
   }
   const before = Number(target.stock);
-  const after = Math.round((before + quantity) * 1000) / 1000;
+  const after = roundQty(before + quantity);
   await tx.execute({ sql: 'UPDATE products SET stock = ROUND(stock + ?, 3) WHERE user_id = ? AND id = ?', args: [quantity, req.userId, productId] });
   await tx.execute({
     sql: 'INSERT INTO stock_entries (user_id, product_id, product_name, quantity, stock_before, stock_after, account_id, account_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -67,7 +68,8 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
     return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta y añadir stock' });
   }
   // Mercancía recibida: llega como CANTIDAD a sumar, no como stock final, para
-  // que las ventas hechas en otras cajas mientras tanto no se pisen.
+  // que las ventas hechas en otras cajas mientras tanto no se pisen (igual que
+  // PUT /api/products/:id).
   const hasAdd = product.add_stock !== undefined && product.add_stock !== null && product.add_stock !== '';
   const addQty = hasAdd ? Number(product.add_stock) : 0;
   if (hasAdd && (method !== 'PUT' || !Number.isFinite(addQty) || addQty <= 0)) {
@@ -109,17 +111,19 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
       const current = hasAdd ? (await tx.execute({ sql: 'SELECT stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
       const sale = Number(product.sale_price), purchase = Number(product.purchase_price ?? 0), stock = hasAdd ? Number(current?.stock ?? 0) : Number(product.stock ?? 0);
       const unit = parseUnit(product.unit) ?? null;
-      if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || unit === false || !validQuantity(stock, unit)) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
+      const prior = method === 'PUT' ? (await tx.execute({ sql: 'SELECT track_stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
+      const trackStock = trackStockFor(unit, product.track_stock, method === 'PUT' ? Number(prior?.track_stock ?? 1) : 0);
+      if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || unit === false || !validQuantity(trackStock ? stock : 0, unit)) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
       let id = product_id;
       if (method === 'POST') {
         const existing = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ?', args: [req.userId] })).rows.find((p) => normalize(p.name) === normalize(name));
         if (existing) result = { ...existing, merged: true };
         else {
-          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, stock, unit, account.id, account.email] });
+          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, track_stock, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, trackStock ? stock : 0, unit, trackStock, account.id, account.email] });
           id = Number(insert.lastInsertRowid);
         }
       } else {
-        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, stock, unit, req.userId, id] });
+        const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, trackStock ? stock : 0, unit, trackStock, req.userId, id] });
         if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
         if (hasAdd) {
           const failure = await addStock(tx, req, account, id, addQty);

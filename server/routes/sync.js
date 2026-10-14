@@ -41,7 +41,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const sales = await db.execute({
     sql: `SELECT id, user_id, client_sale_id, total, profit, payment_method, transfer_amount,
             foreign_currency, foreign_amount, exchange_rate, shop_rate,
-            created_at, register_id, account_id, account_email
+            created_at, register_id, account_id, account_email, cash_close_id
           FROM sales WHERE user_id = ? AND id > ?
             ${since ? 'AND created_at >= ?' : ''}
           ORDER BY id ASC LIMIT ?`,
@@ -67,6 +67,30 @@ router.get('/delta', asyncHandler(async (req, res) => {
     args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
   });
 
+  // Qué ventas y compras cubrió cada cierre: así la caja de escritorio sabe
+  // cuáles de las que ya bajó dejaron de estar abiertas.
+  const closeIds = closes.rows.map((row) => Number(row.id));
+  const covered = { sales: new Map(), purchases: new Map() };
+  if (closeIds.length > 0) {
+    const marks = closeIds.map(() => '?').join(',');
+    for (const [table, map] of [['sales', covered.sales], ['currency_purchases', covered.purchases]]) {
+      const rows = (await db.execute({
+        sql: `SELECT id, cash_close_id FROM ${table} WHERE user_id = ? AND cash_close_id IN (${marks})`,
+        args: [req.userId, ...closeIds],
+      })).rows;
+      for (const r of rows) {
+        const key = Number(r.cash_close_id);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(Number(r.id));
+      }
+    }
+  }
+  const closeRows = closes.rows.map((row) => ({
+    ...row,
+    covered_sale_ids: covered.sales.get(Number(row.id)) || [],
+    covered_purchase_ids: covered.purchases.get(Number(row.id)) || [],
+  }));
+
   const saleItems = await loadItems(db, 'sale_items', 'sale_id', sales.rows.map((row) => row.id));
   const countItems = await loadItems(db, 'inventory_count_items', 'count_id', counts.rows.map((row) => row.id));
   const saleRows = attachItems(sales.rows, saleItems, 'id', 'sale_id');
@@ -75,7 +99,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
 
   res.json({
     sales: saleRows,
-    cash_closes: closes.rows,
+    cash_closes: closeRows,
     inventory_counts: countRows,
     currency_purchases: purchases.rows,
     cursors: {

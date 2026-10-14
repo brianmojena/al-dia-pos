@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, LogOut, CloudOff } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import OfflineStatus from './OfflineStatus'
@@ -19,6 +19,7 @@ const navItems = [
   // Productos lo ve también el empleado: puede dar de alta mercancía nueva.
   // Editar y borrar sigue siendo del dueño (lo decide el servidor y la caja).
   { to: '/products',  icon: Package,         label: 'Productos'                    },
+  { to: '/almacen',   icon: Warehouse,       label: 'Almacén'                      },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial', ownerOnly: true   },
 ]
 

@@ -10,6 +10,7 @@ import POS from './pages/POS'
 import Sales from './pages/Sales'
 import Caja from './pages/Caja'
 import Divisas from './pages/Divisas'
+import Almacen from './pages/Almacen'
 import Cajeros from './pages/Cajeros'
 import Inventario from './pages/Inventario'
 import ImportarProductos from './pages/ImportarProductos'
@@ -38,6 +39,11 @@ export default function App() {
             {/* El empleado entra para dar de alta productos nuevos; la
                 pantalla le oculta editar, borrar, importar y contar. */}
             <Route path="products" element={<Products />} />
+            {/* Todas las cuentas usan el almacén (alta, edición, importación,
+                borrado y transferencia); el servidor registra quién lo hizo
+                y solo la principal ve ese historial. */}
+            <Route path="almacen" element={<Almacen />} />
+            <Route path="almacen/importar" element={<ImportarProductos target="almacen" />} />
 
             {/* Un cajero solo cobra y cierra la caja: el resto ni lo ve. */}
             <Route element={<RequireOwner />}>

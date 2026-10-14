@@ -18,6 +18,7 @@ app.use(express.json());
 app.use('/api/auth', authRouter);
 
 app.use('/api/products',  requireAuth, productsRouter);
+app.use('/api/warehouse', requireAuth, require('./routes/warehouse'));
 app.use('/api/sales',     requireAuth, salesRouter);
 // El dashboard dice cuánto se vendió hoy — justo lo que un cajero no puede
 // saber antes de declarar el efectivo contado.

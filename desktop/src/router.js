@@ -11,6 +11,8 @@ const SALE_ERROR_STATUS = {
   EMPTY_SALE: 400, BAD_QUANTITY: 400, BAD_PRICE: 400, NO_PRODUCT: 400, NO_STOCK: 409, BAD_PAYMENT: 400,
 };
 
+const queryString = (fullPath) => (fullPath.includes('?') ? `?${fullPath.split('?')[1]}` : '');
+
 async function routeRequest(method, fullPath, body) {
   const [pathname, queryString] = fullPath.split('?');
   const query = Object.fromEntries(new URLSearchParams(queryString || ''));
@@ -103,9 +105,25 @@ async function routeRequest(method, fullPath, body) {
           return fail(err.code === 'DUPLICATE_NAME' ? 409 : 400, err.message);
         }
       }
+      if (parts.length === 3 && parts[2] === 'stock-entries' && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listStockEntries());
+      }
+      if (parts.length === 3 && parts[2] === 'import' && method === 'POST') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede importar');
+        const items = body && body.items;
+        if (!Array.isArray(items) || items.length === 0 || items.length > 2000) {
+          return fail(400, 'La importación debe contener entre 1 y 2000 productos');
+        }
+        try {
+          return ok(200, queries.importProducts(items, body.stock_mode));
+        } catch (err) {
+          return fail(400, err.message);
+        }
+      }
       if (parts.length === 3 && session.role === 'cajero'
-          && (method === 'DELETE' || (method === 'PUT' && Object.keys(body).some((key) => key !== 'sale_price')))) {
-        return fail(403, 'El cajero solo puede cambiar el precio de venta');
+          && (method === 'DELETE' || (method === 'PUT' && Object.keys(body).some((key) => key !== 'sale_price' && key !== 'add_stock')))) {
+        return fail(403, 'El cajero solo puede cambiar el precio de venta y añadir stock');
       }
       if (parts.length === 3 && method === 'PUT') {
         try {
@@ -119,6 +137,36 @@ async function routeRequest(method, fullPath, body) {
         const deleted = queries.deleteProduct(Number(parts[2]));
         return deleted ? ok(200, { success: true }) : fail(404, 'Producto no encontrado');
       }
+    }
+
+    // --- almacén ---
+    // Leer y transferir funcionan sin red (la caja trabaja con su espejo). Dar
+    // de alta, editar o borrar artículos lo puede hacer cualquier cuenta (el servidor lo registra) y se
+    // hace en el servidor, que es donde vive el almacén: hace falta internet.
+    if (parts[0] === 'api' && parts[1] === 'warehouse') {
+      if (parts.length === 2 && method === 'GET') return ok(200, queries.listWarehouse());
+      if (parts.length === 3 && parts[2] === 'transfer' && method === 'POST') {
+        try {
+          const done = queries.transferWarehouseLocal(body || {});
+          require('./sync/syncWorker').syncOnce().catch(() => {});
+          return ok(201, done);
+        } catch (err) {
+          return fail(err.code === 'NEEDS_SALE_PRICE' ? 400 : 409, err.message);
+        }
+      }
+      const { apiRequest } = require('./sync/apiClient');
+      let res;
+      try {
+        res = await apiRequest(method, `/${parts.join('/')}${queryString(fullPath)}`, { token: session.token, body: method === 'GET' || method === 'DELETE' ? undefined : body });
+      } catch (_) {
+        return fail(503, 'Para esto hace falta internet');
+      }
+      if (res.status === 401) return fail(403, 'Tu sesión con la nube venció. Vuelve a iniciar sesión.');
+      if (res.ok && method !== 'GET') {
+        const wh = await apiRequest('GET', '/api/warehouse', { token: session.token }).catch(() => null);
+        if (wh && wh.ok) queries.applyServerWarehouse(wh.data);
+      }
+      return { ok: res.ok, status: res.status, data: res.data };
     }
 
     // --- sales ---
@@ -160,7 +208,26 @@ async function routeRequest(method, fullPath, body) {
     // --- dashboard ---
     if (parts[0] === 'api' && parts[1] === 'dashboard' && parts.length === 2 && method === 'GET') {
       if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
-      return ok(200, queries.getDashboard());
+      const dash = queries.getDashboard();
+      // Efectivo, transferencia y divisas son de la tienda entera (teléfonos
+      // incluidos): con internet los da el servidor, más lo de esta caja que
+      // aún no subió. Sin internet quedan los de esta caja.
+      try {
+        const { apiRequest } = require('./sync/apiClient');
+        const remote = await Promise.race([
+          apiRequest('GET', '/api/dashboard', { token: session.token }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
+        ]);
+        if (remote.ok && remote.data && remote.data.holdings) {
+          const pending = queries.pendingHoldings();
+          const holdings = {};
+          for (const key of Object.keys(dash.holdings)) {
+            holdings[key] = Math.round((Number(remote.data.holdings[key] || 0) + pending[key]) * 100) / 100;
+          }
+          dash.holdings = holdings;
+        }
+      } catch (_) { /* sin red: se muestra lo local */ }
+      return ok(200, dash);
     }
 
     // --- cierre de caja ---
@@ -182,6 +249,39 @@ async function routeRequest(method, fullPath, body) {
       }
       if (parts.length === 2 && method === 'POST') {
         try {
+          // La cuenta principal cierra la tienda entera, teléfonos incluidos:
+          // el servidor es quien tiene esas ventas, así que hace falta red.
+          // Se sube todo lo pendiente antes y el cierre después, para que el
+          // resultado que ve el dueño sea la cuenta del servidor.
+          if (session.role !== 'cajero') {
+            const { apiRequest } = require('./sync/apiClient');
+            const { syncOnce } = require('./sync/syncWorker');
+            let online = true;
+            try {
+              await Promise.race([
+                apiRequest('GET', '/api/auth/me', { token: session.token }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
+              ]);
+            } catch (_) { online = false; }
+            if (online) {
+              await syncOnce();
+              const close = queries.createCashCloseLocal(body);
+              await syncOnce();
+              return ok(201, queries.getCashClose(close.id));
+            }
+            // Sin internet: se cierra con lo que ya bajó. Al sincronizar, el
+            // servidor suma lo que falte (p. ej. ventas de un teléfono que no
+            // habían llegado) y corrige las cifras.
+            const close = queries.createCashCloseLocal(body);
+            const asOf = queries.getSyncState('last_delta_at');
+            const ago = asOf ? Math.max(0, Math.round((Date.now() - Date.parse(asOf)) / 60000)) : null;
+            return ok(201, {
+              ...queries.getCashClose(close.id),
+              offline_notice: ago == null
+                ? 'Cerrado sin internet y sin haber bajado nunca las ventas de otros aparatos. El servidor puede ajustar la diferencia al sincronizar.'
+                : `Cerrado con los datos de hace ${ago} min; el servidor puede ajustar la diferencia al sincronizar.`,
+            });
+          }
           return ok(201, queries.createCashCloseLocal(body));
         } catch (err) {
           return fail(400, err.message);

@@ -149,16 +149,29 @@ function normalizeQuantity(value, unit, { allowZero }) {
   return unit ? round3(n) : (Number.isInteger(n) ? n : NaN);
 }
 
-function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit }) {
+/**
+ * Solo un producto con unit puede dejar de llevar stock; sin unit siempre se
+ * controla. Sin valor se usa `fallback` (alta: 0 = sin control; edición: el
+ * que ya tenía).
+ */
+const normalizeTrackStock = (value, unit, fallback) => {
+  if (!unit) return 1;
+  if (value === undefined || value === null || value === '') return fallback;
+  return (value === false || value === 0 || value === '0' || value === 'false') ? 0 : 1;
+};
+
+function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit, track_stock }) {
   const db = getLocalDb();
   const cleanUnit = normalizeUnit(unit);
+  const cleanTrack = normalizeTrackStock(track_stock, cleanUnit, 0);
   const cleanStock = normalizeQuantity(stock, cleanUnit, { allowZero: true });
   if (Number.isNaN(cleanStock)) {
     throw new Error(cleanUnit
       ? 'El stock debe ser un número mayor o igual a 0'
       : 'El stock debe ser un número entero mayor o igual a 0');
   }
-  stock = cleanStock;
+  // Sin control de stock, el stock que llegue no vale: se guarda en 0.
+  stock = cleanUnit && cleanTrack === 0 ? 0 : cleanStock;
   const clientOpId = crypto.randomUUID();
   const cleanName = String(name ?? '').trim().replace(/\s+/g, ' ');
 
@@ -176,15 +189,15 @@ function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit }
 
   const insert = db.transaction(() => {
     const result = db.prepare(`
-      INSERT INTO products (name, purchase_price, sale_price, stock, unit) VALUES (?, ?, ?, ?, ?)
-    `).run(cleanName, purchase_price, sale_price, stock, cleanUnit);
+      INSERT INTO products (name, purchase_price, sale_price, stock, unit, track_stock) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(cleanName, purchase_price, sale_price, stock, cleanUnit, cleanTrack);
     const localId = result.lastInsertRowid;
 
     enqueueOutbox(db, {
       op_type: 'product.create',
       client_op_id: clientOpId,
       local_ref_id: localId,
-      payload: { local_product_id: localId, name: cleanName, purchase_price, sale_price, stock, unit: cleanUnit },
+      payload: { local_product_id: localId, name: cleanName, purchase_price, sale_price, stock, unit: cleanUnit, track_stock: cleanTrack },
     });
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(localId);
@@ -193,7 +206,7 @@ function createProduct({ name, purchase_price = 0, sale_price, stock = 0, unit }
   return insert();
 }
 
-function updateProduct(id, { name, purchase_price, sale_price, stock, unit }) {
+function updateProduct(id, { name, purchase_price, sale_price, stock, unit, track_stock, add_stock }) {
   if (sale_price !== undefined && (sale_price === null || sale_price === '' || !Number.isFinite(Number(sale_price)) || Number(sale_price) < 0)) {
     throw new Error('El precio de venta no es válido');
   }
@@ -201,6 +214,21 @@ function updateProduct(id, { name, purchase_price, sale_price, stock, unit }) {
   const existing = db.prepare('SELECT * FROM products WHERE id = ? AND deleted = 0').get(id);
   if (!existing) return null;
   const nextUnit = unit === undefined ? existing.unit : normalizeUnit(unit);
+  const nextTrack = normalizeTrackStock(track_stock, nextUnit, existing.track_stock ?? 1);
+  // Mercancía recibida: se suma al stock actual y viaja como cantidad (no como
+  // total) para que no pise ventas de otra caja. Queda en el registro de entradas.
+  const hasAdd = add_stock !== undefined && add_stock !== null && add_stock !== '';
+  let addedQty = 0;
+  if (hasAdd) {
+    if (existing.unit && Number(existing.track_stock ?? 1) !== 1) throw new Error('Este producto no lleva control de stock');
+    addedQty = normalizeQuantity(add_stock, nextUnit, { allowZero: false });
+    if (Number.isNaN(addedQty)) {
+      throw new Error(nextUnit
+        ? 'La cantidad a añadir debe ser un número mayor que 0 (hasta 3 decimales)'
+        : 'La cantidad a añadir debe ser un número entero mayor que 0');
+    }
+    stock = round3(Number(existing.stock) + addedQty);
+  }
   // Se valida el stock que va a quedar (el nuevo o el que ya había) contra la
   // unidad que va a quedar: pasar un producto con decimales a "por unidad"
   // sin corregir el stock lo dejaría con medio producto.
@@ -217,6 +245,7 @@ function updateProduct(id, { name, purchase_price, sale_price, stock, unit }) {
     sale_price: sale_price ?? existing.sale_price,
     stock: nextStock,
     unit: nextUnit,
+    track_stock: nextTrack,
   };
 
   // Solo viaja al servidor lo que de verdad cambió. El formulario manda todos
@@ -226,27 +255,157 @@ function updateProduct(id, { name, purchase_price, sale_price, stock, unit }) {
   const changed = {};
   if (String(next.name) !== String(existing.name)) changed.name = next.name;
   if (next.unit !== (existing.unit ?? null)) changed.unit = next.unit;
+  if (next.track_stock !== (existing.track_stock ?? 1)) changed.track_stock = next.track_stock;
   for (const key of ['purchase_price', 'sale_price', 'stock']) {
     if (Number(next[key]) !== Number(existing[key])) changed[key] = next[key];
   }
-  if (Object.keys(changed).length === 0) return existing;
+  if (addedQty > 0) delete changed.stock;
+  if (Object.keys(changed).length === 0 && addedQty === 0) return existing;
 
   const update = db.transaction(() => {
     db.prepare(`
-      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ? WHERE id = ?
-    `).run(next.name, next.purchase_price, next.sale_price, next.stock, next.unit, id);
+      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ? WHERE id = ?
+    `).run(next.name, next.purchase_price, next.sale_price, next.stock, next.unit, next.track_stock, id);
 
     enqueueOutbox(db, {
       op_type: 'product.update',
       client_op_id: crypto.randomUUID(),
       local_ref_id: id,
-      payload: { local_product_id: id, ...changed },
+      payload: { local_product_id: id, ...changed, ...(addedQty > 0 && { add_stock: addedQty }) },
     });
+
+    if (addedQty > 0) {
+      db.prepare(`
+        INSERT INTO stock_entries (product_id, product_name, quantity, stock_before, stock_after, account_email)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(id, next.name, addedQty, Number(existing.stock), next.stock, getSession()?.email ?? null);
+    }
 
     return db.prepare('SELECT * FROM products WHERE id = ?').get(id);
   });
 
   return update();
+}
+
+/**
+ * Importación masiva del dueño. Con stock_mode 'sumar' el stock del archivo se
+ * suma al actual; si no, lo reemplaza. Reusa create/updateProduct, así que cada
+ * fila queda encolada en el outbox como cualquier edición.
+ */
+function importProducts(items, stockMode) {
+  const db = getLocalDb();
+  const result = { created: 0, updated: 0, total: items.length };
+  db.transaction(() => {
+    for (const item of items) {
+      const existing = findProductByName(db, item.name);
+      if (!existing) { createProduct(item); result.created++; continue; }
+      const patch = { sale_price: item.sale_price, purchase_price: item.purchase_price, unit: item.unit };
+      if (item.stock !== undefined && item.stock !== null && item.stock !== '') {
+        if (stockMode === 'sumar') {
+          if (Number(item.stock) > 0) patch.add_stock = item.stock;
+        } else patch.stock = item.stock;
+      }
+      for (const k of Object.keys(patch)) if (patch[k] === undefined || patch[k] === null) delete patch[k];
+      updateProduct(existing.id, patch);
+      result.updated++;
+    }
+  })();
+  return result;
+}
+
+// Entradas de mercancía hechas en esta caja (el servidor guarda las de todas).
+function listStockEntries() {
+  return getLocalDb().prepare('SELECT * FROM stock_entries ORDER BY created_at DESC, id DESC LIMIT 200').all();
+}
+
+// ---------------------------------------------------------------------------
+// Almacén
+// ---------------------------------------------------------------------------
+
+const listWarehouse = () => getLocalDb().prepare('SELECT * FROM warehouse_items ORDER BY name ASC').all();
+
+// Cantidad que ya se transfirió desde aquí y todavía no subió, por artículo.
+const pendingTransferred = (db) => {
+  const out = new Map();
+  for (const row of db.prepare(`SELECT payload FROM outbox WHERE op_type = 'warehouse.transfer' AND status IN ('pending', 'syncing')`).all()) {
+    try {
+      const p = JSON.parse(row.payload);
+      out.set(Number(p.warehouse_item_id), round3((out.get(Number(p.warehouse_item_id)) || 0) + Number(p.quantity)));
+    } catch (_) { /* fila ilegible: se ignora */ }
+  }
+  return out;
+};
+
+/**
+ * Reemplaza el espejo con lo que dice el servidor, descontando lo transferido
+ * aquí que aún no subió (si no, el almacén "recuperaría" esa mercancía hasta
+ * que la transferencia llegue). Una lista vacía sí vacía el almacén.
+ */
+function applyServerWarehouse(items) {
+  if (!Array.isArray(items)) return;
+  const db = getLocalDb();
+  const pending = pendingTransferred(db);
+  db.transaction(() => {
+    const keep = new Set();
+    const upsert = db.prepare(`
+      INSERT INTO warehouse_items (id, name, unit, cost, quantity) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name = excluded.name, unit = excluded.unit, cost = excluded.cost, quantity = excluded.quantity
+    `);
+    for (const it of items) {
+      keep.add(Number(it.id));
+      upsert.run(Number(it.id), it.name, it.unit ?? null, Number(it.cost) || 0, Math.max(0, round3(Number(it.quantity) - (pending.get(Number(it.id)) || 0))));
+    }
+    for (const row of db.prepare('SELECT id FROM warehouse_items').all()) {
+      if (!keep.has(row.id)) db.prepare('DELETE FROM warehouse_items WHERE id = ?').run(row.id);
+    }
+  })();
+}
+
+/**
+ * Transferencia almacén -> tienda, sin red. Baja el almacén local y sube el
+ * stock del producto (lo crea si no existe, con el precio de venta indicado).
+ * El servidor repite la misma cuenta al sincronizar; el alta del producto va
+ * antes en el outbox y la transferencia viaja como cantidad.
+ */
+function transferWarehouseLocal({ warehouse_item_id, quantity, sale_price } = {}) {
+  const db = getLocalDb();
+  const item = db.prepare('SELECT * FROM warehouse_items WHERE id = ?').get(Number(warehouse_item_id));
+  if (!item) throw new Error('Artículo no encontrado en el almacén');
+  const qty = normalizeQuantity(quantity, item.unit, { allowZero: false });
+  if (Number.isNaN(qty)) {
+    throw new Error(item.unit ? 'La cantidad debe ser mayor que 0 (hasta 3 decimales)' : 'La cantidad debe ser un entero mayor que 0');
+  }
+  if (qty > Number(item.quantity)) throw new Error(`En el almacén solo hay ${item.quantity} de ${item.name}`);
+
+  let product = findProductByName(db, item.name);
+  if (product && (product.unit ?? null) !== (item.unit ?? null)) {
+    throw new Error('El producto de la tienda tiene otra unidad de medida que el del almacén');
+  }
+  if (!product && (sale_price === undefined || sale_price === null || sale_price === '' || !Number.isFinite(Number(sale_price)) || Number(sale_price) < 0)) {
+    throw Object.assign(new Error('Este producto aún no está en la tienda: indica su precio de venta'), { code: 'NEEDS_SALE_PRICE' });
+  }
+  const clientTransferId = crypto.randomUUID();
+  const email = getSession()?.email ?? null;
+
+  return db.transaction(() => {
+    let created = 0;
+    if (!product) {
+      // Nace con stock 0: la entrada la pone la transferencia (aquí y en el servidor).
+      product = createProduct({ name: item.name, purchase_price: item.cost, sale_price: Number(sale_price), stock: 0, unit: item.unit, track_stock: true });
+      created = 1;
+    }
+    db.prepare('UPDATE warehouse_items SET quantity = ? WHERE id = ?').run(round3(Number(item.quantity) - qty), item.id);
+    if (!product.unit || Number(product.track_stock ?? 1) === 1) {
+      db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(round3(Number(product.stock) + qty), product.id);
+    }
+    enqueueOutbox(db, {
+      op_type: 'warehouse.transfer',
+      client_op_id: clientTransferId,
+      local_ref_id: item.id,
+      payload: { client_transfer_id: clientTransferId, warehouse_item_id: item.id, local_product_id: product.id, quantity: qty, sale_price: sale_price ?? null, account_email: email },
+    });
+    return { client_transfer_id: clientTransferId, item_name: item.name, quantity: qty, created_product: created, account_email: email, product_id: product.id };
+  })();
 }
 
 function deleteProduct(id) {
@@ -332,15 +491,24 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
         throw Object.assign(new Error('Cantidad inválida'), { code: 'BAD_QUANTITY' });
       }
 
-      // ROUND evita que 12.5 - 2.35 deje 10.149999999999999 en el stock.
-      const updated = db.prepare(
-        'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND stock >= ?'
-      ).run(quantity, item.product_id, quantity);
-      if (updated.changes !== 1) {
-        throw Object.assign(
-          new Error(`Stock insuficiente para ${product.name}`),
-          { code: 'NO_STOCK', product: product.name }
-        );
+      if (product.unit) {
+        // Un producto por peso nunca bloquea la venta por stock: con control
+        // el stock baja hasta 0 (sin quedar negativo); sin control no se toca.
+        // ROUND evita que 12.5 - 2.35 deje 10.149999999999999 en el stock.
+        if (product.track_stock !== 0) {
+          db.prepare('UPDATE products SET stock = MAX(0, ROUND(stock - ?, 3)) WHERE id = ?')
+            .run(quantity, item.product_id);
+        }
+      } else {
+        const updated = db.prepare(
+          'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?'
+        ).run(quantity, item.product_id, quantity);
+        if (updated.changes !== 1) {
+          throw Object.assign(
+            new Error(`Stock insuficiente para ${product.name}`),
+            { code: 'NO_STOCK', product: product.name }
+          );
+        }
       }
 
       // Cada línea se redondea a centavos y el total es la suma de líneas.
@@ -493,6 +661,30 @@ function listCurrencyPurchases({ date } = {}) {
 // Dashboard
 // ---------------------------------------------------------------------------
 
+// Lo cobrado en esta caja que el servidor todavía no conoce: se suma a lo que
+// él informa de toda la tienda para que "Lo que hay ahora" no se atrase.
+function pendingHoldings() {
+  const db = getLocalDb();
+  const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 };
+  const sales = db.prepare(
+    `SELECT total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate
+     FROM sales WHERE origin = 'local' AND cash_close_id IS NULL AND server_id IS NULL`
+  ).all();
+  const purchases = db.prepare(
+    `SELECT foreign_currency, foreign_amount, cup_amount
+     FROM currency_purchases WHERE origin = 'local' AND cash_close_id IS NULL AND server_id IS NULL`
+  ).all();
+  for (const sale of sales) {
+    const split = paymentSplit(sale);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+  for (const purchase of purchases) {
+    const split = purchaseSplit(purchase);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+  return holdings;
+}
+
 function getDashboard() {
   const db = getLocalDb();
   // Antes se comparaba contra la fecha UTC, así que a las 8:00 pm hora de Cuba
@@ -505,7 +697,7 @@ function getDashboard() {
   `).get(start, end);
 
   const lowStock = db.prepare(`
-    SELECT * FROM products WHERE deleted = 0 AND stock <= 5 ORDER BY stock ASC
+    SELECT * FROM products WHERE deleted = 0 AND stock <= 5 AND (unit IS NULL OR track_stock = 1) ORDER BY stock ASC
   `).all();
 
   const recentSales = db.prepare(`
@@ -523,19 +715,19 @@ function getDashboard() {
   // Lo que hay ahora en la tienda: lo cobrado desde el último arqueo, con la
   // misma cuenta del arqueo (paymentSplit).
   const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 };
-  for (const sale of periodSales(db)) {
+  for (const sale of periodSales(db, isWholeShop())) {
     const split = paymentSplit(sale);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
-  for (const purchase of periodPurchases(db)) {
+  for (const purchase of periodPurchases(db, isWholeShop())) {
     const split = purchaseSplit(purchase);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inv = db.prepare(`
-    SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(stock), 0) AS units
-    FROM products WHERE deleted = 0
+    SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(CASE WHEN unit IS NULL THEN stock ELSE 0 END), 0) AS units
+    FROM products WHERE deleted = 0 AND (unit IS NULL OR track_stock = 1)
   `).get();
   const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: round3(inv.units) };
 
@@ -559,18 +751,21 @@ const getPeriodStart = (db) => {
 // created_at > inicio (estricto): una venta registrada justo en el segundo del
 // corte anterior cae en el período siguiente. En el peor caso se cuenta un
 // período más tarde; nunca dos veces.
-const periodSales = (db, periodStart) =>
+// La cuenta principal cuenta la tienda entera: además de lo hecho aquí, lo que
+// bajó de teléfonos y otras cajas y sigue sin cerrar. Un cajero, solo lo suyo.
+const isWholeShop = () => (getSession()?.role ?? null) !== 'cajero';
+const periodSales = (db, wholeShop = false) =>
   db.prepare(
     `SELECT client_sale_id, total, payment_method, transfer_amount,
             foreign_currency, foreign_amount, exchange_rate, created_at
-     FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+     FROM sales WHERE ${wholeShop ? '1 = 1' : "origin = 'local'"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
 // Compras de divisa de esta caja que ningún arqueo ha cubierto todavía.
-const periodPurchases = (db) =>
+const periodPurchases = (db, wholeShop = false) =>
   db.prepare(
     `SELECT id, client_purchase_id, foreign_currency, foreign_amount, cup_amount, created_at
-     FROM currency_purchases WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+     FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : "origin = 'local'"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
 /**
@@ -584,8 +779,8 @@ const periodPurchases = (db) =>
 function getCurrentCashPeriod() {
   const db = getLocalDb();
   const periodStart = getPeriodStart(db);
-  const sales = periodSales(db, periodStart);
-  const purchases = periodPurchases(db);
+  const sales = periodSales(db, isWholeShop());
+  const purchases = periodPurchases(db, isWholeShop());
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
   const firstAt = [sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? null;
 
@@ -635,8 +830,9 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
 
   const create = db.transaction(() => {
     const periodStart = getPeriodStart(db);
-    const sales = periodSales(db, periodStart);
-    const purchases = periodPurchases(db);
+    const wholeShop = isWholeShop();
+    const sales = periodSales(db, wholeShop);
+    const purchases = periodPurchases(db, wholeShop);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
     // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
@@ -704,6 +900,8 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
   return create();
 }
 
+const getCashClose = (id) => getLocalDb().prepare('SELECT * FROM cash_closes WHERE id = ?').get(id);
+
 const listCashCloses = () =>
   getLocalDb().prepare('SELECT * FROM cash_closes ORDER BY closed_at DESC LIMIT 100').all();
 
@@ -759,6 +957,14 @@ function createInventoryCountLocal({ items, note = null }) {
       const product = db.prepare('SELECT * FROM products WHERE id = ? AND deleted = 0').get(item.product_id);
       if (!product) {
         throw Object.assign(new Error('Producto no existe'), { code: 'NO_PRODUCT' });
+      }
+
+      // Un producto por peso sin control de stock no se cuenta: no tiene stock.
+      if (product.unit && product.track_stock === 0) {
+        throw Object.assign(
+          new Error(`${product.name} no lleva control de stock, no se puede contar`),
+          { code: 'NOT_COUNTABLE' }
+        );
       }
 
       // Lo contado es decimal (3 como máximo) en productos por peso; entero en el resto.
@@ -866,6 +1072,29 @@ const localProductForServerId = (db, serverId) => {
  * solo historial: no descuentan stock, no generan outbox y los cierres remotos
  * nunca reciben el vínculo local `sales.cash_close_id`.
  */
+// Una venta o compra bajada que el servidor ya tiene en un cierre deja de estar
+// abierta aquí. Si ese cierre todavía no bajó, queda -id_del_cierre_en_servidor
+// (cualquier valor que no sea NULL la saca del período) y se corrige al bajar el cierre.
+function markClosedOnServer(db, table, rowId, serverCloseId) {
+  if (serverCloseId == null) return;
+  const close = db.prepare('SELECT id FROM cash_closes WHERE server_id = ?').get(Number(serverCloseId));
+  db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE id = ? AND cash_close_id IS NULL`)
+    .run(close ? close.id : -Number(serverCloseId), rowId);
+}
+
+// Pasa a cerradas, con el id local de este cierre, las ventas y compras que el
+// servidor dice que cubrió (incluidas las que ya estaban bajadas y abiertas).
+function applyCloseCoverage(db, localCloseId, close) {
+  db.prepare('UPDATE sales SET cash_close_id = ? WHERE cash_close_id = ?').run(localCloseId, -Number(close.id));
+  db.prepare('UPDATE currency_purchases SET cash_close_id = ? WHERE cash_close_id = ?').run(localCloseId, -Number(close.id));
+  for (const [table, ids] of [['sales', close.covered_sale_ids], ['currency_purchases', close.covered_purchase_ids]]) {
+    for (const id of Array.isArray(ids) ? ids : []) {
+      db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE server_id = ? AND (cash_close_id IS NULL OR cash_close_id < 0)`)
+        .run(localCloseId, Number(id));
+    }
+  }
+}
+
 function applyServerDelta(page) {
   if (!page || !Array.isArray(page.sales) || !Array.isArray(page.cash_closes)
       || !Array.isArray(page.inventory_counts) || !page.cursors) {
@@ -899,6 +1128,7 @@ function applyServerDelta(page) {
         sale.exchange_rate ?? null, sale.shop_rate ?? null, sale.created_at,
       );
       const saleId = Number(result.lastInsertRowid);
+      markClosedOnServer(db, 'sales', saleId, sale.cash_close_id);
       for (const item of sale.items || []) {
         insertSaleItem.run(
           saleId, localProductForServerId(db, item.product_id), String(item.product_name || ''),
@@ -923,11 +1153,12 @@ function applyServerDelta(page) {
         if (existing.server_id == null) db.prepare('UPDATE currency_purchases SET server_id = ? WHERE id = ?').run(Number(purchase.id), existing.id);
         continue;
       }
-      insertPurchase.run(
+      const purchaseRow = insertPurchase.run(
         Number(purchase.id), clientPurchaseId, purchase.register_id ?? null, purchase.account_email ?? null,
         purchase.foreign_currency, Number(purchase.foreign_amount) || 0, Number(purchase.exchange_rate) || 0,
         purchase.shop_rate ?? null, Number(purchase.cup_amount) || 0, purchase.created_at,
       );
+      markClosedOnServer(db, 'currency_purchases', Number(purchaseRow.lastInsertRowid), purchase.cash_close_id);
       stats.purchases++;
     }
 
@@ -944,9 +1175,10 @@ function applyServerDelta(page) {
       const existing = db.prepare('SELECT id, server_id FROM cash_closes WHERE client_close_id = ?').get(clientCloseId);
       if (existing) {
         if (existing.server_id == null) db.prepare('UPDATE cash_closes SET server_id = ? WHERE id = ?').run(Number(close.id), existing.id);
+        applyCloseCoverage(db, existing.id, close);
         continue;
       }
-      insertClose.run(
+      const insertedClose = insertClose.run(
         Number(close.id), clientCloseId, close.register_id ?? null, close.opened_at,
         close.closed_at, Number(close.opening_float) || 0, Number(close.expected_cash) || 0,
         Number(close.counted_cash) || 0, Number(close.difference) || 0,
@@ -955,6 +1187,7 @@ function applyServerDelta(page) {
         Number(close.expected_usd) || 0, Number(close.counted_usd) || 0, Number(close.difference_usd) || 0,
         Number(close.expected_eur) || 0, Number(close.counted_eur) || 0, Number(close.difference_eur) || 0,
       );
+      applyCloseCoverage(db, Number(insertedClose.lastInsertRowid), close);
       stats.closes++;
     }
 
@@ -1064,11 +1297,11 @@ function applyServerCatalog(serverProducts) {
     for (const p of locals) if (!byServerId.has(p.server_id)) byServerId.set(p.server_id, p);
 
     const insert = db.prepare(`
-      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, unit, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO products (server_id, name, purchase_price, sale_price, stock, unit, track_stock, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const update = db.prepare(`
-      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, deleted = 0 WHERE id = ?
+      UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ?, deleted = 0 WHERE id = ?
     `);
 
     const seen = new Set();
@@ -1085,6 +1318,8 @@ function applyServerCatalog(serverProducts) {
         Number(s.sale_price) || 0,
         unit ? round3(stock) : Math.trunc(stock),
         unit,
+        // Un servidor que no lo manda es de antes de esta opción: se controla.
+        unit && (s.track_stock === 0 || s.track_stock === false) ? 0 : 1,
       ];
 
       const local = byServerId.get(serverId);
@@ -1102,7 +1337,8 @@ function applyServerCatalog(serverProducts) {
         local.purchase_price !== values[1] ||
         local.sale_price !== values[2] ||
         local.stock !== values[3] ||
-        (local.unit ?? null) !== values[4];
+        (local.unit ?? null) !== values[4] ||
+        (local.track_stock ?? 1) !== values[5];
       if (differs) {
         update.run(...values, local.id);
         stats.updated++;
@@ -1144,10 +1380,10 @@ module.exports = {
   getSession, setSession, updateSessionSettings, clearSession,
   getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta,
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
-  listProducts, createProduct, updateProduct, deleteProduct, applyServerCatalog,
+  listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog,
   createSaleLocal, listSales, getSale,
   createCurrencyPurchaseLocal, listCurrencyPurchases,
-  getDashboard,
-  getCurrentCashPeriod, createCashCloseLocal, listCashCloses, cashCloseSummary,
+  getDashboard, pendingHoldings,
+  getCurrentCashPeriod, createCashCloseLocal, getCashClose, listCashCloses, cashCloseSummary,
   createInventoryCountLocal, listInventoryCounts, getInventoryCount,
 };

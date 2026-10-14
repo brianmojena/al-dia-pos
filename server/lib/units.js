@@ -23,4 +23,11 @@ function validQuantity(value, unit, { min = 0 } = {}) {
   return unit ? Math.abs(roundQty(n) - n) < 1e-9 : Number.isInteger(n);
 }
 
-module.exports = { UNITS, roundQty, parseUnit, validQuantity };
+/** 1 o 0. Solo un producto por peso puede dejar de llevar stock; el resto siempre lo lleva. */
+function trackStockFor(unit, value, fallback = 0) {
+  if (!unit) return 1;
+  if (value === undefined || value === null || value === '') return fallback;
+  return value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0;
+}
+
+module.exports = { UNITS, roundQty, parseUnit, validQuantity, trackStockFor };

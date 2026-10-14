@@ -27,7 +27,7 @@ export function applyOperation(data, op, result = op.result) {
     if (!data.sales.some((s) => s.client_sale_id === op.body.client_sale_id)) {
       for (const item of op.result.items) {
         const p = data.products.find((p) => p.id === item.product_id)
-        if (p) p.stock = Math.max(0, roundQty(p.stock - item.quantity))
+        if (p && (!p.unit || Number(p.track_stock ?? 1) === 1)) p.stock = Math.max(0, roundQty(p.stock - item.quantity))
       }
     }
     upsert(data.sales, { ...op.result, ...result, items: op.result.items }, 'client_sale_id')
@@ -124,12 +124,16 @@ export function prepareOperation(data, method, path, body, ctx) {
     const { add_stock: addStock, ...rest } = body
     const p = { ...(previous || {}), ...rest }
     if (previous && addStock != null && addStock !== '') {
-      assert(validQuantity(addStock, previous.unit || null), 'La cantidad a añadir no es válida')
+      assert(!previous.unit || Number(previous.track_stock ?? 1) === 1, 'Este producto no lleva control de stock')
+      assert(Number(addStock) > 0 && validQuantity(addStock, previous.unit || null), 'La cantidad a añadir no es válida')
       p.stock = Math.round((Number(previous.stock) + Number(addStock)) * 1000) / 1000
     }
     assert(typeof p.name === 'string' && p.name.trim(), 'Falta el nombre del producto')
     assert(number(p.sale_price) && number(p.purchase_price ?? 0), 'Los precios deben ser números mayores o iguales a 0')
     assert(isValidUnit(p.unit), 'La unidad de medida no es válida (kg, g o lb)')
+    // Solo un producto por peso puede no llevar stock; nace sin control salvo que se pida.
+    const trackStock = !p.unit ? 1 : (body.track_stock === undefined ? (previous ? (Number(previous.track_stock ?? 1) === 1 ? 1 : 0) : 0) : (body.track_stock ? 1 : 0))
+    if (!trackStock) p.stock = 0
     assert(validQuantity(p.stock ?? 0, p.unit || null), p.unit ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)' : 'El stock debe ser un entero mayor o igual a 0')
     if (!previous) {
       const existing = data.products.find((p) => normalize(p.name) === normalize(body.name))
@@ -139,8 +143,11 @@ export function prepareOperation(data, method, path, body, ctx) {
     if (previous) op.before = owner ? { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null } : { sale_price: previous.sale_price }
     // La unidad viaja siempre en las altas y ediciones del dueño: si se omitiera,
     // una edición que no la menciona (p. ej. la importación) la dejaría en blanco.
-    if (!previous || owner) op.body.unit = p.unit || null
-    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, created_by_email: previous?.created_by_email ?? ctx.user.email }
+    if (!previous || owner) { op.body.unit = p.unit || null; op.body.track_stock = trackStock }
+    // La entrada de mercancía sube como cantidad a sumar, nunca como stock final:
+    // si otra caja vendió mientras tanto, un total absoluto pisaría esas ventas.
+    if (addStock != null && addStock !== '') { delete op.body.stock; op.body.add_stock = Number(addStock) }
+    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, created_by_email: previous?.created_by_email ?? ctx.user.email }
   } else if (path === '/api/sales') {
     op.kind = 'sale'
     op.body.client_sale_id ||= ctx.newId()
@@ -166,8 +173,9 @@ export function prepareOperation(data, method, path, body, ctx) {
       const p = productById(data, item.product_id)
       assert(validQuantity(item.quantity, p.unit || null, 0.001), p.unit ? `Cantidad inválida para ${p.name} (usa hasta 3 decimales)` : `${p.name} se vende por unidades enteras`)
       assert(number(item.unit_price), 'Precio inválido')
-      assert(remaining.get(p.id) >= item.quantity, `Stock insuficiente para ${p.name}`)
-      remaining.set(p.id, roundQty(remaining.get(p.id) - item.quantity))
+      // Un producto por peso nunca bloquea la venta (igual que el servidor).
+      if (!p.unit) assert(remaining.get(p.id) >= item.quantity, `Stock insuficiente para ${p.name}`)
+      remaining.set(p.id, Math.max(0, roundQty(remaining.get(p.id) - item.quantity)))
       return { ...item, id: index, product_name: p.name, unit_cost: Number(p.purchase_price || 0) }
     })
     const total = round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price), 0))
@@ -203,6 +211,7 @@ export function prepareOperation(data, method, path, body, ctx) {
     assert(new Set(body.items.map((i) => i.product_id)).size === body.items.length, 'Producto repetido')
     const items = body.items.map((item, index) => {
       const p = productById(data, item.product_id)
+      assert(!p.unit || Number(p.track_stock ?? 1) === 1, `${p.name} no lleva control de stock`)
       assert(validQuantity(item.counted, p.unit || null), 'Cantidad contada inválida')
       return { ...item, id: index, product_name: p.name, expected: p.stock, difference: roundQty(item.counted - p.stock), unit_cost: p.purchase_price || 0, unit_price: p.sale_price }
     })
@@ -306,8 +315,9 @@ export function readLocal(data, path, account, user) {
       for (const key of Object.keys(holdings)) holdings[key] += split[key]
     }
     for (const key of Object.keys(holdings)) holdings[key] = round(holdings[key])
-    const inventory = { cost: round(data.products.reduce((n, p) => n + p.stock * Number(p.purchase_price || 0), 0)), retail: round(data.products.reduce((n, p) => n + p.stock * Number(p.sale_price || 0), 0)), units: data.products.reduce((n, p) => n + p.stock, 0) }
-    return { holdings, inventory, today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: data.products.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
+    const tracked = data.products.filter((p) => !p.unit || Number(p.track_stock ?? 1) === 1)
+    const inventory = { cost: round(tracked.reduce((n, p) => n + p.stock * Number(p.purchase_price || 0), 0)), retail: round(tracked.reduce((n, p) => n + p.stock * Number(p.sale_price || 0), 0)), units: tracked.reduce((n, p) => n + (p.unit ? 0 : p.stock), 0) }
+    return { holdings, inventory, today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: tracked.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
   }
   return undefined
 }

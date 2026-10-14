@@ -156,6 +156,28 @@ function initLocalDb(dbPath) {
       last_attempt_at TEXT
     );
 
+    -- Registro local de mercancía añadida al stock (quién, cuánto y cuándo).
+    CREATE TABLE IF NOT EXISTS stock_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      quantity REAL NOT NULL,
+      stock_before REAL NOT NULL,
+      stock_after REAL NOT NULL,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Espejo del almacén de la tienda. El id es el del servidor: los artículos
+    -- solo se dan de alta allá (cuenta principal, con internet) y bajan aquí.
+    CREATE TABLE IF NOT EXISTS warehouse_items (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      unit TEXT,
+      cost REAL NOT NULL DEFAULT 0,
+      quantity REAL NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS sync_state (
       key TEXT PRIMARY KEY,
       value TEXT
@@ -209,6 +231,9 @@ function initLocalDb(dbPath) {
     // como REAL cuando no es entero (2.35 no se trunca), así que no hace falta
     // tocar esas tablas; el CHECK (stock >= 0) también vale para decimales.
     'ALTER TABLE products ADD COLUMN unit TEXT',
+    // Solo aplica a productos con unit: 0 = no llevar control de stock (el
+    // stock se ignora). Los productos por unidad siempre quedan en 1.
+    'ALTER TABLE products ADD COLUMN track_stock INTEGER NOT NULL DEFAULT 1',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }

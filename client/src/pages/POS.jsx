@@ -85,7 +85,7 @@ export default function POS() {
   }, [])
 
   const filtered = products.filter(p =>
-    p.name.toLowerCase().includes(search.toLowerCase()) && p.stock > 0
+    p.name.toLowerCase().includes(search.toLowerCase()) && (p.unit || p.stock > 0)
   )
 
   const addToCart = (product) => {
@@ -109,7 +109,7 @@ export default function POS() {
   // Confirma el peso: fija la cantidad del producto en el carrito (no la suma —
   // volver a tocar el producto sirve para corregir el peso).
   const weighQty = parseFloat(String(weighInput).replace(',', '.'))
-  const weighValid = weighing && Number.isFinite(weighQty) && weighQty >= 0.001 && weighQty <= weighing.stock
+  const weighValid = weighing && Number.isFinite(weighQty) && weighQty >= 0.001
     && Math.abs(roundQty(weighQty) - weighQty) < 1e-9
   const confirmWeight = () => {
     if (!weighValid) return
@@ -271,7 +271,7 @@ export default function POS() {
             <div className="flex items-start justify-between mb-1">
               <div className="min-w-0">
                 <h3 className="text-lg font-bold text-gray-900 truncate">{weighing.name}</h3>
-                <p className="text-sm text-gray-400">{fmt(weighing.sale_price)} por {weighing.unit} · quedan {formatQty(weighing.stock, weighing.unit)}</p>
+                <p className="text-sm text-gray-400">{fmt(weighing.sale_price)} por {weighing.unit}{Number(weighing.track_stock) === 1 ? ` · quedan ${formatQty(weighing.stock, weighing.unit)}` : ''}</p>
               </div>
               <button type="button" onClick={() => setWeighing(null)} className="p-2 -mr-2 hover:bg-gray-100 rounded-xl">
                 <X size={20} className="text-gray-500" />
@@ -307,9 +307,7 @@ export default function POS() {
             </div>
             {weighInput !== '' && !weighValid && (
               <p className="text-xs text-red-500 mt-2">
-                {weighQty > weighing.stock
-                  ? `Solo quedan ${formatQty(weighing.stock, weighing.unit)}.`
-                  : 'Escribe una cantidad válida (hasta 3 decimales).'}
+                Escribe una cantidad válida (hasta 3 decimales).
               </p>
             )}
             <button
@@ -481,7 +479,7 @@ export default function POS() {
                     {p.name}
                   </p>
                   <p className="text-[#007AFF] font-bold text-base">{fmt(p.sale_price)}{priceSuffix(p.unit)}</p>
-                  <p className="text-xs text-gray-400 mt-1">Stock: {formatQty(p.stock, p.unit)}</p>
+                  {(!p.unit || Number(p.track_stock) === 1) && <p className="text-xs text-gray-400 mt-1">Stock: {formatQty(p.stock, p.unit)}</p>}
                   {inCart && (
                     <div className="mt-2">
                       <span className="bg-[#007AFF] text-white text-xs font-semibold px-2.5 py-0.5 rounded-full">

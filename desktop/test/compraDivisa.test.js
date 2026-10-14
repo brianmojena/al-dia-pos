@@ -225,7 +225,7 @@ test('compra de divisa en la caja de escritorio', async (t) => {
     }
   });
 
-  await t.test('el delta baja compras remotas como historial, sin tocar el arqueo local', async () => {
+  await t.test('el delta baja compras remotas: cuentan para el cierre del dueño y no para el de un cajero', async () => {
     const ctx = startLocalDb();
     try {
       ctx.queries.setSession({
@@ -261,9 +261,13 @@ test('compra de divisa en la caja de escritorio', async (t) => {
       assert.equal(fila.server_id, 55);
       assert.equal(fila.cup_amount, 10500);
       assert.equal(ctx.queries.getSyncState('delta_after_purchase'), '55');
-      assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, false);
-      assert.equal(ctx.queries.getDashboard().holdings.cash, 0);
+      assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, true, 'el dueño cierra la tienda entera');
+      assert.equal(ctx.queries.getDashboard().holdings.cash, -10500);
       assert.equal(ctx.queries.listCurrencyPurchases().length, 1);
+      ctx.queries.setSession({
+        user_id: 1, email: 'caja@mitienda.cu', store_name: 'Tienda', plan: 'dev', token: 't', role: 'cajero',
+      });
+      assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, false, 'un cajero solo cierra lo suyo');
     } finally {
       ctx.close();
     }

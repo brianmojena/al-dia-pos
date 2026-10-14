@@ -23,6 +23,12 @@ const venta = (api, token, { productId, quantity = 1, unit_price = 100, payment_
     body: { items: [{ product_id: productId, quantity, unit_price }], payment_method },
   });
 
+const crearCajeroToken = async (api, tokenDueño) => {
+  const email = `cj${Date.now()}${Math.floor(Math.random() * 1e6)}@test.local`;
+  await api('POST', '/api/auth/cashiers', { token: tokenDueño, body: { email, password: 'cajero1234' } });
+  return (await api('POST', '/api/auth/login', { body: { email, password: 'cajero1234' } })).body.token;
+};
+
 test('cierre de caja', async (t) => {
   const ctx = await startTestServer();
   t.after(() => ctx.close());
@@ -174,8 +180,10 @@ test('cierre de caja', async (t) => {
 
   await t.test('un cierre que llega del escritorio se calcula sobre las ventas que él señala', async () => {
     const ctx2 = await startTestServer();
-    const token = await registerUser(ctx2.api);
-    const productId = await createProduct(ctx2.api, token, { name: 'Ron', stock: 50, sale_price: 100 });
+    const dueño = await registerUser(ctx2.api);
+    const productId = await createProduct(ctx2.api, dueño, { name: 'Ron', stock: 50, sale_price: 100 });
+    // Un cajero cierra solo lo suyo; la cuenta principal cierra toda la tienda.
+    const token = await crearCajeroToken(ctx2.api, dueño);
 
     // Tres ventas ya sincronizadas. El escritorio cerró la caja cuando solo
     // existían las dos primeras; la tercera es de después del corte.
@@ -242,5 +250,24 @@ test('cierre de caja', async (t) => {
 
     const noNumero = await ctx.api('POST', '/api/cash-closes', { token, body: { counted_cash: 'mucho' } });
     assert.equal(noNumero.status, 400);
+  });
+
+  await t.test('la cuenta principal que cierra desde el escritorio suma también las ventas abiertas de otros aparatos, sin duplicar las suyas', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, { name: 'Ron', stock: 20 });
+    const propia = randomUUID();
+    await ctx.api('POST', '/api/sales', {
+      token,
+      body: { client_sale_id: propia, items: [{ product_id: productId, quantity: 1, unit_price: 500 }], payment_method: 'efectivo' },
+    });
+    await venta(ctx.api, token, { productId, quantity: 1, unit_price: 200 }); // "teléfono"
+
+    const res = await ctx.api('POST', '/api/cash-closes', {
+      token,
+      body: { client_close_id: randomUUID(), register_id: 'desk-x', client_sale_ids: [propia], counted_cash: 700 },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(Number(res.body.sales_count), 2);
+    assert.equal(Number(res.body.expected_cash), 700);
   });
 });

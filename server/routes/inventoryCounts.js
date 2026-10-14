@@ -118,13 +118,17 @@ router.post('/', asyncHandler(async (req, res) => {
       // la pantalla: si entró una venta mientras se contaba, la diferencia se
       // calcula contra el número más fresco y no contra uno ya vencido.
       const productResult = await tx.execute({
-        sql: 'SELECT id, name, stock, unit, purchase_price, sale_price FROM products WHERE id = ? AND user_id = ?',
+        sql: 'SELECT id, name, stock, unit, track_stock, purchase_price, sale_price FROM products WHERE id = ? AND user_id = ?',
         args: [item.product_id, req.userId],
       });
       const product = productResult.rows[0];
       if (!product) {
         await tx.rollback();
         return res.status(400).json({ error: 'Producto no existe' });
+      }
+      if (product.unit && Number(product.track_stock) !== 1) {
+        await tx.rollback();
+        return res.status(400).json({ error: `${product.name} no lleva control de stock` });
       }
       if (!validQuantity(counted, product.unit)) {
         await tx.rollback();

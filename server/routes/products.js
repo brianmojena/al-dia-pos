@@ -4,7 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
-const { parseUnit, validQuantity } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty } = require('../lib/units');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
 //
@@ -87,11 +87,14 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const account = await describeAccount(db, req);
+  // Un producto por peso nace SIN control de stock salvo que se pida: lo común
+  // en una bodega es pesar y cobrar sin contar las libras que quedan.
+  const trackStock = trackStockFor(unit, req.body.track_stock, 0);
   const insertResult = await db.execute({
     sql: `INSERT INTO products
-            (user_id, name, purchase_price, sale_price, stock, unit, created_by_account_id, created_by_email)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [req.userId, name, purchase, sale, Number(stock) || 0, unit ?? null, account.id, account.email],
+            (user_id, name, purchase_price, sale_price, stock, unit, track_stock, created_by_account_id, created_by_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [req.userId, name, purchase, sale, trackStock ? Number(stock) || 0 : 0, unit ?? null, trackStock, account.id, account.email],
   });
   const result = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ?',
@@ -247,6 +250,10 @@ router.put('/:id', asyncHandler(async (req, res) => {
     stock = Math.round((Number(existing.stock) + Number(addStock)) * 1000) / 1000;
   }
   const addedQty = addStock !== undefined && addStock !== null && addStock !== '' ? Number(addStock) : 0;
+  const trackStock = trackStockFor(unit, req.body.track_stock, Number(existing.track_stock ?? 1));
+  if (addedQty > 0 && !trackStock) {
+    return res.status(400).json({ error: 'Este producto no lleva control de stock' });
+  }
   // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
   if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {
     return res.status(400).json({ error: 'Al quitar la unidad de medida hay que poner el stock en piezas enteras' });
@@ -255,13 +262,14 @@ router.put('/:id', asyncHandler(async (req, res) => {
     // Con add_stock la suma la hace la base de datos, no el valor leído arriba:
     // dos entradas simultáneas no se pisan.
     sql: `UPDATE products SET name = ?, purchase_price = ?, sale_price = ?,
-            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ? WHERE id = ?`,
+            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ?, track_stock = ? WHERE id = ?`,
     args: [
       name           ?? existing.name,
       purchase_price ?? existing.purchase_price,
       sale_price     ?? existing.sale_price,
-      addedQty > 0 ? addedQty : (stock ?? existing.stock),
+      addedQty > 0 ? addedQty : (trackStock ? (stock ?? existing.stock) : 0),
       unit,
+      trackStock,
       req.params.id,
     ],
   }];

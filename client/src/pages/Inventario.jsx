@@ -40,7 +40,7 @@ export default function Inventario() {
   useLocalRefresh(load)
 
   const filtered = useMemo(
-    () => products.filter(p => p.name.toLowerCase().includes(search.toLowerCase())),
+    () => products.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) && (!p.unit || Number(p.track_stock) === 1)),
     [products, search]
   )
 

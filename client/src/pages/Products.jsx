@@ -8,7 +8,7 @@ import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix } from '../lib/units'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', add_stock: '' }
+const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '' }
 
 export default function Products() {
   const { user } = useAuth()
@@ -56,7 +56,7 @@ export default function Products() {
   const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
-    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', add_stock: '' })
+    setForm({ name: p.name, purchase_price: p.purchase_price, sale_price: p.sale_price, stock: p.stock, unit: p.unit || '', track_stock: !p.unit || Number(p.track_stock) === 1, add_stock: '' })
     setFormError('')
     setShowForm(true)
   }
@@ -88,6 +88,7 @@ export default function Products() {
       sale_price: parseFloat(form.sale_price),
       stock: (form.unit ? parseFloat(String(form.stock).replace(',', '.')) : parseInt(form.stock)) || 0,
       unit: form.unit || null,
+      ...(form.unit && { track_stock: !!form.track_stock }),
       ...(editing && addStock > 0 && { add_stock: addStock }),
     }
     try {
@@ -296,8 +297,23 @@ export default function Products() {
                         ))}
                       </div>
                       <p className="text-xs text-gray-400 mt-2">
-                        Los precios y el stock son por {form.unit}. Al vender, escribes cuántos {form.unit} se lleva el cliente y se calcula el total.
+                        Los precios son por {form.unit}. Al vender, escribes cuántos {form.unit} se lleva el cliente y se calcula el total.
                       </p>
+                      <label className="flex items-start gap-3 cursor-pointer select-none mt-3">
+                        <input
+                          type="checkbox"
+                          checked={!!form.track_stock}
+                          onChange={(e) => setForm(f => ({ ...f, track_stock: e.target.checked }))}
+                          className="w-5 h-5 accent-[#007AFF] mt-0.5"
+                        />
+                        <span>
+                          <span className="text-sm font-semibold text-gray-800 block">Llevar control de stock</span>
+                          <span className="text-xs text-gray-400">
+                            Opcional. Si lo dejas apagado, se vende siempre sin contar las {form.unit} que quedan.
+                            Si lo activas, anotas las {form.unit} que llegan y cada venta las descuenta.
+                          </span>
+                        </span>
+                      </label>
                     </div>
                   )}
                 </div>
@@ -316,13 +332,13 @@ export default function Products() {
                   <input required type="number" step="0.01" min="0" placeholder="0.00" {...field('sale_price')} />
                 </div>
               </div>
-              <div>
+              {(!form.unit || form.track_stock) && <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
                   {editing ? 'Stock' : 'Stock inicial'}{form.unit ? ` (${form.unit})` : ''}
                 </label>
                 <input disabled={!!editing && !isOwner} type="number" min="0" step={form.unit ? 'any' : '1'} inputMode={form.unit ? 'decimal' : 'numeric'} placeholder="0" {...field('stock')} />
-              </div>
-              {editing && (
+              </div>}
+              {editing && (!form.unit || form.track_stock) && (
                 <div>
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
                     Añadir al stock{form.unit ? ` (${form.unit})` : ''}
@@ -393,11 +409,12 @@ export default function Products() {
                     <td className="px-5 py-4 text-right font-semibold text-gray-900 text-sm">{fmt(p.sale_price)}{priceSuffix(p.unit)}</td>
                     <td className="px-5 py-4 text-right">
                       <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
+                        p.unit && Number(p.track_stock) !== 1 ? 'bg-gray-100 text-gray-500' :
                         p.stock === 0 ? 'bg-red-50 text-red-600' :
                         p.stock <= 5  ? 'bg-orange-50 text-orange-600' :
                                         'bg-green-50 text-green-700'
                       }`}>
-                        {formatQty(p.stock, p.unit)}
+                        {p.unit && Number(p.track_stock) !== 1 ? 'Sin control' : formatQty(p.stock, p.unit)}
                       </span>
                     </td>
                     <td className="px-5 py-4">

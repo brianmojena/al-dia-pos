@@ -1,7 +1,7 @@
 const { getLocalDb } = require('../db/localDb');
 const {
   getPendingOutbox, getSession, updateSessionSettings, applyServerCatalog, resetStuckSyncing,
-  getRegisterId, prepareDeltaSession, applyServerDelta,
+  getRegisterId, prepareDeltaSession, applyServerDelta, applyServerWarehouse, setSyncState,
 } = require('../db/queries');
 const { apiRequest } = require('./apiClient');
 const { businessToday } = require('../lib/businessDay');
@@ -57,6 +57,7 @@ function buildRequest(db, row) {
           sale_price: payload.sale_price,
           stock: payload.stock,
           unit: payload.unit ?? null,
+          track_stock: payload.track_stock ?? 1,
         },
         onSuccess: (data) => {
           // Si el servidor lo unió con un producto que ya existía (mismo
@@ -83,7 +84,24 @@ function buildRequest(db, row) {
           purchase_price: payload.purchase_price,
           sale_price: payload.sale_price,
           stock: payload.stock,
+          add_stock: payload.add_stock,
           unit: payload.unit,
+          track_stock: payload.track_stock,
+        },
+      };
+    }
+
+    case 'warehouse.transfer': {
+      // Va después del alta del producto en la cola (orden FIFO): el servidor
+      // lo encuentra por nombre y le suma lo transferido.
+      return {
+        method: 'POST',
+        path: '/api/warehouse/transfer',
+        body: {
+          warehouse_item_id: payload.warehouse_item_id,
+          quantity: payload.quantity,
+          sale_price: payload.sale_price,
+          client_transfer_id: payload.client_transfer_id,
         },
       };
     }
@@ -183,6 +201,17 @@ function buildRequest(db, row) {
         onSuccess: (data) => {
           db.prepare('UPDATE cash_closes SET server_id = ? WHERE client_close_id = ?')
             .run(data.id, payload.client_close_id);
+          // El servidor recalcula el esperado y, si cierra la cuenta principal,
+          // suma también las ventas de otros aparatos: su cuenta es la que vale.
+          if (data.expected_cash != null) {
+            db.prepare(`UPDATE cash_closes SET expected_cash = ?, difference = ?, expected_transfer = ?,
+                          sales_count = ?, opened_at = COALESCE(?, opened_at),
+                          expected_usd = ?, difference_usd = ?, expected_eur = ?, difference_eur = ?
+                        WHERE client_close_id = ?`)
+              .run(data.expected_cash, data.difference, data.expected_transfer ?? 0, data.sales_count ?? 0,
+                data.opened_at ?? null, data.expected_usd ?? 0, data.difference_usd ?? 0,
+                data.expected_eur ?? 0, data.difference_eur ?? 0, payload.client_close_id);
+          }
         },
       };
     }
@@ -268,6 +297,7 @@ async function pullDelta(session, summary) {
       console.error('[sync] no se pudo aplicar el delta:', err);
     }
   }
+  if (!error && pages > 0) setSyncState('last_delta_at', new Date().toISOString());
   summary.downSync = { ...totals, more, error };
 }
 
@@ -369,6 +399,15 @@ async function syncOnce() {
         summary.catalog = stats;
         summary.catalogChanged = stats.changed;
       }
+    } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
+  }
+
+  // Almacén: se baja DESPUÉS de subir las transferencias para que el espejo
+  // ya las incluya; las que no subieron se descuentan en applyServerWarehouse.
+  if (!summary.authExpired) {
+    try {
+      const wh = await apiRequest('GET', '/api/warehouse', { token: session.token });
+      if (wh.ok && Array.isArray(wh.data)) applyServerWarehouse(wh.data);
     } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
   }
 

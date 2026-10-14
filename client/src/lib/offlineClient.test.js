@@ -261,3 +261,26 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
   })
 
 })
+
+test('una edición de cajero guardada con el producto entero por una versión antigua sube sin 403 y no frena las ventas', async () => {
+  resetStore(); seed()
+  setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' })
+  const key = 'mypimes_local_v1:1:2'
+  const legacy = { id: 'legacy-edit', kind: 'product', method: 'PUT', path: '/api/products/10', productId: 10, queued_at: new Date().toISOString(), before: { name: 'Pan 1', sale_price: 10, purchase_price: 6, stock: 20, unit: null }, body: { name: 'Pan 1', purchase_price: 6, sale_price: 12, stock: 20, unit: null }, result: { id: 10, name: 'Pan 1', sale_price: 12, purchase_price: 6, stock: 20 }, error: 'El cajero solo puede cambiar el precio de venta y añadir stock', errorStatus: 403 }
+  const sale = { id: 'sale-after', kind: 'sale', method: 'POST', path: '/api/sales', queued_at: new Date().toISOString(), body: saleBody('after-legacy'), result: { id: -1, items: saleBody('after-legacy').items } }
+  records.set(key, { ...structuredClone(records.get(stateKey(1))), outbox: [legacy, sale] })
+  navigator.onLine = true
+  const sent = []
+  globalThis.fetch = async (path, options) => {
+    if (path === '/api/sync/product-operation') {
+      const { product } = JSON.parse(options.body)
+      if (Object.keys(product).some((k) => k !== 'sale_price' && k !== 'add_stock')) return jsonResponse({ error: 'El cajero solo puede cambiar el precio de venta y añadir stock' }, 403)
+      sent.push('product'); return jsonResponse({ id: 10, name: 'Pan 1', sale_price: 12, purchase_price: 6, stock: 20 })
+    }
+    if (path === '/api/sales') { sent.push('sale'); return jsonResponse({ ...legacy.result, id: 99, pending: false, items: sale.result.items }) }
+    return jsonResponse({ products: [], current_period: {} })
+  }
+  await retrySync()
+  assert.deepEqual(sent, ['product', 'sale'])
+  assert.equal((await localSyncStatus()).pending, 0)
+})

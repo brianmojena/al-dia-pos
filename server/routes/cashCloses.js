@@ -346,8 +346,16 @@ router.post('/', asyncHandler(async (req, res) => {
       await tx.rollback();
       return res.status(400).json({ error: 'Ventas del cierre inválidas' });
     }
+    // La cuenta principal que cierra desde el escritorio también lleva lo que
+    // sigue abierto en los demás aparatos (teléfonos); sin duplicar las suyas.
+    const withWholeShop = async (own, wholeShopRows) => {
+      if (!closesWholeShop(req)) return own;
+      const seen = new Set(own.map((row) => Number(row.id)));
+      return [...own, ...wholeShopRows.filter((row) => !seen.has(Number(row.id)))]
+        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || a.id - b.id);
+    };
     let covered = mode === 'desktop'
-      ? await salesByClientIds(tx, req.userId, client_sale_ids)
+      ? await withWholeShop(await salesByClientIds(tx, req.userId, client_sale_ids), await openSales(tx, req.userId, 'web', null, true))
       : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req));
     if (explicitIds) {
       const available = new Set(covered.map((sale) => Number(sale.id)));
@@ -365,7 +373,7 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(400).json({ error: 'Compras del cierre inválidas' });
     }
     let coveredPurchases = mode === 'desktop'
-      ? await purchasesByClientIds(tx, req.userId, client_purchase_ids || [])
+      ? await withWholeShop(await purchasesByClientIds(tx, req.userId, client_purchase_ids || []), await openPurchases(tx, req.userId, 'web', null, true))
       : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req));
     if (explicitPurchaseIds) {
       const available = new Set(coveredPurchases.map((purchase) => Number(purchase.id)));

@@ -36,8 +36,8 @@ function startLocalDb() {
 }
 
 /** Crea un producto local y le asigna server_id como si ya hubiera sincronizado. */
-function crearProductoSincronizado(queries, { name = 'Producto', stock = 10, sale_price = 100, purchase_price = 60, unit } = {}) {
-  const product = queries.createProduct({ name, stock, sale_price, purchase_price, unit });
+function crearProductoSincronizado(queries, { name = 'Producto', stock = 10, sale_price = 100, purchase_price = 60, unit, track_stock } = {}) {
+  const product = queries.createProduct({ name, stock, sale_price, purchase_price, unit, track_stock });
   getLocalDb().prepare('UPDATE products SET server_id = ? WHERE id = ?').run(1000 + product.id, product.id);
   return product;
 }

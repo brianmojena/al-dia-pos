@@ -242,3 +242,122 @@ export const TEMPLATE_CSV =
   'Arroz (1 lb);130;90;50\r\n' +
   'Aceite vegetal (1 L);990;750;20\r\n' +
   'Refresco de lata;200;140;48\r\n'
+
+// ---------------------------------------------------------------------------
+// Almacén: misma hoja, otras columnas (nombre, unidad, costo y cantidad).
+// ---------------------------------------------------------------------------
+
+const WAREHOUSE_COLUMNS = {
+  name:     ['nombre', 'articulo', 'producto', 'nombre del articulo', 'descripcion'],
+  unit:     ['unidad', 'unidad de medida', 'medida', 'um'],
+  cost:     ['costo', 'coste', 'precio costo', 'precio de costo', 'precio compra', 'precio de compra', 'compra'],
+  quantity: ['cantidad', 'stock', 'existencia', 'existencias', 'unidades', 'uds'],
+}
+
+function mapWarehouseHeader(cells) {
+  const map = {}
+  const taken = new Set()
+  cells.forEach((cell, idx) => {
+    const h = normalizeHeader(cell)
+    for (const [key, aliases] of Object.entries(WAREHOUSE_COLUMNS)) {
+      if (map[key] === undefined && aliases.includes(h)) { map[key] = idx; taken.add(idx); return }
+    }
+  })
+  cells.forEach((cell, idx) => {
+    if (taken.has(idx)) return
+    const h = normalizeHeader(cell)
+    if (map.cost === undefined && /costo|coste|compra/.test(h)) map.cost = idx
+    else if (map.quantity === undefined && /cantidad|stock|existenc/.test(h)) map.quantity = idx
+    else if (map.unit === undefined && /unidad|medida/.test(h)) map.unit = idx
+    else if (map.name === undefined && /nombre|articulo|producto|descripcion/.test(h)) map.name = idx
+  })
+  return map
+}
+
+const WAREHOUSE_UNITS = ['kg', 'g', 'lb']
+
+/** Como buildImport, pero para el almacén. Filas: { line, name, unit, cost, quantity, errors, action }. */
+export function buildWarehouseImport(text, existingItems = []) {
+  const clean = String(text ?? '').replace(/^﻿/, '')
+  if (clean.trim() === '') return { error: 'El archivo está vacío.', rows: [] }
+
+  const table = parseDelimited(clean, detectDelimiter(clean))
+  const headerIndex = table.findIndex((r) => r.some((c) => c.trim() !== ''))
+  if (headerIndex < 0) return { error: 'El archivo está vacío.', rows: [] }
+
+  const columns = mapWarehouseHeader(table[headerIndex])
+  if (columns.name === undefined || columns.cost === undefined) {
+    return {
+      error:
+        'No encuentro las columnas. La primera fila tiene que tener los títulos, por ejemplo: ' +
+        'nombre · unidad · costo · cantidad. Descarga la plantilla para verlo.',
+      rows: [],
+    }
+  }
+
+  const existing = new Map(existingItems.map((p) => [normalizeName(p.name), p]))
+  const seen = new Map()
+  const rows = []
+
+  for (let i = headerIndex + 1; i < table.length; i++) {
+    const cells = table[i]
+    if (!cells.some((c) => c.trim() !== '')) continue
+    const cell = (key) => (columns[key] === undefined ? '' : (cells[columns[key]] ?? ''))
+    const line = i + 1
+    const errors = []
+
+    const name = cell('name').trim().replace(/\s+/g, ' ')
+    const unitRaw = cell('unit').trim().toLowerCase()
+    const costRaw = cell('cost')
+    const qtyRaw = cell('quantity')
+    const cost = parseNumber(costRaw)
+    const quantity = parseNumber(qtyRaw)
+    const prior = name ? existing.get(normalizeName(name)) : null
+
+    if (!name) errors.push('Falta el nombre')
+    else if (name.length > 120) errors.push('El nombre es demasiado largo')
+
+    // Sin unidad en el archivo, uno existente conserva la suya.
+    let unit = null
+    if (unitRaw === '' || unitRaw === 'pieza' || unitRaw === 'unidad' || unitRaw === 'u') unit = prior && unitRaw === '' ? (prior.unit ?? null) : null
+    else if (WAREHOUSE_UNITS.includes(unitRaw)) unit = unitRaw
+    else errors.push(`Unidad no válida: "${cell('unit').trim()}" (usa kg, g o lb, o déjala vacía)`)
+    if (prior && errors.length === 0 && (prior.unit ?? null) !== unit) errors.push('Ya está en el almacén con otra unidad de medida')
+
+    if (cost === null && !prior) errors.push('Falta el costo')
+    else if (Number.isNaN(cost)) errors.push(`Costo no válido: "${costRaw.trim()}"`)
+    else if (cost !== null && cost < 0) errors.push('El costo no puede ser negativo')
+
+    if (Number.isNaN(quantity)) errors.push(`Cantidad no válida: "${qtyRaw.trim()}"`)
+    else if (quantity !== null && quantity < 0) errors.push('La cantidad no puede ser negativa')
+    else if (quantity !== null && !unit && !Number.isInteger(quantity)) errors.push('Sin unidad de medida la cantidad tiene que ser un número entero')
+    else if (quantity !== null && unit && Math.abs(Math.round(quantity * 1000) / 1000 - quantity) > 1e-9) errors.push('La cantidad admite hasta 3 decimales')
+
+    if (name) {
+      const key = normalizeName(name)
+      if (seen.has(key)) errors.push(`Repetido: ya aparece en la fila ${seen.get(key)}`)
+      else seen.set(key, line)
+    }
+
+    rows.push({
+      line, name, unit,
+      cost: Number.isNaN(cost) ? null : cost,
+      quantity: Number.isNaN(quantity) ? null : quantity,
+      errors,
+      action: prior ? 'actualizar' : 'crear',
+    })
+  }
+
+  if (rows.length === 0) return { error: 'El archivo tiene títulos pero ninguna fila con artículos.', rows: [] }
+  if (rows.length > MAX_ROWS) return { error: `Son ${rows.length} filas; el máximo por archivo es ${MAX_ROWS}. Divídelo en partes.`, rows: [] }
+  return { rows }
+}
+
+export const toWarehousePayload = (rows) =>
+  rows.filter((r) => r.errors.length === 0).map(({ name, unit, cost, quantity }) => ({ name, unit, cost, quantity }))
+
+export const WAREHOUSE_TEMPLATE_CSV =
+  '﻿nombre;unidad;costo;cantidad\r\n' +
+  'Aceite vegetal (5 L);;3500;12\r\n' +
+  'Arroz;lb;90;200\r\n' +
+  'Refresco de lata;;140;240\r\n'

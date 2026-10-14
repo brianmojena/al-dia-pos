@@ -168,6 +168,49 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Almacén: mercancía guardada aparte de la tienda. Solo lleva costo y
+    -- cantidad (su importe es cantidad x costo); no tiene precio de venta.
+    CREATE TABLE IF NOT EXISTS warehouse_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      unit TEXT,
+      cost REAL NOT NULL DEFAULT 0,
+      quantity REAL NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+      created_by_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Cada paso de mercancía del almacén a la tienda: quién, qué, cuánto y
+    -- cuándo. Guarda el nombre del momento aunque luego se renombre o borre.
+    CREATE TABLE IF NOT EXISTS warehouse_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_transfer_id TEXT,
+      warehouse_item_id INTEGER,
+      product_id INTEGER,
+      item_name TEXT NOT NULL,
+      quantity REAL NOT NULL,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      created_product INTEGER NOT NULL DEFAULT 0,
+      account_id INTEGER,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Cada alta, cambio, reposición, importación o borrado en el almacén: quién y
+    -- cuándo. Guarda el nombre del momento aunque el artículo se borre después.
+    CREATE TABLE IF NOT EXISTS warehouse_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      item_name TEXT NOT NULL,
+      detail TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Arqueo de caja: lo que el sistema dice que debería haber contra lo que el
     -- cajero contó de verdad. Los cierres son contiguos — cada uno cubre desde
     -- el corte del anterior — así que ninguna venta queda fuera de un arqueo.
@@ -313,6 +356,9 @@ async function initDb() {
     // costo y stock vienen por esa unidad y el stock puede ser decimal
     // (SQLite guarda el decimal en la columna INTEGER sin tocar el esquema).
     'ALTER TABLE products ADD COLUMN unit TEXT',
+    // Un producto por peso puede NO llevar control de stock (0): se vende siempre
+    // y el stock se ignora. Los productos por pieza siempre lo llevan (1).
+    'ALTER TABLE products ADD COLUMN track_stock INTEGER NOT NULL DEFAULT 1',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -374,7 +420,11 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
       ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;
 
+    CREATE INDEX IF NOT EXISTS idx_warehouse_items_user ON warehouse_items(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_warehouse_transfers_client
+      ON warehouse_transfers(user_id, client_transfer_id) WHERE client_transfer_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_stock_entries_user ON stock_entries(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_warehouse_changes_user ON warehouse_changes(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_counts_user  ON inventory_counts(user_id, counted_at);
     CREATE INDEX IF NOT EXISTS idx_inventory_items_count  ON inventory_count_items(count_id);
 

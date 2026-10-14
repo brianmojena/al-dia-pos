@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { todayBounds, shopLocalLabel } = require('../lib/businessDay');
+const { todayBounds, boundsForDate, businessToday, shopLocalLabel, shopLocalTime } = require('../lib/businessDay');
 const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
 
 router.get('/', asyncHandler(async (req, res) => {
@@ -17,7 +17,7 @@ router.get('/', asyncHandler(async (req, res) => {
   });
 
   const lowStockResult = await db.execute({
-    sql: 'SELECT * FROM products WHERE user_id = ? AND stock <= 5 ORDER BY stock ASC',
+    sql: 'SELECT * FROM products WHERE user_id = ? AND stock <= 5 AND (unit IS NULL OR track_stock = 1) ORDER BY stock ASC',
     args: [req.userId],
   });
   const recentSalesResult = await db.execute({
@@ -96,8 +96,8 @@ router.get('/', asyncHandler(async (req, res) => {
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inventoryResult = await db.execute({
-    sql: `SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(stock), 0) AS units
-          FROM products WHERE user_id = ?`,
+    sql: `SELECT COALESCE(SUM(stock * purchase_price), 0) AS cost, COALESCE(SUM(stock * sale_price), 0) AS retail, COALESCE(SUM(CASE WHEN unit IS NULL THEN stock ELSE 0 END), 0) AS units
+          FROM products WHERE user_id = ? AND (unit IS NULL OR track_stock = 1)`,
     args: [req.userId],
   });
   const inventory = {
@@ -106,10 +106,31 @@ router.get('/', asyncHandler(async (req, res) => {
     units: Number(inventoryResult.rows[0].units) || 0,
   };
 
+  // El almacén, para que el dueño lo tenga a la vista desde Inicio: cuánto hay
+  // guardado y el último pase a la tienda (quién y cuándo).
+  const warehouseResult = await db.execute({
+    sql: 'SELECT COUNT(*) AS items, COALESCE(SUM(quantity * cost), 0) AS cost FROM warehouse_items WHERE user_id = ?',
+    args: [req.userId],
+  });
+  const lastTransferResult = await db.execute({
+    sql: `SELECT item_name, quantity, account_email, created_at
+          FROM warehouse_transfers WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+    args: [req.userId],
+  });
+  const lastTransfer = lastTransferResult.rows[0];
+  const warehouse = {
+    items: Number(warehouseResult.rows[0].items) || 0,
+    cost: round2(warehouseResult.rows[0].cost),
+    lastTransfer: lastTransfer
+      ? { ...lastTransfer, created_at_label: shopLocalLabel(lastTransfer.created_at) }
+      : null,
+  };
+
   res.json({
     today: todayStatsResult.rows[0],
     holdings,
     inventory,
+    warehouse,
     lowStock: lowStockResult.rows,
     recentSales: recentSalesResult.rows,
     audit: {
@@ -125,6 +146,91 @@ router.get('/', asyncHandler(async (req, res) => {
       rejectedSales: Number(rejectedResult.rows[0].n) || 0,
       offRateSales: Number(offRateResult.rows[0].n) || 0,
     },
+  });
+}));
+
+// --- Actividad de un día --------------------------------------------------
+// Lo que el dueño abre al tocar "Ventas" en la app del teléfono: todas las
+// ventas del día con quién cobró, y lo que se movió esa jornada entre almacén,
+// inventario y caja. Solo se mira hacia atrás HISTORY_DAYS días.
+//
+// Las fechas y horas viajan ya resueltas (day_label, time, prev, next): la app
+// no calcula fechas, y la zona relevante es la de la tienda, no la del teléfono.
+
+const HISTORY_DAYS = 90;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// 'YYYY-MM-DD' desplazado N días, con los componentes a mano (sin Date local).
+const shiftDate = (dateStr, delta) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + delta)).toISOString().slice(0, 10);
+};
+
+const DAY_LABEL = new Intl.DateTimeFormat('es-ES', {
+  timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long',
+});
+
+router.get('/day', asyncHandler(async (req, res) => {
+  const today = businessToday();
+  const date = req.query.date || today;
+  const oldest = shiftDate(today, -(HISTORY_DAYS - 1));
+  if (!DATE_RE.test(date) || date > today || date < oldest) {
+    return res.status(400).json({ error: `Solo se pueden ver los últimos ${HISTORY_DAYS} días` });
+  }
+
+  const db = getDb();
+  const { start, end } = boundsForDate(date);
+  const args = [req.userId, start, end];
+  const query = (table, extra = '') => db.execute({
+    sql: `SELECT * FROM ${table} WHERE user_id = ? AND created_at >= ? AND created_at < ? ${extra}`,
+    args,
+  });
+  const withTime = (row) => ({ ...row, time: shopLocalTime(row.created_at) });
+
+  const [sales, transfers, stockEntries, purchases, closesResult] = await Promise.all([
+    query('sales', 'ORDER BY created_at DESC, id DESC'),
+    query('warehouse_transfers', 'ORDER BY created_at DESC, id DESC'),
+    query('stock_entries', 'ORDER BY created_at DESC, id DESC'),
+    query('currency_purchases', 'ORDER BY created_at DESC, id DESC'),
+    db.execute({
+      sql: `SELECT id, closed_at AS created_at, difference, sales_count, account_email
+            FROM cash_closes WHERE user_id = ? AND closed_at >= ? AND closed_at < ? ORDER BY closed_at DESC`,
+      args,
+    }),
+  ]);
+
+  // Las líneas de todas las ventas del día en una sola consulta.
+  const itemsBySale = new Map();
+  if (sales.rows.length > 0) {
+    const ids = sales.rows.map((s) => Number(s.id));
+    const itemsResult = await db.execute({
+      sql: `SELECT sale_id, product_name, quantity, unit_price FROM sale_items WHERE sale_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`,
+      args: ids,
+    });
+    for (const item of itemsResult.rows) {
+      const key = Number(item.sale_id);
+      if (!itemsBySale.has(key)) itemsBySale.set(key, []);
+      itemsBySale.get(key).push(item);
+    }
+  }
+
+  const summary = sales.rows.reduce((acc, s) => ({
+    sales: acc.sales + (Number(s.total) || 0),
+    profit: acc.profit + (Number(s.profit) || 0),
+    count: acc.count + 1,
+  }), { sales: 0, profit: 0, count: 0 });
+
+  res.json({
+    date,
+    day_label: DAY_LABEL.format(new Date(`${date}T12:00:00Z`)),
+    prev: date > oldest ? shiftDate(date, -1) : null,
+    next: date < today ? shiftDate(date, 1) : null,
+    summary: { sales: round2(summary.sales), profit: round2(summary.profit), count: summary.count },
+    sales: sales.rows.map((s) => ({ ...withTime(s), items: itemsBySale.get(Number(s.id)) || [] })),
+    transfers: transfers.rows.map(withTime),
+    stockEntries: stockEntries.rows.map(withTime),
+    purchases: purchases.rows.map(withTime),
+    cashCloses: closesResult.rows.map(withTime),
   });
 }));
 

@@ -275,7 +275,7 @@ router.post('/', asyncHandler(async (req, res) => {
       // Lectura DENTRO de la transacción (antes se hacía fuera, lo que abría una
       // ventana entre la comprobación de stock y el descuento).
       const productResult = await tx.execute({
-        sql: 'SELECT id, name, purchase_price, unit FROM products WHERE id = ? AND user_id = ?',
+        sql: 'SELECT id, name, purchase_price, unit, track_stock FROM products WHERE id = ? AND user_id = ?',
         args: [item.product_id, req.userId],
       });
       const product = productResult.rows[0];
@@ -297,13 +297,25 @@ router.post('/', asyncHandler(async (req, res) => {
       // Descuento condicional: el propio UPDATE comprueba el stock. Si otra venta
       // simultánea se adelantó, rowsAffected es 0 y abortamos — el stock nunca
       // puede quedar negativo por esta vía.
-      const updated = await tx.execute({
-        sql: 'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND user_id = ? AND ROUND(stock, 3) >= ?',
-        args: [quantity, item.product_id, req.userId, quantity],
-      });
-      if (updated.rowsAffected !== 1) {
-        await tx.rollback();
-        return res.status(409).json({ error: `Stock insuficiente para ${product.name}` });
+      //
+      // Un producto por peso nunca bloquea la venta: se pesa y se cobra aunque
+      // el stock no esté al día. Si lleva control, baja hasta 0; si no, no se toca.
+      if (product.unit) {
+        if (Number(product.track_stock) === 1) {
+          await tx.execute({
+            sql: 'UPDATE products SET stock = MAX(0, ROUND(stock - ?, 3)) WHERE id = ? AND user_id = ?',
+            args: [quantity, item.product_id, req.userId],
+          });
+        }
+      } else {
+        const updated = await tx.execute({
+          sql: 'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND user_id = ? AND ROUND(stock, 3) >= ?',
+          args: [quantity, item.product_id, req.userId, quantity],
+        });
+        if (updated.rowsAffected !== 1) {
+          await tx.rollback();
+          return res.status(409).json({ error: `Stock insuficiente para ${product.name}` });
+        }
       }
 
       // Cada línea se redondea a centavos: es el importe que el cliente ve y
