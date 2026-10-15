@@ -1,4 +1,4 @@
-import { validQuantity } from '../lib/units'
+import { validQuantity, hasPack, packCountTotal, formatPackStock } from '../lib/units'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
@@ -13,15 +13,16 @@ import { accountLabel } from '../lib/accountLabel'
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Inventario() {
-  const [products,   setProducts]   = useState([])
-  const [history,    setHistory]    = useState([])
-  const [counts,     setCounts]     = useState({})   // product_id -> texto tecleado
-  const [search,     setSearch]     = useState('')
-  const [note,       setNote]       = useState('')
-  const [loading,    setLoading]    = useState(true)
-  const [submitting, setSubmitting] = useState(false)
-  const [result,     setResult]     = useState(null)
-  const [error,      setError]      = useState('')
+  const [products,    setProducts]    = useState([])
+  const [history,     setHistory]     = useState([])
+  const [counts,      setCounts]      = useState({})   // product_id -> texto tecleado (productos sin pack)
+  const [packCounts,  setPackCounts]  = useState({})   // product_id -> { packs: '', loose: '' } (productos con pack)
+  const [search,      setSearch]      = useState('')
+  const [note,        setNote]        = useState('')
+  const [loading,     setLoading]     = useState(true)
+  const [submitting,  setSubmitting]  = useState(false)
+  const [result,      setResult]      = useState(null)
+  const [error,       setError]       = useState('')
   const countIdRef = useRef(null)
 
   const load = async () => {
@@ -46,13 +47,34 @@ export default function Inventario() {
 
   // Solo cuenta lo que se tecleó: dejar un producto en blanco significa "no lo
   // conté", que no es lo mismo que "conté cero".
-  const entered = Object.entries(counts)
-    .filter(([, v]) => v !== '' && v != null)
-    .map(([id, v]) => ({ product_id: Number(id), counted: parseFloat(String(v).replace(',', '.')) }))
-    .filter(i => {
-      const unit = products.find(p => p.id === i.product_id)?.unit
-      return validQuantity(i.counted, unit)
+  const entered = useMemo(() => {
+    const items = []
+
+    // Productos sin pack (counts)
+    Object.entries(counts).forEach(([id, v]) => {
+      if (v !== '' && v != null) {
+        const product_id = Number(id)
+        const counted = parseFloat(String(v).replace(',', '.'))
+        const unit = products.find(p => p.id === product_id)?.unit
+        if (validQuantity(counted, unit)) {
+          items.push({ product_id, counted })
+        }
+      }
     })
+
+    // Productos con pack (packCounts)
+    Object.entries(packCounts).forEach(([id, pc]) => {
+      const product_id = Number(id)
+      const product = products.find(p => p.id === product_id)
+      if (!product) return
+      const counted = packCountTotal(pc.packs, pc.loose, product.pack_size)
+      if (counted != null) {
+        items.push({ product_id, counted })
+      }
+    })
+
+    return items
+  }, [counts, packCounts, products])
 
   const handleSubmit = async () => {
     if (entered.length === 0 || submitting) return
@@ -77,6 +99,7 @@ export default function Inventario() {
         countIdRef.current = null
         setResult(data)
         setCounts({})
+        setPackCounts({})
         setNote('')
         await load()
       }
@@ -93,7 +116,7 @@ export default function Inventario() {
     </div>
   )
 
-  if (result) return <Resultado result={result} onNew={() => setResult(null)} />
+  if (result) return <Resultado result={result} products={products} onNew={() => setResult(null)} />
 
   return (
     <div className="p-5 md:p-8 max-w-2xl mx-auto pb-40">
@@ -138,22 +161,55 @@ export default function Inventario() {
             <p className="text-sm">Sin resultados</p>
           </div>
         ) : filtered.map((p, idx) => {
-          const value = counts[p.id] ?? ''
+          const isPack = hasPack(p)
+          const value = isPack ? (packCounts[p.id] ?? { packs: '', loose: '' }) : (counts[p.id] ?? '')
+          const hasValue = isPack ? (value.packs !== '' || value.loose !== '') : (value !== '')
+
           return (
             <div
               key={p.id}
               className={`flex items-center gap-3 px-5 py-3 ${
                 idx < filtered.length - 1 ? 'border-b border-gray-50' : ''
-              } ${value !== '' ? 'bg-blue-50/40' : ''}`}
+              } ${hasValue ? 'bg-blue-50/40' : ''}`}
             >
               <span className="flex-1 text-sm font-medium text-gray-900 min-w-0 truncate">{p.name}</span>
               {p.unit && <span className="text-xs font-semibold text-gray-400">{p.unit}</span>}
-              <input
-                type="number" min="0" step={p.unit ? 'any' : '1'} inputMode={p.unit ? 'decimal' : 'numeric'} placeholder="—"
-                value={value}
-                onChange={e => setCounts(c => ({ ...c, [p.id]: e.target.value }))}
-                className="w-20 text-center border border-gray-200 rounded-xl px-2 py-2 text-base font-semibold focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
-              />
+
+              {isPack ? (
+                <div className="flex items-end gap-2">
+                  <div className="flex flex-col items-center">
+                    <label className="text-xs text-gray-400 font-medium mb-1">paq de {p.pack_size}</label>
+                    <input
+                      type="number" min="0" step="1" inputMode="numeric" placeholder="—"
+                      value={value.packs}
+                      onChange={e => setPackCounts(pc => ({
+                        ...pc,
+                        [p.id]: { ...value, packs: e.target.value }
+                      }))}
+                      className="w-16 text-center border border-gray-200 rounded-xl px-2 py-2 text-base font-semibold focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+                    />
+                  </div>
+                  <div className="flex flex-col items-center">
+                    <label className="text-xs text-gray-400 font-medium mb-1">sueltos</label>
+                    <input
+                      type="number" min="0" step="1" inputMode="numeric" placeholder="—"
+                      value={value.loose}
+                      onChange={e => setPackCounts(pc => ({
+                        ...pc,
+                        [p.id]: { ...value, loose: e.target.value }
+                      }))}
+                      className="w-16 text-center border border-gray-200 rounded-xl px-2 py-2 text-base font-semibold focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <input
+                  type="number" min="0" step={p.unit ? 'any' : '1'} inputMode={p.unit ? 'decimal' : 'numeric'} placeholder="—"
+                  value={value}
+                  onChange={e => setCounts(c => ({ ...c, [p.id]: e.target.value }))}
+                  className="w-20 text-center border border-gray-200 rounded-xl px-2 py-2 text-base font-semibold focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+                />
+              )}
             </div>
           )
         })}
@@ -242,7 +298,7 @@ export default function Inventario() {
   )
 }
 
-function Resultado({ result, onNew }) {
+function Resultado({ result, products, onNew }) {
   const faltantes = result.items.filter(i => i.difference < 0)
   const sobrantes = result.items.filter(i => i.difference > 0)
   const exactos   = result.items.filter(i => i.difference === 0)
@@ -291,30 +347,43 @@ function Resultado({ result, onNew }) {
       )}
 
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden mb-4">
-        {[...faltantes, ...sobrantes, ...exactos].map((item, idx, arr) => (
-          <div
-            key={item.id}
-            className={`flex items-center justify-between px-5 py-3.5 ${
-              idx < arr.length - 1 ? 'border-b border-gray-50' : ''
-            }`}
-          >
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-gray-900 truncate">{item.product_name}</p>
-              <p className="text-xs text-gray-400 mt-0.5">
-                Sistema {item.expected} · contado {item.counted}
-              </p>
+        {[...faltantes, ...sobrantes, ...exactos].map((item, idx, arr) => {
+          const product = products.find(p => p.id === item.product_id)
+          const hasPacked = hasPack(product)
+
+          return (
+            <div
+              key={item.id}
+              className={`flex items-center justify-between px-5 py-3.5 ${
+                idx < arr.length - 1 ? 'border-b border-gray-50' : ''
+              }`}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-900 truncate">{item.product_name}</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {hasPacked ? (
+                    <>
+                      Sistema {formatPackStock(item.expected, product.pack_size)} · contado {formatPackStock(item.counted, product.pack_size)}
+                    </>
+                  ) : (
+                    <>
+                      Sistema {item.expected} · contado {item.counted}
+                    </>
+                  )}
+                </p>
+              </div>
+              {item.difference === 0 ? (
+                <span className="text-xs font-semibold text-green-600 flex-shrink-0">✓</span>
+              ) : (
+                <span className={`text-sm font-bold flex-shrink-0 ${
+                  item.difference < 0 ? 'text-red-600' : 'text-orange-500'
+                }`}>
+                  {item.difference > 0 ? '+' : '−'}{Math.abs(item.difference)} {hasPacked ? 'sueltos' : ''}
+                </span>
+              )}
             </div>
-            {item.difference === 0 ? (
-              <span className="text-xs font-semibold text-green-600 flex-shrink-0">✓</span>
-            ) : (
-              <span className={`text-sm font-bold flex-shrink-0 ${
-                item.difference < 0 ? 'text-red-600' : 'text-orange-500'
-              }`}>
-                {item.difference > 0 ? '+' : '−'}{Math.abs(item.difference)}
-              </span>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {result.pending && <p className="text-xs text-amber-700 text-center mb-3">Guardado en este dispositivo. Pendiente de sincronizar.</p>}

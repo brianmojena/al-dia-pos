@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { emptyData, project, prepareOperation, applyOperation } from './offlineModel.js'
 import { applyPendingSales } from './offlineStock.js'
-import { formatPackStock } from './units.js'
+import { formatPackStock, packCountTotal } from './units.js'
 
 const user = { id: 1, role: 'dueño', email: 'owner@test.local', transfer_limit: 200 }
 const fixture = () => ({ base: { ...emptyData(), products: [{ id: 10, name: 'Popular', purchase_price: 15, sale_price: 20, stock: 60, pack_size: 20, pack_price: 300 }] }, outbox: [], nextId: -1 })
@@ -130,4 +130,38 @@ test('dueño convierte producto con pack a peso: pack_size y pack_price quedan n
   assert.equal(edited.result.pack_size, null)
   assert.equal(edited.result.pack_price, null)
   assert.equal(edited.result.unit, 'lb')
+})
+
+test('packCountTotal: 3 paquetes de 20 + 7 sueltos = 67', () => {
+  assert.equal(packCountTotal(3, 7, 20), 67)
+})
+
+test('packCountTotal: solo sueltos (packs vacío) = 5', () => {
+  assert.equal(packCountTotal('', 5, 20), 5)
+})
+
+test('packCountTotal: solo paquetes (sueltos vacío) = 40', () => {
+  assert.equal(packCountTotal(2, '', 20), 40)
+})
+
+test('packCountTotal: ambos campos vacíos retorna null', () => {
+  assert.equal(packCountTotal('', '', 20), null)
+})
+
+test('packCountTotal: valores negativos retornan null', () => {
+  assert.equal(packCountTotal(-1, 5, 20), null)
+  assert.equal(packCountTotal(2, -3, 20), null)
+})
+
+test('packCountTotal: valores decimales retornan null', () => {
+  assert.equal(packCountTotal(2.5, 5, 20), null)
+  assert.equal(packCountTotal(3, 5.7, 20), null)
+})
+
+test('packCountTotal: strings numéricos válidos funcionan', () => {
+  assert.equal(packCountTotal('2', '5', 20), 45)
+})
+
+test('packCountTotal: strings con espacios se tratan', () => {
+  assert.equal(packCountTotal('  3  ', '  7  ', 20), 67)
 })

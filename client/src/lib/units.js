@@ -48,3 +48,25 @@ export function formatPackStock(stock, packSize) {
   if (!packs) return `${formatQty(loose, null)} sueltos`
   return loose ? `${packs} paq + ${formatQty(loose, null)} sueltos` : `${packs} paq`
 }
+
+// Calcula el total de sueltos a partir de paquetes y sueltos individuales.
+// Devuelve null si los valores son inválidos (vacíos ambos, negativos, decimales).
+// Ambos campos '' se tratan como 0. Si alguno es no-vacío, ambos deben ser enteros ≥0.
+export function packCountTotal(packs, loose, packSize) {
+  const p = String(packs).trim()
+  const l = String(loose).trim()
+
+  // Si ambos están vacíos, retorna null (no se contó nada).
+  if (p === '' && l === '') return null
+
+  // Convierte campos vacíos a 0, los no-vacíos a número.
+  const packNum = p === '' ? 0 : Number(p)
+  const looseNum = l === '' ? 0 : Number(l)
+
+  // Valida que sean números finitos, enteros y no-negativos.
+  if (!Number.isFinite(packNum) || !Number.isInteger(packNum) || packNum < 0) return null
+  if (!Number.isFinite(looseNum) || !Number.isInteger(looseNum) || looseNum < 0) return null
+
+  // Devuelve el total en sueltos.
+  return packNum * Number(packSize) + looseNum
+}
