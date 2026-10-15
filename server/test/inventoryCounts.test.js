@@ -13,6 +13,9 @@ const { startTestServer, registerUser, createProduct } = require('./helpers');
 const contar = (api, token, items, extra = {}) =>
   api('POST', '/api/inventory-counts', { token, body: { items, ...extra } });
 
+const corregir = (api, token, countId, items) =>
+  api('PUT', `/api/inventory-counts/${countId}`, { token, body: { items } });
+
 const stockDe = async (ctx, productId) => {
   const r = await ctx.db.execute({ sql: 'SELECT stock FROM products WHERE id = ?', args: [productId] });
   return Number(r.rows[0].stock);
@@ -235,5 +238,141 @@ test('arqueo de inventario', async (t) => {
     const intento = await contar(ctx.api, dueñoB, [{ product_id: productoA, counted: 0 }]);
     assert.equal(intento.status, 400);
     assert.equal(await stockDe(ctx, productoA), 20, 'el stock de A quedó como lo dejó A');
+  });
+
+  await t.test('corregir un arqueo: 10→7 (stock 7), luego PUT 7→9 (stock 9)', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, {
+      name: 'Arroz', stock: 10, sale_price: 130, purchase_price: 80,
+    });
+
+    // Contar 7, stock queda en 7.
+    const arqueo = await contar(ctx.api, token, [{ product_id: productId, counted: 7 }]);
+    assert.equal(arqueo.status, 201);
+    assert.equal(await stockDe(ctx, productId), 7);
+    assert.equal(Number(arqueo.body.units_missing), 3);
+    assert.equal(Number(arqueo.body.items[0].difference), -3);
+
+    // Corregir a 9: stock sube a 9.
+    const itemId = arqueo.body.items[0].id;
+    const correccion = await corregir(ctx.api, token, arqueo.body.id, [{ item_id: itemId, counted: 9 }]);
+    assert.equal(correccion.status, 200);
+    assert.equal(await stockDe(ctx, productId), 9);
+
+    // La línea cambió: difference = 9 - 10 = -1.
+    assert.equal(Number(correccion.body.items[0].counted), 9);
+    assert.equal(Number(correccion.body.items[0].difference), -1);
+
+    // Los agregados se recomputaron: units_missing = 1 (no 3).
+    assert.equal(Number(correccion.body.units_missing), 1);
+    assert.equal(Number(correccion.body.value_missing), 130);
+
+    // Existe un stock_entries con kind='correccion'.
+    const entries = await ctx.db.execute({
+      sql: 'SELECT * FROM stock_entries WHERE product_id = ? ORDER BY created_at DESC LIMIT 1',
+      args: [productId],
+    });
+    assert.equal(entries.rows.length, 1);
+    assert.equal(entries.rows[0].kind, 'correccion');
+    assert.equal(Number(entries.rows[0].stock_before), 7);
+    assert.equal(Number(entries.rows[0].stock_after), 9);
+    assert.ok(entries.rows[0].reason.includes('Corrección del arqueo'));
+  });
+
+  await t.test('corregir con una venta en el medio: stock sigue siendo correcto', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, {
+      name: 'Café', stock: 10, sale_price: 100, purchase_price: 60,
+    });
+
+    // Contar 7, stock queda en 7.
+    const arqueo = await contar(ctx.api, token, [{ product_id: productId, counted: 7 }]);
+    assert.equal(await stockDe(ctx, productId), 7);
+
+    // Venta de 2 unidades después del conteo: stock baja a 5.
+    await ctx.api('POST', '/api/sales', {
+      token,
+      body: { items: [{ product_id: productId, quantity: 2, unit_price: 100 }], payment_method: 'efectivo' },
+    });
+    assert.equal(await stockDe(ctx, productId), 5);
+
+    // Corregir la línea a 9: stock sube a 5 + (9 - 7) = 7.
+    const itemId = arqueo.body.items[0].id;
+    const correccion = await corregir(ctx.api, token, arqueo.body.id, [{ item_id: itemId, counted: 9 }]);
+    assert.equal(correccion.status, 200);
+    assert.equal(await stockDe(ctx, productId), 7);
+
+    // La diferencia es 9 - 10 = -1.
+    assert.equal(Number(correccion.body.items[0].difference), -1);
+  });
+
+  await t.test('no se puede corregir un producto que se volvió a contar después', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, {
+      name: 'Pan', stock: 30, sale_price: 50,
+    });
+
+    // Primer conteo: 28 unidades.
+    const arqueo1 = await contar(ctx.api, token, [{ product_id: productId, counted: 28 }]);
+    const itemId1 = arqueo1.body.items[0].id;
+
+    // Segundo conteo (más tarde): 27 unidades.
+    const arqueo2 = await contar(ctx.api, token, [{ product_id: productId, counted: 27 }]);
+
+    // No se puede corregir el primer arqueo para este producto.
+    const correccion = await corregir(ctx.api, token, arqueo1.body.id, [
+      { item_id: itemId1, counted: 25 },
+    ]);
+    assert.equal(correccion.status, 409);
+    assert.ok(correccion.body.error.includes('se volvió a contar en un arqueo más nuevo'));
+
+    // GET del primer arqueo debe marcar recounted_later=true.
+    const detalle = await ctx.api('GET', `/api/inventory-counts/${arqueo1.body.id}`, { token });
+    assert.equal(detalle.status, 200);
+    assert.equal(detalle.body.items[0].recounted_later, true);
+  });
+
+  await t.test('un cajero no puede corregir un arqueo (403)', async () => {
+    const dueño = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, dueño, {
+      name: 'Sal', stock: 10, sale_price: 40,
+    });
+
+    const arqueo = await contar(ctx.api, dueño, [{ product_id: productId, counted: 8 }]);
+    const itemId = arqueo.body.items[0].id;
+
+    // Crear un cajero.
+    const email = `caj${Date.now()}@test.local`;
+    await ctx.api('POST', '/api/auth/cashiers', {
+      token: dueño,
+      body: { email, password: 'caja1234' },
+    });
+    const login = await ctx.api('POST', '/api/auth/login', {
+      body: { email, password: 'caja1234' },
+    });
+    const cajeroToken = login.body.token;
+
+    // El cajero intenta corregir: 403.
+    const intento = await corregir(ctx.api, cajeroToken, arqueo.body.id, [
+      { item_id: itemId, counted: 10 },
+    ]);
+    assert.equal(intento.status, 403);
+    assert.equal(await stockDe(ctx, productId), 8, 'el stock no cambió');
+  });
+
+  await t.test('corregir un arqueo de otra tienda devuelve 404', async () => {
+    const dueñoA = await registerUser(ctx.api);
+    const dueñoB = await registerUser(ctx.api);
+    const productoA = await createProduct(ctx.api, dueñoA, {
+      name: 'Producto', stock: 20, sale_price: 100,
+    });
+
+    const arqueoA = await contar(ctx.api, dueñoA, [{ product_id: productoA, counted: 18 }]);
+    const itemId = arqueoA.body.items[0].id;
+
+    const intento = await corregir(ctx.api, dueñoB, arqueoA.body.id, [
+      { item_id: itemId, counted: 19 },
+    ]);
+    assert.equal(intento.status, 404);
   });
 });

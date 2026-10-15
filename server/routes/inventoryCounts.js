@@ -6,6 +6,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { validQuantity, roundQty } = require('../lib/units');
+const { stockChangeStatement } = require('../lib/stockLog');
 
 /**
  * Arqueo de inventario.
@@ -63,7 +64,28 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   if (!count) return res.status(404).json({ error: 'Arqueo no encontrado' });
 
   const items = await loadItems(db, count.id);
-  res.json({ ...count, items: items.rows });
+
+  // Para cada línea, comprobar si el mismo producto se volvió a contar después en un arqueo más nuevo.
+  // Más nuevo = counted_at posterior, o mismo counted_at pero id posterior.
+  const newerCounts = await db.execute({
+    sql: `SELECT DISTINCT product_id FROM inventory_count_items
+          WHERE count_id IN (
+            SELECT id FROM inventory_counts
+            WHERE user_id = ? AND (
+              counted_at > ? OR
+              (counted_at = ? AND id > ?)
+            )
+          )`,
+    args: [req.userId, count.counted_at, count.counted_at, count.id],
+  });
+  const recounteProductIds = new Set(newerCounts.rows.map(r => r.product_id));
+
+  const itemsWithRecounted = items.rows.map(item => ({
+    ...item,
+    recounted_later: recounteProductIds.has(item.product_id),
+  }));
+
+  res.json({ ...count, items: itemsWithRecounted });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -212,6 +234,288 @@ router.post('/', asyncHandler(async (req, res) => {
         return res.status(200).json({ ...existing.rows[0], items: previos.rows, idempotent_replay: true });
       }
     }
+    throw err;
+  }
+}));
+
+// PUT /:id - Corregir líneas de un arqueo anterior (solo el dueño)
+router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
+  const { items: updateItems } = req.body;
+
+  if (!Array.isArray(updateItems)) {
+    return res.status(400).json({ error: 'items debe ser un array' });
+  }
+
+  const db = getDb();
+
+  // Validar que el arqueo existe y pertenece al usuario.
+  const countResult = await db.execute({
+    sql: 'SELECT * FROM inventory_counts WHERE id = ? AND user_id = ?',
+    args: [req.params.id, req.userId],
+  });
+  const count = countResult.rows[0];
+  if (!count) return res.status(404).json({ error: 'Arqueo no encontrado' });
+
+  // No se pueden corregir arqueos pendientes de sincronizar (id < 0 o negative).
+  if (Number(count.id) < 0) {
+    return res.status(400).json({
+      error: 'Pendiente de sincronizar: aún no se puede corregir.',
+    });
+  }
+
+  // Validar que todos los item_id pertenecen a este arqueo.
+  const existingItems = await db.execute({
+    sql: 'SELECT id, product_id FROM inventory_count_items WHERE count_id = ?',
+    args: [count.id],
+  });
+  const existingItemIds = new Set(existingItems.rows.map(i => i.id));
+  const existingProductIds = new Map(existingItems.rows.map(i => [i.id, i.product_id]));
+
+  for (const item of updateItems) {
+    if (!Number.isFinite(item.item_id) || !Number.isFinite(item.counted)) {
+      return res.status(400).json({
+        error: 'item_id y counted deben ser números válidos',
+      });
+    }
+    if (item.counted < 0) {
+      return res.status(400).json({
+        error: 'Las cantidades contadas deben ser ≥ 0',
+      });
+    }
+    if (!existingItemIds.has(item.item_id)) {
+      return res.status(400).json({
+        error: 'Una línea no pertenece a este arqueo',
+      });
+    }
+  }
+
+  // Detectar duplicados en updateItems.
+  const itemIds = updateItems.map(i => i.item_id);
+  if (new Set(itemIds).size !== itemIds.length) {
+    return res.status(400).json({
+      error: 'Un item aparece repetido en la corrección',
+    });
+  }
+
+  const tx = await db.transaction('write');
+  try {
+    // Comprobar si algún producto se volvió a contar en un arqueo más nuevo.
+    const newerCountsResult = await tx.execute({
+      sql: `SELECT DISTINCT product_id FROM inventory_count_items
+            WHERE count_id IN (
+              SELECT id FROM inventory_counts
+              WHERE user_id = ? AND (
+                counted_at > ? OR
+                (counted_at = ? AND id > ?)
+              )
+            )`,
+      args: [req.userId, count.counted_at, count.counted_at, count.id],
+    });
+    const newerProductIds = new Set(newerCountsResult.rows.map(r => r.product_id));
+
+    // Cargar las líneas que se van a corregir.
+    const linesToCorrect = await tx.execute({
+      sql: `SELECT * FROM inventory_count_items
+            WHERE count_id = ? AND id IN (${updateItems.map(() => '?').join(',')})`,
+      args: [count.id, ...updateItems.map(i => i.item_id)],
+    });
+    const linesByItemId = new Map(linesToCorrect.rows.map(line => [line.id, line]));
+
+    // Validar que ningún producto a corregir aparece en un arqueo más nuevo.
+    for (const item of updateItems) {
+      const line = linesByItemId.get(item.item_id);
+      if (newerProductIds.has(line.product_id)) {
+        await tx.rollback();
+        // Obtener el nombre del producto fuera de la transacción.
+        const newerProduct = await db.execute({
+          sql: 'SELECT name FROM products WHERE id = ? LIMIT 1',
+          args: [line.product_id],
+        });
+        const productName = newerProduct.rows[0]?.name || 'el producto';
+        return res.status(409).json({
+          error: `${productName} se volvió a contar en un arqueo más nuevo; corrígelo allí`,
+        });
+      }
+    }
+
+    // Obtener el producto y stock actual para cada línea a corregir.
+    const correctionDetails = [];
+    for (const item of updateItems) {
+      const line = linesByItemId.get(item.item_id);
+      const productResult = await tx.execute({
+        sql: 'SELECT id, name, stock, unit, track_stock, sale_price FROM products WHERE id = ? AND user_id = ?',
+        args: [line.product_id, req.userId],
+      });
+      const product = productResult.rows[0];
+
+      // Comprobar que el producto existe y sigue llevando control de stock.
+      if (!product) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: 'Producto no existe',
+        });
+      }
+      if (product.unit && Number(product.track_stock) !== 1) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: `${product.name} no lleva control de stock`,
+        });
+      }
+
+      // Validar la nueva cantidad.
+      const counted = Number(item.counted);
+      if (!validQuantity(counted, product.unit)) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: product.unit
+            ? `La cantidad contada de ${product.name} admite hasta 3 decimales`
+            : `${product.name} se cuenta en unidades enteras`,
+        });
+      }
+
+      // Solo procesar si cambió.
+      if (Number(line.counted) === counted) continue;
+
+      correctionDetails.push({
+        itemId: item.item_id,
+        line,
+        product,
+        currentStock: Number(product.stock),
+        oldCounted: Number(line.counted),
+        newCounted: counted,
+      });
+    }
+
+    // Si no hay cambios, devolver el arqueo sin modificar.
+    if (correctionDetails.length === 0) {
+      await tx.rollback();
+      const items = await loadItems(db, count.id);
+      const newerCounts = await db.execute({
+        sql: `SELECT DISTINCT product_id FROM inventory_count_items
+              WHERE count_id IN (
+                SELECT id FROM inventory_counts
+                WHERE user_id = ? AND (
+                  counted_at > ? OR
+                  (counted_at = ? AND id > ?)
+                )
+              )`,
+        args: [req.userId, count.counted_at, count.counted_at, count.id],
+      });
+      const recounteProductIds = new Set(newerCounts.rows.map(r => r.product_id));
+      const itemsWithRecounted = items.rows.map(item => ({
+        ...item,
+        recounted_later: recounteProductIds.has(item.product_id),
+      }));
+      return res.json({ ...count, items: itemsWithRecounted });
+    }
+
+    // Aplicar correcciones: actualizar stock y línea.
+    const account = await describeAccount(db, req);
+
+    for (const detail of correctionDetails) {
+      const { itemId, line, product, currentStock, oldCounted, newCounted } = detail;
+
+      // Cambio esperado: con la corrección, la diferencia NEW = newCounted - expected.
+      const oldDifference = roundQty(oldCounted - line.expected);
+      const newDifference = roundQty(newCounted - line.expected);
+
+      // Stock nuevo: oldCounted fue ajustado, ahora corregimos a newCounted.
+      // Si oldCounted = 10 y el stock está a 10, corrección a 12 deja stock en 12.
+      // Fórmula: newStock = currentStock + (newCounted - oldCounted).
+      const newStock = roundQty(Math.max(0, currentStock + (newCounted - oldCounted)));
+
+      // Actualizar el stock del producto.
+      await tx.execute({
+        sql: 'UPDATE products SET stock = ? WHERE id = ? AND user_id = ?',
+        args: [newStock, product.id, req.userId],
+      });
+
+      // Anotar en stock_entries.
+      const reason = `Corrección del arqueo del ${new Date(count.counted_at).toLocaleDateString('es-ES')}`;
+      const correction = stockChangeStatement({
+        userId: req.userId,
+        product: { id: product.id, name: product.name },
+        before: currentStock,
+        after: newStock,
+        account,
+        kind: 'correccion',
+        reason,
+      });
+      if (correction) {
+        await tx.execute(correction);
+      }
+
+      // Actualizar la línea: counted y difference.
+      await tx.execute({
+        sql: `UPDATE inventory_count_items SET counted = ?, difference = ?
+              WHERE id = ?`,
+        args: [newCounted, newDifference, itemId],
+      });
+    }
+
+    // Recomputar agregados del arqueo desde todas sus líneas (POST hace lo mismo).
+    const allItemsAfter = await tx.execute({
+      sql: 'SELECT counted, expected, difference, unit_price FROM inventory_count_items WHERE count_id = ?',
+      args: [count.id],
+    });
+
+    let newLineCount = allItemsAfter.rows.length;
+    let newWithDifference = 0;
+    let newUnitsMissing = 0;
+    let newUnitsExtra = 0;
+    let newValueMissing = 0;
+
+    for (const item of allItemsAfter.rows) {
+      const diff = roundQty(Number(item.difference) || 0);
+      if (diff !== 0) {
+        newWithDifference += 1;
+        if (diff < 0) {
+          newUnitsMissing += -diff;
+          newValueMissing += (-diff) * Number(item.unit_price || 0);
+        } else {
+          newUnitsExtra += diff;
+        }
+      }
+    }
+
+    // Actualizar los agregados del arqueo.
+    await tx.execute({
+      sql: `UPDATE inventory_counts
+            SET lines_count = ?, products_with_difference = ?,
+                units_missing = ?, units_extra = ?, value_missing = ?
+            WHERE id = ?`,
+      args: [newLineCount, newWithDifference, roundQty(newUnitsMissing),
+             roundQty(newUnitsExtra), Math.round(newValueMissing * 100) / 100, count.id],
+    });
+
+    await tx.commit();
+
+    // Devolver el arqueo actualizado con recounted_later.
+    const updatedCount = await db.execute({
+      sql: 'SELECT * FROM inventory_counts WHERE id = ?',
+      args: [count.id],
+    });
+    const updatedItems = await loadItems(db, count.id);
+    const newerCounts = await db.execute({
+      sql: `SELECT DISTINCT product_id FROM inventory_count_items
+            WHERE count_id IN (
+              SELECT id FROM inventory_counts
+              WHERE user_id = ? AND (
+                counted_at > ? OR
+                (counted_at = ? AND id > ?)
+              )
+            )`,
+      args: [req.userId, count.counted_at, count.counted_at, count.id],
+    });
+    const recounteProductIds = new Set(newerCounts.rows.map(r => r.product_id));
+    const itemsWithRecounted = updatedItems.rows.map(item => ({
+      ...item,
+      recounted_later: recounteProductIds.has(item.product_id),
+    }));
+
+    res.json({ ...updatedCount.rows[0], items: itemsWithRecounted });
+  } catch (err) {
+    await tx.rollback().catch(() => { /* la transacción ya estaba cerrada */ });
     throw err;
   }
 }));
