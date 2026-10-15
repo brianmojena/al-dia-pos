@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
 const { todayBounds, boundsForDate } = require('../lib/businessDay');
-const { PAYMENT_METHODS, paymentSplit, foreignFields, round2, purchaseSplit, purchaseFields } = require('../lib/payment');
+const { PAYMENT_METHODS, paymentSplit, foreignFields, round2, purchaseSplit, purchaseFields, WITHDRAWAL_METHODS, withdrawalSplit, withdrawalFields } = require('../lib/payment');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -19,14 +19,14 @@ function setSession({
   const db = getLocalDb();
   db.prepare(`
     INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, warehouse_enabled, updated_at)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'))
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id, email = excluded.email, store_name = excluded.store_name,
       plan = excluded.plan, token = excluded.token,
       transfer_limit = excluded.transfer_limit, usd_rate = excluded.usd_rate,
       eur_rate = excluded.eur_rate, role = excluded.role,
       warehouse_enabled = excluded.warehouse_enabled,
-      updated_at = datetime('now')
+      updated_at = datetime(\'now\')
   `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, toFlag(warehouse_enabled));
 }
 
@@ -42,7 +42,7 @@ const toFlag = (value) => (value == null ? null : value ? 1 : 0);
 function updateSessionSettings({ transfer_limit = null, usd_rate = null, eur_rate = null, warehouse_enabled = null }) {
   const db = getLocalDb();
   db.prepare(`
-    UPDATE session SET transfer_limit = ?, usd_rate = ?, eur_rate = ?, warehouse_enabled = ?, updated_at = datetime('now') WHERE id = 1
+    UPDATE session SET transfer_limit = ?, usd_rate = ?, eur_rate = ?, warehouse_enabled = ?, updated_at = datetime(\'now\') WHERE id = 1
   `).run(transfer_limit, usd_rate, eur_rate, toFlag(warehouse_enabled));
 }
 
@@ -73,6 +73,7 @@ function prepareDeltaSession(userId) {
       setSyncState('delta_user_id', userId);
       setSyncState('delta_after_sale', 0);
       setSyncState('delta_after_purchase', 0);
+      setSyncState('delta_after_withdrawal', 0);
       setSyncState('delta_after_close', 0);
       setSyncState('delta_after_count', 0);
       setSyncState('delta_after_correction', 0);
@@ -82,6 +83,7 @@ function prepareDeltaSession(userId) {
   return {
     sale: Number(getSyncState('delta_after_sale') || 0),
     purchase: Number(getSyncState('delta_after_purchase') || 0),
+    withdrawal: Number(getSyncState('delta_after_withdrawal') || 0),
     close: Number(getSyncState('delta_after_close') || 0),
     count: Number(getSyncState('delta_after_count') || 0),
     correction: Number(getSyncState('delta_after_correction') || 0),
@@ -676,6 +678,117 @@ function listCurrencyPurchases({ date } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Extracción de caja
+// ---------------------------------------------------------------------------
+
+/**
+ * Registra sin red una extracción de dinero. Solo el dueño puede hacerlo.
+ * Fila y outbox se guardan en una sola transacción, igual que una compra.
+ */
+function createWithdrawalLocal(body = {}) {
+  const session = getSession();
+  if (session?.role === 'cajero') {
+    throw Object.assign(new Error('Solo el dueño puede extraer dinero'), { code: 'UNAUTHORIZED' });
+  }
+
+  let fields;
+  try { fields = withdrawalFields(body); }
+  catch (error) { throw Object.assign(error, { code: 'BAD_WITHDRAWAL' }); }
+
+  const db = getLocalDb();
+  const clientWithdrawalId = crypto.randomUUID();
+  const registerId = getRegisterId();
+  const accountEmail = session?.email ?? null;
+
+  const create = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO cash_withdrawals
+        (client_withdrawal_id, origin, register_id, account_email, method, amount, note)
+      VALUES (?, 'local', ?, ?, ?, ?, ?)
+    `).run(clientWithdrawalId, registerId, accountEmail, fields.method, fields.amount, fields.note);
+    const withdrawalId = result.lastInsertRowid;
+    const row = db.prepare('SELECT * FROM cash_withdrawals WHERE id = ?').get(withdrawalId);
+
+    enqueueOutbox(db, {
+      op_type: 'cash_withdrawal.create',
+      client_op_id: clientWithdrawalId,
+      local_ref_id: withdrawalId,
+      payload: {
+        client_withdrawal_id: clientWithdrawalId,
+        method: fields.method,
+        amount: fields.amount,
+        note: fields.note,
+        register_id: registerId,
+        withdrawn_at: `${row.created_at.replace(' ', 'T')}Z`,
+      },
+    });
+    return row;
+  });
+  return create();
+}
+
+function listWithdrawals({ date, open } = {}) {
+  const db = getLocalDb();
+  if (open) {
+    return db.prepare(
+      'SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL ORDER BY created_at DESC, id DESC'
+    ).all();
+  }
+  if (date) {
+    const { start, end } = boundsForDate(date);
+    return db.prepare(
+      'SELECT * FROM cash_withdrawals WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC, id DESC'
+    ).all(start, end);
+  }
+  return db.prepare('SELECT * FROM cash_withdrawals ORDER BY created_at DESC, id DESC LIMIT 200').all();
+}
+
+/**
+ * Anula una extracción (idempotente si ya estaba anulada).
+ * 409 si ya fue cubierta por un cierre.
+ * 404 si no existe.
+ */
+function voidWithdrawalLocal(clientWithdrawalId) {
+  const session = getSession();
+  if (session?.role === 'cajero') {
+    throw Object.assign(new Error('Solo el dueño puede anular extracciones'), { code: 'UNAUTHORIZED' });
+  }
+
+  const db = getLocalDb();
+  const void_fn = db.transaction(() => {
+    const existing = db.prepare('SELECT * FROM cash_withdrawals WHERE client_withdrawal_id = ?').get(clientWithdrawalId);
+    if (!existing) {
+      throw Object.assign(new Error('No encontrada'), { code: 'NOT_FOUND', status: 404 });
+    }
+    if (existing.cash_close_id !== null) {
+      throw Object.assign(
+        new Error('Esta extracción ya entró en un cierre de caja y no se puede anular'),
+        { code: 'COVERED', status: 409 }
+      );
+    }
+    if (existing.voided_at) {
+      // Ya estaba anulada: idempotente, devuelve la misma.
+      return existing;
+    }
+    
+    // Anular
+    db.prepare('UPDATE cash_withdrawals SET voided_at = datetime(\'now\') WHERE id = ?')
+      .run(existing.id);
+
+    enqueueOutbox(db, {
+      op_type: 'cash_withdrawal.void',
+      client_op_id: `${clientWithdrawalId}-void`,
+      local_ref_id: existing.id,
+      payload: { client_withdrawal_id: clientWithdrawalId },
+    });
+
+    return db.prepare('SELECT * FROM cash_withdrawals WHERE id = ?').get(existing.id);
+  });
+  return void_fn();
+}
+
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
@@ -692,12 +805,20 @@ function pendingHoldings() {
     `SELECT foreign_currency, foreign_amount, cup_amount
      FROM currency_purchases WHERE origin = 'local' AND cash_close_id IS NULL AND server_id IS NULL`
   ).all();
+  const withdrawals = db.prepare(
+    `SELECT method, amount, voided_at
+     FROM cash_withdrawals WHERE origin = 'local' AND cash_close_id IS NULL AND server_id IS NULL`
+  ).all();
   for (const sale of sales) {
     const split = paymentSplit(sale);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
   for (const purchase of purchases) {
     const split = purchaseSplit(purchase);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+  for (const withdrawal of withdrawals) {
+    const split = withdrawalSplit(withdrawal);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
   return holdings;
@@ -741,6 +862,10 @@ function getDashboard() {
     const split = purchaseSplit(purchase);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
+  for (const withdrawal of periodWithdrawals(db)) {
+    const split = withdrawalSplit(withdrawal);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inv = db.prepare(`
@@ -749,7 +874,11 @@ function getDashboard() {
   `).get();
   const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: round3(inv.units) };
 
-  return { today: todayStats, holdings, inventory, lowStock, recentSales, audit: { offRateSales: offRate.n } };
+  const openWithdrawals = db.prepare(
+    `SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at DESC, id DESC`
+  ).all();
+
+  return { today: todayStats, holdings, inventory, lowStock, recentSales, audit: { offRateSales: offRate.n }, open_withdrawals: openWithdrawals };
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +915,16 @@ const periodPurchases = (db, wholeShop = false) =>
      FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : "origin = 'local'"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
+// Extracciones de caja que ningún arqueo ha cubierto todavía.
+// El cierre toma TODAS (de cualquier origen) porque la dueña extrae por teléfono
+// pero el cajero cierra en la laptop: el cierre es de la tienda entera.
+const periodWithdrawals = (db) =>
+  db.prepare(
+    `SELECT id, client_withdrawal_id, method, amount, voided_at, created_at
+     FROM cash_withdrawals WHERE cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all();
+
+
 /**
  * Describe el período abierto SIN revelar cuánto debería haber.
  *
@@ -799,13 +938,14 @@ function getCurrentCashPeriod() {
   const periodStart = getPeriodStart(db);
   const sales = periodSales(db, isWholeShop());
   const purchases = periodPurchases(db, isWholeShop());
+  const withdrawals = periodWithdrawals(db);
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
-  const firstAt = [sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? null;
+  const firstAt = [sales[0]?.created_at, purchases[0]?.created_at, withdrawals[0]?.created_at].filter(Boolean).sort()[0] ?? null;
 
   return {
     opened_at: isFirstClose ? firstAt : periodStart,
     is_first_close: isFirstClose,
-    has_sales: sales.length > 0 || purchases.length > 0,
+    has_sales: sales.length > 0 || purchases.length > 0 || withdrawals.length > 0,
   };
 }
 
@@ -851,33 +991,48 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
     const wholeShop = isWholeShop();
     const sales = periodSales(db, wholeShop);
     const purchases = periodPurchases(db, wholeShop);
+    const withdrawals = periodWithdrawals(db);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
     // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
     const sumOf = (key) => round2(
       sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0)
       + purchases.reduce((sum, p) => sum + purchaseSplit(p)[key], 0)
+      + withdrawals.reduce((sum, w) => sum + withdrawalSplit(w)[key], 0)
     );
     const cash = sumOf('cash');
     const transfer = sumOf('transfer');
     const usd = sumOf('usd');
     const eur = sumOf('eur');
 
+    // Calcula los totales de lo extraído (positivos, para guardar en withdrawn_*)
+    const withdrawnOf = (method) => round2(
+      withdrawals
+        .filter(w => !w.voided_at && w.method === method)
+        .reduce((sum, w) => sum + w.amount, 0)
+    );
+    const withdrawnCash = withdrawnOf('efectivo');
+    const withdrawnTransfer = withdrawnOf('transferencia');
+    const withdrawnUsd = withdrawnOf('USD');
+    const withdrawnEur = withdrawnOf('EUR');
+
     const expectedCash = float + cash;
     const openedAt = periodStart === BEGINNING_OF_TIME
-      ? ([sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
+      ? ([sales[0]?.created_at, purchases[0]?.created_at, withdrawals[0]?.created_at].filter(Boolean).sort()[0] ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
       : periodStart;
 
     const result = db.prepare(`
       INSERT INTO cash_closes
         (client_close_id, origin, register_id, opened_at, opening_float, expected_cash, counted_cash,
          difference, expected_transfer, sales_count, note, account_email,
-         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur)
-      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur,
+         withdrawn_cash, withdrawn_transfer, withdrawn_usd, withdrawn_eur)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       clientCloseId, registerId, openedAt, float, expectedCash, counted,
       counted - expectedCash, transfer, sales.length, note, email,
-      usd, countedUsd, round2(countedUsd - usd), eur, countedEur, round2(countedEur - eur)
+      usd, countedUsd, round2(countedUsd - usd), eur, countedEur, round2(countedEur - eur),
+      withdrawnCash, withdrawnTransfer, withdrawnUsd, withdrawnEur
     );
     const closeId = result.lastInsertRowid;
 
@@ -895,6 +1050,12 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         .run(closeId, ...purchases.map((p) => p.client_purchase_id));
     }
 
+    if (withdrawals.length > 0) {
+      const placeholders = withdrawals.map(() => '?').join(',');
+      db.prepare(`UPDATE cash_withdrawals SET cash_close_id = ? WHERE client_withdrawal_id IN (${placeholders}) AND cash_close_id IS NULL AND voided_at IS NULL`)
+        .run(closeId, ...withdrawals.map((w) => w.client_withdrawal_id));
+    }
+
     enqueueOutbox(db, {
       op_type: 'cash_close.create',
       client_op_id: clientCloseId,
@@ -909,6 +1070,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         closed_at: db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at,
         client_sale_ids: sales.map(s => s.client_sale_id),
         client_purchase_ids: purchases.map(p => p.client_purchase_id),
+        client_withdrawal_ids: withdrawals.filter(w => !w.voided_at).map(w => w.client_withdrawal_id),
       },
     });
 
@@ -1119,7 +1281,7 @@ function applyServerDelta(page) {
     throw new Error('Delta del servidor inválido');
   }
   const db = getLocalDb();
-  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0 };
+  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0 };
   const apply = db.transaction(() => {
     const insertSale = db.prepare(`
       INSERT INTO sales
@@ -1178,6 +1340,32 @@ function applyServerDelta(page) {
       );
       markClosedOnServer(db, 'currency_purchases', Number(purchaseRow.lastInsertRowid), purchase.cash_close_id);
       stats.purchases++;
+    }
+
+    // Extracciones de caja del servidor: se registran y cuentan para el cierre del dueño.
+    const insertWithdrawal = db.prepare(`
+      INSERT INTO cash_withdrawals
+        (server_id, client_withdrawal_id, origin, register_id, account_email, method, amount, note, voided_at, created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const withdrawal of page.cash_withdrawals || []) {
+      const clientWithdrawalId = withdrawal.client_withdrawal_id || `srv-${withdrawal.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM cash_withdrawals WHERE client_withdrawal_id = ?').get(clientWithdrawalId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE cash_withdrawals SET server_id = ? WHERE id = ?').run(Number(withdrawal.id), existing.id);
+        // Marcar como cubierta si el servidor dice que lo está
+        if (withdrawal.cash_close_id) {
+          markClosedOnServer(db, 'cash_withdrawals', existing.id, withdrawal.cash_close_id);
+        }
+        continue;
+      }
+      const withdrawalRow = insertWithdrawal.run(
+        Number(withdrawal.id), clientWithdrawalId, withdrawal.register_id ?? null, withdrawal.account_email ?? null,
+        withdrawal.method, Number(withdrawal.amount) || 0, withdrawal.note ?? null,
+        withdrawal.voided_at ?? null, withdrawal.created_at,
+      );
+      markClosedOnServer(db, 'cash_withdrawals', Number(withdrawalRow.lastInsertRowid), withdrawal.cash_close_id);
+      stats.withdrawals++;
     }
 
     const insertClose = db.prepare(`
@@ -1247,6 +1435,8 @@ function applyServerDelta(page) {
     setSyncState('delta_after_sale', page.cursors.sale);
     // Un servidor anterior a esta función no manda el cursor de compras.
     if (page.cursors.purchase != null) setSyncState('delta_after_purchase', page.cursors.purchase);
+    // Un servidor anterior a esta función no manda el cursor de extracciones.
+    if (page.cursors.withdrawal != null) setSyncState('delta_after_withdrawal', page.cursors.withdrawal);
     setSyncState('delta_after_close', page.cursors.close);
     setSyncState('delta_after_count', page.cursors.count);
 
@@ -1454,6 +1644,7 @@ module.exports = {
   listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog,
   createSaleLocal, listSales, getSale,
   createCurrencyPurchaseLocal, listCurrencyPurchases,
+  createWithdrawalLocal, listWithdrawals, voidWithdrawalLocal,
   getDashboard, pendingHoldings,
   getCurrentCashPeriod, createCashCloseLocal, getCashClose, listCashCloses, cashCloseSummary,
   createInventoryCountLocal, listInventoryCounts, getInventoryCount,

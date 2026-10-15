@@ -162,6 +162,33 @@ function buildRequest(db, row) {
         },
       };
 
+    case 'cash_withdrawal.create':
+      return {
+        method: 'POST',
+        path: '/api/cash-withdrawals',
+        body: {
+          client_withdrawal_id: payload.client_withdrawal_id,
+          method: payload.method,
+          amount: payload.amount,
+          note: payload.note ?? null,
+          withdrawn_at: payload.withdrawn_at,
+          register_id: registerId,
+        },
+        onSuccess: (data) => {
+          db.prepare('UPDATE cash_withdrawals SET server_id = ? WHERE client_withdrawal_id = ?')
+            .run(data.id, payload.client_withdrawal_id);
+        },
+      };
+
+    case 'cash_withdrawal.void':
+      return {
+        method: 'POST',
+        path: `/api/cash-withdrawals/${payload.client_withdrawal_id}/void`,
+        onSuccess: () => {
+          // No hay nada que actualizar: la alineación viene del delta.
+        },
+      };
+
     case 'cash_close.create': {
       // El cierre viaja con los client_sale_id que cubrió, NO con fechas: el
       // servidor le pone a cada venta sincronizada su propia hora de llegada,
@@ -184,7 +211,12 @@ function buildRequest(db, row) {
         const purchase = db.prepare('SELECT server_id FROM currency_purchases WHERE client_purchase_id = ?').get(clientPurchaseId);
         return !purchase || purchase.server_id == null;
       });
-      if (pendientes.length > 0 || pendientesCompras.length > 0) return { skip: true };
+      // Y lo mismo con las extracciones.
+      const pendientesExtracciones = (payload.client_withdrawal_ids || []).filter((clientWithdrawalId) => {
+        const withdrawal = db.prepare('SELECT server_id FROM cash_withdrawals WHERE client_withdrawal_id = ?').get(clientWithdrawalId);
+        return !withdrawal || withdrawal.server_id == null;
+      });
+      if (pendientes.length > 0 || pendientesCompras.length > 0 || pendientesExtracciones.length > 0) return { skip: true };
 
       return {
         method: 'POST',
@@ -198,6 +230,7 @@ function buildRequest(db, row) {
           note: payload.note,
           client_sale_ids: ids,
           client_purchase_ids: payload.client_purchase_ids || [],
+          client_withdrawal_ids: payload.client_withdrawal_ids || [],
           register_id: registerId,
         },
         onSuccess: (data) => {
@@ -268,13 +301,13 @@ async function pullDelta(session, summary) {
   let pages = 0;
   let more = false;
   let error = null;
-  const totals = { sales: 0, closes: 0, counts: 0, purchases: 0 };
+  const totals = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0 };
   try {
     do {
       const query = new URLSearchParams({
         after_sale: String(cursors.sale), after_close: String(cursors.close),
         after_count: String(cursors.count), after_purchase: String(cursors.purchase),
-        after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500',
+        after_withdrawal: String(cursors.withdrawal), after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500',
       });
       const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
       if (!res.ok) {
@@ -286,6 +319,7 @@ async function pullDelta(session, summary) {
       totals.closes += stats.closes;
       totals.counts += stats.counts;
       totals.purchases += stats.purchases;
+      totals.withdrawals += stats.withdrawals;
       cursors = prepareDeltaSession(session.user_id);
       more = res.data.has_more === true;
       pages++;

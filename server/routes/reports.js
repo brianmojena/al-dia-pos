@@ -5,7 +5,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { requireOwner } = require('../middleware/auth');
 const { monthBounds, businessCurrentMonth, shopLocalDate, shopLocalTime } = require('../lib/businessDay');
-const { paymentSplit, paymentLabel, offShopRate } = require('../lib/payment');
+const { paymentSplit, paymentLabel, offShopRate, withdrawalSplit } = require('../lib/payment');
 
 /**
  * El histórico de ventas (esta carpeta) es para el "económico" — quien revisa
@@ -70,13 +70,21 @@ async function daySummaries(db, userId, bounds) {
           FROM cash_closes WHERE user_id = ? AND closed_at >= ? AND closed_at < ?`,
     args: [userId, bounds.start, bounds.end],
   });
+  const stockMovesResult = await db.execute({
+    sql: `SELECT 'stock_entry' AS type, created_at FROM stock_entries WHERE user_id = ? AND created_at >= ? AND created_at < ?
+          UNION ALL
+          SELECT 'transfer' AS type, created_at FROM warehouse_transfers WHERE user_id = ? AND created_at >= ? AND created_at < ?
+          UNION ALL
+          SELECT 'warehouse_change' AS type, created_at FROM warehouse_changes WHERE user_id = ? AND created_at >= ? AND created_at < ?`,
+    args: [userId, bounds.start, bounds.end, userId, bounds.start, bounds.end, userId, bounds.start, bounds.end],
+  });
 
   const byDate = new Map();
   const dayFor = (date) => {
     if (!byDate.has(date)) {
       byDate.set(date, {
         date, sales_count: 0, total: 0, cash_total: 0, transfer_total: 0, profit: 0,
-        foreign_total: 0, usd_total: 0, eur_total: 0, off_rate_count: 0,
+        foreign_total: 0, usd_total: 0, eur_total: 0, off_rate_count: 0, stock_moves: 0,
         closes: null,
       });
     }
@@ -115,6 +123,13 @@ async function daySummaries(db, userId, bounds) {
     d.closes.difference_usd += Number(row.difference_usd) || 0;
     d.closes.difference_eur += Number(row.difference_eur) || 0;
     if (diff < -0.5 || Number(row.difference_usd) < -0.005 || Number(row.difference_eur) < -0.005) d.closes.short = true;
+  }
+
+  for (const row of stockMovesResult.rows) {
+    const date = shopLocalDate(row.created_at);
+    if (!date) continue;
+    const d = dayFor(date);
+    d.stock_moves += 1;
   }
 
   const days = [...byDate.values()]
@@ -329,6 +344,53 @@ async function buildDivisaSheet(workbook, db, userId, bounds) {
   }
 }
 
+async function buildExtraccionesSheet(workbook, db, userId, bounds) {
+  const sheet = workbook.addWorksheet('Extracciones');
+  sheet.columns = [
+    { header: 'Fecha', key: 'fecha', width: 12 },
+    { header: 'Hora', key: 'hora', width: 8 },
+    { header: 'Apartado', key: 'apartado', width: 14 },
+    { header: 'Cantidad', key: 'cantidad', width: 14, style: { numFmt: MONEY_FMT } },
+    { header: 'Nota', key: 'nota', width: 30 },
+    { header: 'Quién', key: 'quien', width: 24 },
+    { header: 'Estado', key: 'estado', width: 12 },
+  ];
+  styleHeaderRow(sheet.getRow(1));
+
+  const result = await db.execute({
+    sql: `SELECT created_at, method, amount, note, account_email, voided_at, cash_close_id
+          FROM cash_withdrawals WHERE user_id = ? AND created_at >= ? AND created_at < ?
+          ORDER BY created_at ASC`,
+    args: [userId, bounds.start, bounds.end],
+  });
+
+  const methodLabels = {
+    'efectivo': 'Efectivo',
+    'transferencia': 'Transferencia',
+    'USD': 'Dólares',
+    'EUR': 'Euros',
+  };
+
+  for (const row of result.rows) {
+    let estado = 'Abierta';
+    if (row.voided_at) {
+      estado = 'Anulada';
+    } else if (row.cash_close_id != null) {
+      estado = 'En cierre';
+    }
+
+    sheet.addRow({
+      fecha: shopLocalDate(row.created_at),
+      hora: shopLocalTime(row.created_at),
+      apartado: methodLabels[row.method] || row.method,
+      cantidad: Number(row.amount) || 0,
+      nota: row.note || '',
+      quien: row.account_email || '',
+      estado,
+    });
+  }
+}
+
 async function buildCierresSheet(workbook, db, userId, bounds) {
   const sheet = workbook.addWorksheet('Cierres de caja');
   sheet.columns = [
@@ -340,6 +402,7 @@ async function buildCierresSheet(workbook, db, userId, bounds) {
     { header: 'Efectivo contado', key: 'contado', width: 16, style: { numFmt: MONEY_FMT } },
     { header: 'Diferencia', key: 'diferencia', width: 14, style: { numFmt: MONEY_FMT } },
     { header: 'Transferencias', key: 'transferencias', width: 14, style: { numFmt: MONEY_FMT } },
+    { header: 'Extraído (efectivo)', key: 'extraido', width: 16, style: { numFmt: MONEY_FMT } },
     { header: 'USD esperado', key: 'usd_esperado', width: 13, style: { numFmt: MONEY_FMT } },
     { header: 'USD contado', key: 'usd_contado', width: 13, style: { numFmt: MONEY_FMT } },
     { header: 'Diferencia USD', key: 'usd_diferencia', width: 14, style: { numFmt: MONEY_FMT } },
@@ -355,7 +418,8 @@ async function buildCierresSheet(workbook, db, userId, bounds) {
     sql: `SELECT closed_at, account_email, opening_float, expected_cash, counted_cash,
                  difference, expected_transfer, sales_count, note,
                  expected_usd, counted_usd, difference_usd,
-                 expected_eur, counted_eur, difference_eur
+                 expected_eur, counted_eur, difference_eur,
+                 withdrawn_cash
           FROM cash_closes WHERE user_id = ? AND closed_at >= ? AND closed_at < ?
           ORDER BY closed_at ASC`,
     args: [userId, bounds.start, bounds.end],
@@ -371,6 +435,7 @@ async function buildCierresSheet(workbook, db, userId, bounds) {
       contado: Number(row.counted_cash) || 0,
       diferencia: Number(row.difference) || 0,
       transferencias: Number(row.expected_transfer) || 0,
+      extraido: Number(row.withdrawn_cash) || 0,
       usd_esperado: Number(row.expected_usd) || 0,
       usd_contado: Number(row.counted_usd) || 0,
       usd_diferencia: Number(row.difference_usd) || 0,
@@ -401,6 +466,7 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
   buildResumenSheet(workbook, days, totals);
   await buildVentasSheet(workbook, db, req.userId, bounds);
   await buildDivisaSheet(workbook, db, req.userId, bounds);
+  await buildExtraccionesSheet(workbook, db, req.userId, bounds);
   await buildCierresSheet(workbook, db, req.userId, bounds);
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

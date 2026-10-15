@@ -3,7 +3,7 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { todayBounds, boundsForDate, businessToday, shopLocalLabel, shopLocalTime } = require('../lib/businessDay');
-const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
+const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('../lib/payment');
 
 router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
@@ -93,6 +93,17 @@ router.get('/', asyncHandler(async (req, res) => {
     const split = purchaseSplit(purchase);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
+
+  // Las extracciones abiertas sin arqueo: dinero que el dueño retiró.
+  const openWithdrawalsResult = await db.execute({
+    sql: 'SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at DESC, id DESC',
+    args: [req.userId],
+  });
+  for (const withdrawal of openWithdrawalsResult.rows) {
+    const split = withdrawalSplit(withdrawal);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inventoryResult = await db.execute({
@@ -129,6 +140,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json({
     today: todayStatsResult.rows[0],
     holdings,
+    open_withdrawals: openWithdrawalsResult.rows,
     inventory,
     warehouse,
     lowStock: lowStockResult.rows,
@@ -187,7 +199,7 @@ router.get('/day', asyncHandler(async (req, res) => {
   });
   const withTime = (row) => ({ ...row, time: shopLocalTime(row.created_at) });
 
-  const [sales, transfers, stockEntries, purchases, closesResult] = await Promise.all([
+  const [sales, transfers, stockEntries, purchases, closesResult, withdrawalsResult, warehouseChangesResult] = await Promise.all([
     query('sales', 'ORDER BY created_at DESC, id DESC'),
     query('warehouse_transfers', 'ORDER BY created_at DESC, id DESC'),
     query('stock_entries', 'ORDER BY created_at DESC, id DESC'),
@@ -197,6 +209,8 @@ router.get('/day', asyncHandler(async (req, res) => {
             FROM cash_closes WHERE user_id = ? AND closed_at >= ? AND closed_at < ? ORDER BY closed_at DESC`,
       args,
     }),
+    query('cash_withdrawals', 'ORDER BY created_at DESC, id DESC'),
+    query('warehouse_changes', 'ORDER BY created_at DESC, id DESC'),
   ]);
 
   // Las líneas de todas las ventas del día en una sola consulta.
@@ -230,7 +244,9 @@ router.get('/day', asyncHandler(async (req, res) => {
     transfers: transfers.rows.map(withTime),
     stockEntries: stockEntries.rows.map(withTime),
     purchases: purchases.rows.map(withTime),
+    withdrawals: withdrawalsResult.rows.map(withTime),
     cashCloses: closesResult.rows.map(withTime),
+    warehouseChanges: warehouseChangesResult.rows.map(withTime),
   });
 }));
 

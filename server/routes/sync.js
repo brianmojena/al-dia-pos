@@ -33,6 +33,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const afterClose = numberParam(req.query.after_close);
   const afterCount = numberParam(req.query.after_count);
   const afterPurchase = numberParam(req.query.after_purchase);
+  const afterWithdrawal = numberParam(req.query.after_withdrawal);
   const afterCorrection = numberParam(req.query.after_correction);
   const rawLimit = numberParam(req.query.limit, 500);
   const limit = Math.min(rawLimit || 500, 500);
@@ -68,6 +69,13 @@ router.get('/delta', asyncHandler(async (req, res) => {
     args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
   });
 
+  const withdrawals = await db.execute({
+    sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND (id > ? OR cash_close_id IS NULL)
+            ${since ? 'AND created_at >= ?' : ''}
+          ORDER BY id ASC LIMIT ?`,
+    args: since ? [req.userId, afterWithdrawal, since, limit] : [req.userId, afterWithdrawal, limit],
+  });
+
   // Correcciones de la cuenta principal (forma de pago cambiada o venta
   // anulada): la caja de escritorio ya bajó esas ventas y esos cierres, así que
   // tiene que enterarse de cómo quedaron. Va con la venta y el cierre actuales.
@@ -93,13 +101,13 @@ router.get('/delta', asyncHandler(async (req, res) => {
     cash_close: c.cash_close_id != null ? correctedCloses.get(Number(c.cash_close_id)) || null : null,
   }));
 
-  // Qué ventas y compras cubrió cada cierre: así la caja de escritorio sabe
+  // Qué ventas, compras y extracciones cubrió cada cierre: así la caja de escritorio sabe
   // cuáles de las que ya bajó dejaron de estar abiertas.
   const closeIds = closes.rows.map((row) => Number(row.id));
-  const covered = { sales: new Map(), purchases: new Map() };
+  const covered = { sales: new Map(), purchases: new Map(), withdrawals: new Map() };
   if (closeIds.length > 0) {
     const marks = closeIds.map(() => '?').join(',');
-    for (const [table, map] of [['sales', covered.sales], ['currency_purchases', covered.purchases]]) {
+    for (const [table, map] of [['sales', covered.sales], ['currency_purchases', covered.purchases], ['cash_withdrawals', covered.withdrawals]]) {
       const rows = (await db.execute({
         sql: `SELECT id, cash_close_id FROM ${table} WHERE user_id = ? AND cash_close_id IN (${marks})`,
         args: [req.userId, ...closeIds],
@@ -115,6 +123,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
     ...row,
     covered_sale_ids: covered.sales.get(Number(row.id)) || [],
     covered_purchase_ids: covered.purchases.get(Number(row.id)) || [],
+    covered_withdrawal_ids: covered.withdrawals.get(Number(row.id)) || [],
   }));
 
   const saleItems = await loadItems(db, 'sale_items', 'sale_id', sales.rows.map((row) => row.id));
@@ -122,22 +131,26 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const saleRows = attachItems(sales.rows, saleItems, 'id', 'sale_id');
   const countRows = attachItems(counts.rows, countItems, 'id', 'count_id');
   const last = (rows, cursor) => rows.length ? Number(rows[rows.length - 1].id) : cursor;
+  // Para withdrawals, evitar que el cursor se mueva atrás (id <= cursor devuelve abiertas viejas).
+  const lastWithMax = (rows, cursor) => Math.max(cursor, rows.length ? Number(rows[rows.length - 1].id) : cursor);
 
   res.json({
     sales: saleRows,
     cash_closes: closeRows,
     inventory_counts: countRows,
     currency_purchases: purchases.rows,
+    cash_withdrawals: withdrawals.rows,
     sale_corrections: correctionRows,
     cursors: {
       correction: last(corrections, afterCorrection),
       purchase: last(purchases.rows, afterPurchase),
+      withdrawal: lastWithMax(withdrawals.rows, afterWithdrawal),
       sale: last(sales.rows, afterSale),
       close: last(closes.rows, afterClose),
       count: last(counts.rows, afterCount),
     },
     has_more: sales.rows.length === limit || closes.rows.length === limit || counts.rows.length === limit
-      || purchases.rows.length === limit || corrections.length === limit,
+      || purchases.rows.length === limit || withdrawals.rows.length === limit || corrections.length === limit,
   });
 }));
 

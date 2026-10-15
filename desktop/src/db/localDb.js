@@ -113,6 +113,23 @@ function initLocalDb(dbPath) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Extracción de caja: el dueño retira dinero de un apartado.
+    -- client_withdrawal_id es la clave de idempotencia.
+    CREATE TABLE IF NOT EXISTS cash_withdrawals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER,
+      client_withdrawal_id TEXT NOT NULL UNIQUE,
+      origin TEXT NOT NULL DEFAULT 'local',
+      register_id TEXT,
+      cash_close_id INTEGER,
+      account_email TEXT,
+      method TEXT NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      voided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS inventory_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       server_id INTEGER,
@@ -145,7 +162,7 @@ function initLocalDb(dbPath) {
     -- el sync worker los traduce a server_id recién al armar el POST.
     CREATE TABLE IF NOT EXISTS outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create' | 'currency_purchase.create' | 'cash_close.create' | 'inventory_count.create'
+      op_type TEXT NOT NULL,              -- 'product.create' | 'product.update' | 'product.delete' | 'sale.create' | 'currency_purchase.create' | 'cash_withdrawal.create' | 'cash_withdrawal.void' | 'cash_close.create' | 'inventory_count.create'
       client_op_id TEXT NOT NULL UNIQUE,
       local_ref_id INTEGER,
       payload TEXT NOT NULL,
@@ -244,6 +261,11 @@ function initLocalDb(dbPath) {
     // Solo aplica a productos con unit: 0 = no llevar control de stock (el
     // stock se ignora). Los productos por unidad siempre quedan en 1.
     'ALTER TABLE products ADD COLUMN track_stock INTEGER NOT NULL DEFAULT 1',
+    // Extracción de caja: lo retirado en cada moneda en un cierre.
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_cash REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_transfer REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_eur REAL NOT NULL DEFAULT 0',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }
@@ -257,6 +279,8 @@ function initLocalDb(dbPath) {
       ON currency_purchases(server_id) WHERE server_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_counts_server_id
       ON inventory_counts(server_id) WHERE server_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_withdrawals_server_id
+      ON cash_withdrawals(server_id) WHERE server_id IS NOT NULL;
   `);
 
   const register = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('register_id');

@@ -77,6 +77,30 @@ export function clampTransfer(value, total, transferLimit) {
   return Math.min(Math.max(0, n), maxTransfer(total, transferLimit))
 }
 
+// Extracciones de caja
+export const WITHDRAWAL_METHODS = ['efectivo', 'transferencia', 'USD', 'EUR']
+
+// Lo que una extracción le quita a cada apartado. Anulada = no quita nada.
+export function withdrawalSplit(w) {
+  const amount = w.voided_at ? 0 : round2(w.amount)
+  const neg = (n) => round2(-n) // Handle -0 issue
+  return {
+    cash: w.method === 'efectivo' ? neg(amount) : 0,
+    transfer: w.method === 'transferencia' ? neg(amount) : 0,
+    usd: w.method === 'USD' ? neg(amount) : 0,
+    eur: w.method === 'EUR' ? neg(amount) : 0,
+  }
+}
+
+// Valida y normaliza; lanza Error con mensaje en español para el dueño.
+export function withdrawalFields(body) {
+  if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido')
+  const amount = Number(body.amount)
+  if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta cuánto dinero se extrae')
+  const note = body.note == null ? null : String(body.note).trim().slice(0, 200) || null
+  return { method: body.method, amount: round2(amount), note }
+}
+
 // Lo que se manda al servidor. Con el slider en un extremo el cobro no es
 // mixto: todo en efectivo o todo por transferencia, como si se hubiera tocado
 // ese botón (el servidor rechaza un mixto con una parte en cero).

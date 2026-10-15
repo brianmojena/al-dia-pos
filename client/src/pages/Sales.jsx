@@ -311,9 +311,14 @@ function DayRow({ day, onOpen }) {
         <span className="font-bold text-gray-900 flex-shrink-0">{fmt(day.total)}</span>
       </div>
       <p className="text-xs text-gray-400 mb-2">
-        {day.sales_count} {day.sales_count === 1 ? 'venta' : 'ventas'} · efectivo {fmt(day.cash_total)} · transf. {fmt(day.transfer_total)}
+        {day.sales_count === 0 ? 'Sin ventas' : `${day.sales_count} ${day.sales_count === 1 ? 'venta' : 'ventas'} · efectivo ${fmt(day.cash_total)} · transf. ${fmt(day.transfer_total)}`}
         {!!day.foreign_total && <> · divisa {fmt(day.foreign_total)}</>}
       </p>
+      {!!day.stock_moves && (
+        <p className="text-xs text-gray-400 mb-2">
+          {day.stock_moves} {day.stock_moves === 1 ? 'movimiento de mercancía' : 'movimientos de mercancía'}
+        </p>
+      )}
       <ForeignLine day={day} />
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-green-600 font-medium">Ganancia {fmt(day.profit)}</p>
@@ -405,6 +410,167 @@ function CloseBadge({ status }) {
   )
 }
 
+// Entradas de mercancía del día: stock_entries, warehouse_transfers y warehouse_changes
+function StockMovements({ date, refreshKey }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [movements, setMovements] = useState([])
+
+  useEffect(() => {
+    setLoading(true)
+    setError(false)
+    apiFetch(`/api/dashboard/day?date=${date}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('failed')
+        return res.json()
+      })
+      .then((data) => {
+        const all = [
+          ...(data.stockEntries || []).map((e) => ({
+            type: 'stock_entry',
+            kind: e.kind || 'entrada',
+            product_name: e.product_name,
+            quantity: e.quantity,
+            stock_before: e.stock_before,
+            stock_after: e.stock_after,
+            reason: e.reason,
+            time: e.time,
+            account_email: e.account_email,
+            created_at: e.created_at,
+          })),
+          ...(data.transfers || []).map((t) => ({
+            type: 'warehouse_transfer',
+            item_name: t.item_name,
+            quantity: t.quantity,
+            created_product: t.created_product,
+            time: t.time,
+            account_email: t.account_email,
+            created_at: t.created_at,
+          })),
+          ...(data.warehouseChanges || []).map((w) => ({
+            type: 'warehouse_change',
+            action: w.action,
+            item_name: w.item_name,
+            detail: w.detail,
+            time: w.time,
+            account_email: w.account_email,
+            created_at: w.created_at,
+          })),
+        ]
+        all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+        setMovements(all)
+      })
+      .catch(() => setError(true))
+      .finally(() => setLoading(false))
+  }, [date, refreshKey])
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-2xl shadow-sm p-5 flex items-center justify-center py-8">
+        <div className="w-5 h-5 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="bg-white rounded-2xl shadow-sm p-5 text-center">
+        <p className="text-xs text-gray-400">No se pudieron cargar los movimientos de mercancía. Hace falta conexión.</p>
+      </div>
+    )
+  }
+
+  if (movements.length === 0) return null
+
+  const formatQty = (q) => Number(Number(q).toFixed(3)).toString()
+
+  const actionLabels = {
+    'alta': 'Entró al almacén',
+    'importación': 'Importado al almacén',
+    'reposición': 'Repuesto en el almacén',
+    'edición': 'Cambio en el almacén',
+    'borrado': 'Borrado del almacén',
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm overflow-hidden mb-4">
+      <div className="px-5 py-3 border-b border-gray-50">
+        <h3 className="text-sm font-semibold text-gray-900">Movimientos de mercancía</h3>
+      </div>
+      {movements.map((m, idx) => (
+        <div
+          key={`${m.type}-${idx}`}
+          className={`px-5 py-4 flex items-start justify-between ${
+            idx < movements.length - 1 ? 'border-b border-gray-50' : ''
+          }`}
+        >
+          <div className="flex-1">
+            <p className="text-sm font-medium text-gray-900">
+              {m.type === 'stock_entry'
+                ? m.product_name
+                : m.item_name}
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {m.time}
+              {accountLabel(m.account_email) && (
+                <span className="text-gray-300"> · {accountLabel(m.account_email)}</span>
+              )}
+            </p>
+            {m.type === 'stock_entry' && (
+              <p className="text-xs text-gray-400 mt-1">
+                {
+                  {
+                    'entrada': 'Entró a la tienda',
+                    'nuevo': 'Producto nuevo con stock',
+                    'importacion': 'Importado desde Excel',
+                    'correccion': 'Corrección de stock',
+                    'anulacion': 'Volvió por venta anulada',
+                  }[m.kind] || 'Movimiento de stock'
+                }
+                <br />
+                <span className="text-gray-500">{Number(m.stock_before)} → {Number(m.stock_after)}</span>
+                {m.reason && (
+                  <>
+                    <br />
+                    <span className="text-gray-500">{m.reason}</span>
+                  </>
+                )}
+              </p>
+            )}
+            {m.type === 'warehouse_transfer' && (
+              <p className="text-xs text-gray-400 mt-1">
+                Del almacén a la tienda
+                {m.created_product ? ' · producto nuevo' : ''}
+              </p>
+            )}
+            {m.type === 'warehouse_change' && (
+              <p className="text-xs text-gray-400 mt-1">
+                {actionLabels[m.action] || 'Almacén'}
+                {m.detail && (
+                  <>
+                    <br />
+                    <span className="text-gray-500">{m.detail}</span>
+                  </>
+                )}
+              </p>
+            )}
+          </div>
+          <div className="text-right flex-shrink-0 ml-3">
+            {m.type === 'stock_entry' && (
+              <p className={`text-sm font-semibold ${m.stock_after - m.stock_before < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                {m.stock_after - m.stock_before >= 0 ? '+' : ''}{formatQty(m.stock_after - m.stock_before)}
+              </p>
+            )}
+            {m.type === 'warehouse_transfer' && (
+              <p className="text-sm font-semibold text-gray-900">+{formatQty(m.quantity)}</p>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // Detalle de un día: mismas filas de venta expandibles que tenía Historial,
 // solo que ahora acotadas a un día (antes eran las últimas 200 ventas).
 function DayDetail({ date, sales, loading, error, expandedId, details, onToggle, onBack, onCorrected, correctedAt }) {
@@ -435,14 +601,17 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
           <WifiOff size={36} className="mx-auto mb-3 opacity-30" />
           <p className="text-sm text-gray-500">{error}</p>
         </div>
-      ) : sales.length === 0 ? (
-        <div className="bg-white rounded-2xl py-20 text-center text-gray-400 shadow-sm">
-          <ClipboardList size={40} className="mx-auto mb-3 opacity-30" />
-          <p className="text-sm">Sin ventas ese día</p>
-        </div>
       ) : (
-        <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
-          {sales.map((sale, idx) => (
+        <>
+          {sales.length === 0 && (
+            <div className="bg-white rounded-2xl py-20 text-center text-gray-400 shadow-sm mb-4">
+              <ClipboardList size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="text-sm">Sin ventas ese día</p>
+            </div>
+          )}
+          {sales.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-sm overflow-hidden mb-4">
+              {sales.map((sale, idx) => (
             <div key={sale.id}>
               <button
                 onClick={() => onToggle(sale.id)}
@@ -500,8 +669,11 @@ function DayDetail({ date, sales, loading, error, expandedId, details, onToggle,
                 </div>
               )}
             </div>
-          ))}
-        </div>
+            ))}
+            </div>
+          )}
+          <StockMovements date={date} refreshKey={correctedAt} />
+        </>
       )}
       <VoidedSales date={date} refreshKey={correctedAt} />
     </div>

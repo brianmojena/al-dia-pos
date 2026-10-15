@@ -1,8 +1,8 @@
-import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES } from './payment.js'
+import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES, withdrawalSplit, withdrawalFields, WITHDRAWAL_METHODS } from './payment.js'
 import { parseServerDate } from './dates.js'
 import { isValidUnit, validQuantity, roundQty, lineTotal, lineUnits } from './units.js'
 
-export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], rejected_sales: [], cashiers: [], current_period: null })
+export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], cash_withdrawals: [], rejected_sales: [], cashiers: [], current_period: null })
 export const businessDate = (value = new Date()) => {
   const date = value instanceof Date ? value : parseServerDate(value)
   if (!date) return ''
@@ -41,9 +41,15 @@ export function applyOperation(data, op, result = op.result) {
     upsert(data.inventory_counts, result, 'client_count_id')
   } else if (op.kind === 'purchase') {
     upsert(data.currency_purchases ||= [], { ...op.result, ...result }, 'client_purchase_id')
+  } else if (op.kind === 'withdrawal') {
+    upsert(data.cash_withdrawals ||= [], { ...op.result, ...result }, 'client_withdrawal_id')
+  } else if (op.kind === 'withdrawal_void') {
+    const w = (data.cash_withdrawals ||= []).find((w) => w.client_withdrawal_id === op.withdrawal_id)
+    if (w) w.voided_at = result.voided_at
   } else if (op.kind === 'close') {
     for (const sale of data.sales) if (op.saleIds.includes(sale.id)) sale.cash_close_id = result.id
     for (const purchase of data.currency_purchases || []) if (op.purchaseIds?.includes(purchase.id)) purchase.cash_close_id = result.id
+    for (const withdrawal of data.cash_withdrawals || []) if (op.withdrawalIds?.includes(withdrawal.id)) withdrawal.cash_close_id = result.id
     upsert(data.cash_closes, result, 'client_close_id')
   } else if (op.kind === 'review') {
     const sale = data.rejected_sales.find((s) => s.id === op.productId)
@@ -85,6 +91,11 @@ export function acknowledgeOperation(state, opId, result) {
   if (op.kind === 'purchase') {
     for (const pending of state.outbox) {
       if (pending.purchaseIds) pending.purchaseIds = pending.purchaseIds.map((id) => id === op.result.id ? Number(result.id) : id)
+    }
+  }
+  if (op.kind === 'withdrawal') {
+    for (const pending of state.outbox) {
+      if (pending.withdrawalIds) pending.withdrawalIds = pending.withdrawalIds.map((id) => id === op.result.id ? Number(result.id) : id)
     }
   }
   applyOperation(state.base, op, result)
@@ -229,6 +240,29 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.sold_at = now
     op.body.register_id = 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+  } else if (path === '/api/cash-withdrawals') {
+    assert(owner, 'Solo el dueño puede extraer dinero')
+    op.kind = 'withdrawal'
+    op.body.client_withdrawal_id ||= ctx.newId()
+    const existing = (data.cash_withdrawals || []).find((w) => w.client_withdrawal_id === op.body.client_withdrawal_id)
+    if (existing) return { ...op, kind: 'noop', result: existing }
+    const fields = withdrawalFields(body)
+    op.body.method = fields.method
+    op.body.amount = fields.amount
+    op.body.note = fields.note
+    op.body.withdrawn_at = now
+    op.body.register_id = 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, voided_at: null, pending: true }
+  } else if (/^\/api\/cash-withdrawals\/[\w-]+\/void$/.test(path)) {
+    assert(owner, 'Solo el dueño puede anular extracciones')
+    op.kind = 'withdrawal_void'
+    const withdrawalId = path.split('/')[3]
+    const withdrawal = (data.cash_withdrawals || []).find((w) => w.client_withdrawal_id === withdrawalId)
+    assert(withdrawal, 'Extracción no encontrada')
+    if (withdrawal.voided_at) return { ...op, kind: 'noop', result: { ...withdrawal, voided_at: withdrawal.voided_at } }
+    assert(withdrawal.cash_close_id == null, 'Esta extracción ya entró en un cierre de caja y no se puede anular')
+    op.withdrawal_id = withdrawalId
+    op.result = { ...withdrawal, voided_at: now }
   } else if (path === '/api/inventory-counts') {
     op.kind = 'count'
     op.body.client_count_id ||= ctx.newId()
@@ -253,17 +287,23 @@ export function prepareOperation(data, method, path, body, ctx) {
     assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
     const covered = openSales(data, ctx.account, owner)
     const coveredPurchases = openPurchases(data, ctx.account, owner)
+    const coveredWithdrawals = (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)
     op.saleIds = covered.map((s) => s.id)
     op.purchaseIds = coveredPurchases.map((p) => p.id)
+    op.withdrawalIds = coveredWithdrawals.map((w) => w.id)
     op.coverageExact = owner
     if (owner) { op.body.covered_sale_ids = op.saleIds; op.body.covered_purchase_ids = op.purchaseIds }
     op.body.closed_at = now
     op.body.register_id = 'web'
-    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0))
+    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0) + coveredWithdrawals.reduce((n, w) => n + withdrawalSplit(w)[key], 0))
     const cash = sumOf('cash') + Number(body.opening_float || 0)
-    const usd = sumOf('usd'), eur = sumOf('eur')
+    const usd = sumOf('usd'), eur = sumOf('eur'), transfer = sumOf('transfer')
     const countedUsd = round(Number(body.counted_usd || 0)), countedEur = round(Number(body.counted_eur || 0))
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
+    const withdrawnCash = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'efectivo' ? w.amount : 0), 0))
+    const withdrawnTransfer = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'transferencia' ? w.amount : 0), 0))
+    const withdrawnUsd = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'USD' ? w.amount : 0), 0))
+    const withdrawnEur = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'EUR' ? w.amount : 0), 0))
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || coveredWithdrawals[0]?.created_at || now, expected_cash: cash, expected_transfer: transfer, difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), withdrawn_cash: withdrawnCash, withdrawn_transfer: withdrawnTransfer, withdrawn_usd: withdrawnUsd, withdrawn_eur: withdrawnEur, sales_count: covered.length, pending: true }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -275,7 +315,7 @@ export function prepareOperation(data, method, path, body, ctx) {
 export function monthlyReport(data, month) {
   const groups = new Map()
   const dayFor = (date) => {
-    if (!groups.has(date)) groups.set(date, { date, sales_count: 0, off_rate_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0, closes: null })
+    if (!groups.has(date)) groups.set(date, { date, sales_count: 0, off_rate_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0, stock_moves: 0, closes: null })
     return groups.get(date)
   }
   for (const sale of data.sales) {
@@ -307,11 +347,18 @@ export function readLocal(data, path, account, user) {
   const owner = user.role !== 'cajero'
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
-    const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
-    return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || null, has_sales: sales.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
+    const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)]
+    const withdrawals = (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)
+    const prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
+    return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || withdrawals[0]?.created_at || null, has_sales: sales.length > 0 || withdrawals.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
+  if (route === '/api/cash-withdrawals') {
+    const filtered = (data.cash_withdrawals || []).filter((w) => !url.searchParams.has('date') || businessDate(w.created_at) === url.searchParams.get('date'))
+    if (url.searchParams.has('open')) return newest(filtered.filter((w) => w.cash_close_id == null), 'created_at')
+    return newest(filtered, 'created_at')
+  }
   if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales') return newest(data.sales.filter((s) => !url.searchParams.has('date') || businessDate(s.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales/rejected') return data.rejected_sales.filter((s) => !s.reviewed_at)
@@ -341,10 +388,15 @@ export function readLocal(data, path, account, user) {
       const split = purchaseSplit(purchase)
       for (const key of Object.keys(holdings)) holdings[key] += split[key]
     }
+    for (const withdrawal of (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)) {
+      const split = withdrawalSplit(withdrawal)
+      for (const key of Object.keys(holdings)) holdings[key] += split[key]
+    }
     for (const key of Object.keys(holdings)) holdings[key] = round(holdings[key])
+    const openWithdrawals = newest((data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null), 'created_at')
     const tracked = data.products.filter((p) => !p.unit || Number(p.track_stock ?? 1) === 1)
     const inventory = { cost: round(tracked.reduce((n, p) => n + p.stock * Number(p.purchase_price || 0), 0)), retail: round(tracked.reduce((n, p) => n + p.stock * Number(p.sale_price || 0), 0)), units: tracked.reduce((n, p) => n + (p.unit ? 0 : p.stock), 0) }
-    return { holdings, inventory, today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: tracked.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
+    return { holdings, inventory, today: { sales: sales.reduce((n, s) => n + Number(s.total), 0), profit: sales.reduce((n, s) => n + Number(s.profit), 0), count: sales.length }, lowStock: tracked.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock), recentSales: sales.slice(0, 5), open_withdrawals: openWithdrawals, audit: { rejectedSales: data.rejected_sales.filter((s) => !s.reviewed_at).length, offRateSales: sales.filter(offShopRate).length } }
   }
   return undefined
 }

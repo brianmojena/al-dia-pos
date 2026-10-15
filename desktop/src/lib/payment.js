@@ -122,7 +122,29 @@ function purchaseFields(body) {
   };
 }
 
+// Extracción de caja: el dueño retira dinero de cada apartado.
+// cash: pesos que salen de la gaveta. transfer/usd/eur: dinero que se retira en esa moneda.
+// Anulada = no quita nada.
+const WITHDRAWAL_METHODS = ['efectivo', 'transferencia', 'USD', 'EUR'];
+function withdrawalSplit(w) {
+  const amount = w.voided_at ? 0 : round2(w.amount);
+  return {
+    cash: w.method === 'efectivo' ? -amount : 0,
+    transfer: w.method === 'transferencia' ? -amount : 0,
+    usd: w.method === 'USD' ? -amount : 0,
+    eur: w.method === 'EUR' ? -amount : 0,
+  };
+}
+
+function withdrawalFields(body) {
+  if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido');
+  const amount = Number(body.amount);
+  if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta cuánto dinero se extrae');
+  const note = body.note == null ? null : String(body.note).trim().slice(0, 200) || null;
+  return { method: body.method, amount: round2(amount), note };
+}
+
 module.exports = {
   PAYMENT_METHODS, CURRENCIES, paymentSplit, paymentLabel, offShopRate, foreignFields, round2,
-  purchaseSplit, purchaseFields,
+  purchaseSplit, purchaseFields, WITHDRAWAL_METHODS, withdrawalSplit, withdrawalFields,
 };

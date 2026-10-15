@@ -6,7 +6,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
+const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('../lib/payment');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -74,15 +74,16 @@ const getLastCloseForRegister = async (executor, userId, registerId) => {
 // Las compras de divisa de la caja entran en la misma cuenta: los pesos que
 // salieron de la gaveta restan del efectivo y los billetes comprados suman a
 // su moneda.
-const sumOf = (rows, key, purchases = []) => round2(
+const sumOf = (rows, key, purchases = [], withdrawals = []) => round2(
   rows.reduce((sum, row) => sum + paymentSplit(row)[key], 0)
   + purchases.reduce((sum, row) => sum + purchaseSplit(row)[key], 0)
+  + withdrawals.reduce((sum, row) => sum + withdrawalSplit(row)[key], 0)
 );
-const summarize = (rows, purchases = []) => ({
-  cash: sumOf(rows, 'cash', purchases),
-  transfer: sumOf(rows, 'transfer', purchases),
-  usd: sumOf(rows, 'usd', purchases),
-  eur: sumOf(rows, 'eur', purchases),
+const summarize = (rows, purchases = [], withdrawals = []) => ({
+  cash: sumOf(rows, 'cash', purchases, withdrawals),
+  transfer: sumOf(rows, 'transfer', purchases, withdrawals),
+  usd: sumOf(rows, 'usd', purchases, withdrawals),
+  eur: sumOf(rows, 'eur', purchases, withdrawals),
   count: rows.length,
   first_sale_at: rows[0]?.created_at || null,
 });
@@ -190,6 +191,19 @@ const purchasesByClientIds = async (executor, userId, ids) => {
   return result.rows;
 };
 
+// Las extracciones de caja abiertas: dinero que el dueño retiró y no fue
+// cubierto por ningún cierre todavía. Todas las extracciones de la tienda
+// (de cualquier caja y cualquier cajero) entran en el próximo cierre, sea
+// quién lo haga.
+const openWithdrawals = async (executor, userId) => {
+  const result = await executor.execute({
+    sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL
+          ORDER BY created_at ASC, id ASC`,
+    args: [userId],
+  });
+  return result.rows;
+};
+
 // La cuenta principal cierra la tienda entera: todas las ventas abiertas, de
 // cualquier caja y cajero. Los cajeros siguen cerrando solo la suya.
 const closesWholeShop = (req) => req.role === OWNER;
@@ -204,13 +218,16 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
   const sales = await openSales(executor, req.userId, mode, registerId, closesWholeShop(req));
   const purchases = await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req));
+  // Las extracciones siempre son de toda la tienda, independiente de la caja.
+  const withdrawals = await openWithdrawals(executor, req.userId);
 
   if (mode === 'web') {
     const lastClose = await getLastCloseForRegister(executor, req.userId, registerId);
     return {
       sales,
       purchases,
-      openedAt: lastClose || sales[0]?.created_at || purchases[0]?.created_at || null,
+      withdrawals,
+      openedAt: lastClose || sales[0]?.created_at || purchases[0]?.created_at || withdrawals[0]?.created_at || null,
       isFirstClose: !lastClose,
     };
   }
@@ -220,7 +237,8 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   return {
     sales,
     purchases,
-    openedAt: isFirstClose ? (sales[0]?.created_at || purchases[0]?.created_at || null) : periodStart,
+    withdrawals,
+    openedAt: isFirstClose ? (sales[0]?.created_at || purchases[0]?.created_at || withdrawals[0]?.created_at || null) : periodStart,
     isFirstClose,
   };
 };
@@ -282,7 +300,7 @@ router.get('/current', asyncHandler(async (req, res) => {
   res.json({
     opened_at: period.openedAt,
     is_first_close: period.isFirstClose,
-    has_sales: period.sales.length > 0 || period.purchases.length > 0,
+    has_sales: period.sales.length > 0 || period.purchases.length > 0 || period.withdrawals.length > 0,
   });
 }));
 
@@ -383,7 +401,12 @@ router.post('/', asyncHandler(async (req, res) => {
       }
       coveredPurchases = coveredPurchases.filter((purchase) => explicitPurchaseIds.includes(Number(purchase.id)));
     }
-    const summary = summarize(covered, coveredPurchases);
+
+    // Extracciones de caja: siempre se cogen todas las abiertas, de cualquier
+    // caja y cualquier cajero. No llevan lista explícita como las ventas.
+    const coveredWithdrawals = await openWithdrawals(tx, req.userId);
+
+    const summary = summarize(covered, coveredPurchases, coveredWithdrawals);
 
     // Solo pasa en la transición: un escritorio viejo cierra por ids ventas
     // que la web ya se había llevado. Se suman igual —ese dinero está en esa
@@ -404,6 +427,21 @@ router.post('/', asyncHandler(async (req, res) => {
 
     const expectedCash = float + summary.cash;
 
+    // Calcular los totales retirados (en valor positivo) para cada método.
+    const withdrawnSplit = { cash: 0, transfer: 0, usd: 0, eur: 0 };
+    for (const w of coveredWithdrawals) {
+      const split = withdrawalSplit(w);
+      withdrawnSplit.cash -= split.cash;     // negativo se convierte en positivo
+      withdrawnSplit.transfer -= split.transfer;
+      withdrawnSplit.usd -= split.usd;
+      withdrawnSplit.eur -= split.eur;
+    }
+    // Redondear para evitar deriva de punto flotante (0.1+0.2 en JS).
+    withdrawnSplit.cash = round2(withdrawnSplit.cash);
+    withdrawnSplit.transfer = round2(withdrawnSplit.transfer);
+    withdrawnSplit.usd = round2(withdrawnSplit.usd);
+    withdrawnSplit.eur = round2(withdrawnSplit.eur);
+
     // Un primer cierre sin ninguna venta no tiene fecha de apertura natural:
     // COALESCE deja que SQLite ponga la de ahora.
     const inserted = await tx.execute({
@@ -412,9 +450,11 @@ router.post('/', asyncHandler(async (req, res) => {
                counted_cash, difference, expected_transfer, sales_count, note,
                register_id, overlap_sales, account_id, account_email, closed_at,
                expected_usd, counted_usd, difference_usd,
-               expected_eur, counted_eur, difference_eur)
+               expected_eur, counted_eur, difference_eur,
+               withdrawn_cash, withdrawn_transfer, withdrawn_usd, withdrawn_eur)
             VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')),
-                    ?, ?, ?, ?, ?, ?)`,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?)`,
       args: [
         req.userId, client_close_id, openedAt, float, expectedCash,
         counted, counted - expectedCash,
@@ -422,6 +462,7 @@ router.post('/', asyncHandler(async (req, res) => {
         registerId, overlapSales, account.id, account.email, operationDate,
         summary.usd, countedUsd, round2(countedUsd - summary.usd),
         summary.eur, countedEur, round2(countedEur - summary.eur),
+        withdrawnSplit.cash, withdrawnSplit.transfer, withdrawnSplit.usd, withdrawnSplit.eur,
       ],
     });
     const closeId = Number(inserted.lastInsertRowid);
@@ -441,6 +482,15 @@ router.post('/', asyncHandler(async (req, res) => {
         sql: `UPDATE currency_purchases SET cash_close_id = ?
               WHERE id IN (${placeholders}) AND cash_close_id IS NULL`,
         args: [closeId, ...coveredPurchases.map((purchase) => purchase.id)],
+      });
+    }
+
+    if (coveredWithdrawals.length > 0) {
+      const placeholders = coveredWithdrawals.map(() => '?').join(',');
+      await tx.execute({
+        sql: `UPDATE cash_withdrawals SET cash_close_id = ?
+              WHERE id IN (${placeholders}) AND cash_close_id IS NULL AND voided_at IS NULL`,
+        args: [closeId, ...coveredWithdrawals.map((w) => w.id)],
       });
     }
 

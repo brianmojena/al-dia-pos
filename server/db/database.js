@@ -296,6 +296,22 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS cash_withdrawals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_withdrawal_id TEXT,
+      method TEXT NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      register_id TEXT,
+      account_id INTEGER,
+      account_email TEXT,
+      cash_close_id INTEGER,
+      voided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -402,6 +418,12 @@ async function initDb() {
     // unit_cost son por paquete, y pack_size los sueltos que salieron por cada
     // uno (congelado: si mañana el paquete trae otra cantidad, la venta no cambia).
     'ALTER TABLE sale_items ADD COLUMN pack_size INTEGER',
+    // Extracciones de caja: lo que el dueño retiró en cada cierre. Los totales
+    // por cada uno de los 4 apartados se guardan en el cierre.
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_cash REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_transfer REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_usd REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE cash_closes ADD COLUMN withdrawn_eur REAL NOT NULL DEFAULT 0',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -459,6 +481,11 @@ async function initDb() {
       ON currency_purchases(user_id, client_purchase_id) WHERE client_purchase_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_currency_purchases_user ON currency_purchases(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_currency_purchases_open ON currency_purchases(user_id, register_id, cash_close_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_withdrawals_client_id
+      ON cash_withdrawals(user_id, client_withdrawal_id) WHERE client_withdrawal_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_cash_withdrawals_user ON cash_withdrawals(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_cash_withdrawals_open ON cash_withdrawals(user_id, cash_close_id);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
       ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;

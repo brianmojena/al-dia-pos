@@ -147,4 +147,49 @@ test('importación masiva de productos', async (t) => {
     assert.deepEqual(res.body, { created: 500, updated: 0, total: 500 });
     assert.equal((await catalogo(ctx.api, token)).length, 500);
   });
+
+  await t.test('POST /api/products/import crea filas en stock_entries con kind "importacion"', async () => {
+    const token = await registerUser(ctx.api);
+    const me = await ctx.api('GET', '/api/auth/me', { token });
+    const userId = me.body.user.id;
+
+    // Crear un producto primero
+    await createProduct(ctx.api, token, { name: 'Arroz', stock: 50, sale_price: 130, purchase_price: 90 });
+    const productos1 = await catalogo(ctx.api, token);
+    const arrozId = productos1.find((p) => p.name === 'Arroz').id;
+
+    // Importar: actualizar el existente (Arroz 50 → 70) y crear uno nuevo (Pan 30)
+    const res = await importar(ctx.api, token, [
+      { name: 'Arroz', sale_price: 130, purchase_price: 90, stock: 70 },
+      { name: 'Pan', sale_price: 50, purchase_price: 30, stock: 30 },
+    ]);
+
+    assert.deepEqual(res.body, { created: 1, updated: 1, total: 2 });
+
+    // Check stock entries for Arroz (updated)
+    const arrozEntries = await ctx.db.execute({
+      sql: 'SELECT * FROM stock_entries WHERE product_id = ? ORDER BY created_at',
+      args: [arrozId],
+    });
+
+    const importacionEntry = arrozEntries.rows.find((e) => e.kind === 'importacion');
+    assert.ok(importacionEntry, 'Arroz tiene una entrada de stock (importación)');
+    assert.equal(importacionEntry.stock_before, 50);
+    assert.equal(importacionEntry.stock_after, 70);
+    assert.equal(importacionEntry.quantity, 20);
+
+    // Check stock entries for Pan (new product)
+    const productos2 = await catalogo(ctx.api, token);
+    const panId = productos2.find((p) => p.name === 'Pan').id;
+    const panEntries = await ctx.db.execute({
+      sql: 'SELECT * FROM stock_entries WHERE product_id = ?',
+      args: [panId],
+    });
+
+    assert.equal(panEntries.rows.length, 1, 'Pan tiene una entrada de stock (nuevo)');
+    assert.equal(panEntries.rows[0].kind, 'importacion');
+    assert.equal(panEntries.rows[0].stock_before, 0);
+    assert.equal(panEntries.rows[0].stock_after, 30);
+    assert.equal(panEntries.rows[0].quantity, 30);
+  });
 });

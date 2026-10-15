@@ -240,6 +240,35 @@ async function routeRequest(method, fullPath, body) {
       }
     }
 
+    // --- extracción de caja ---
+    // Solo el dueño extrae dinero; el historial es del dueño.
+    if (parts[0] === 'api' && parts[1] === 'cash-withdrawals') {
+      if (parts.length === 2) {
+        if (method === 'GET') {
+          if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+          return ok(200, queries.listWithdrawals({ date: query.date, open: query.open }));
+        }
+        if (method === 'POST') {
+          try {
+            return ok(201, queries.createWithdrawalLocal(body || {}));
+          } catch (err) {
+            if (err.code === 'UNAUTHORIZED') return fail(403, err.message);
+            return fail(400, err.message);
+          }
+        }
+      }
+      if (parts.length === 4 && parts[3] === 'void' && method === 'POST') {
+        try {
+          return ok(200, queries.voidWithdrawalLocal(parts[2]));
+        } catch (err) {
+          if (err.status === 404) return fail(404, err.message);
+          if (err.status === 409) return fail(409, err.message);
+          if (err.code === 'UNAUTHORIZED') return fail(403, err.message);
+          return fail(400, err.message);
+        }
+      }
+    }
+
     // --- dashboard ---
     if (parts[0] === 'api' && parts[1] === 'dashboard' && parts.length === 2 && method === 'GET') {
       if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');

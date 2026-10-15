@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate } from './offlineModel.js'
 import { monthCsv } from './offlineExport.js'
+import { withdrawalSplit } from './payment.js'
 const user = { id: 1, role: 'dueño', email: 'owner@test.local', transfer_limit: 200 }
 const fixture = () => ({ base: { ...emptyData(), products: [{ id: 10, name: 'Pan', purchase_price: 6, sale_price: 10, stock: 20 }] }, outbox: [], nextId: -1 })
 let sequence = 0
@@ -166,4 +167,56 @@ test('añadir stock sin internet sube como cantidad a sumar, no como stock final
   assert.deepEqual(byCashier.body, { sale_price: 11, add_stock: 2 })
   assert.equal(project(state).products[0].stock, 27)
   assert.throws(() => add(state, 'PUT', '/api/products/10', { add_stock: 0 }), /no es válida/)
+})
+
+test('withdrawalSplit resta solo del método extractado y respeta voided_at', () => {
+  const w = { method: 'efectivo', amount: 100, voided_at: null }
+  assert.deepEqual(withdrawalSplit(w), { cash: -100, transfer: 0, usd: 0, eur: 0 })
+  const voided = { ...w, voided_at: '2026-09-15T14:00:00Z' }
+  assert.deepEqual(withdrawalSplit(voided), { cash: 0, transfer: 0, usd: 0, eur: 0 })
+  const transfer = { method: 'transferencia', amount: 250, voided_at: null }
+  assert.deepEqual(withdrawalSplit(transfer), { cash: 0, transfer: -250, usd: 0, eur: 0 })
+  const usd = { method: 'USD', amount: 50, voided_at: null }
+  assert.deepEqual(withdrawalSplit(usd), { cash: 0, transfer: 0, usd: -50, eur: 0 })
+})
+
+test('extracción offline reduce holdings y cierre la cubre', () => {
+  const state = fixture()
+  sell(state, 1) // 10 en efectivo
+  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 4, note: 'prueba' })
+  assert.equal(w.kind, 'withdrawal')
+  assert.equal(w.result.amount, 4)
+  assert.equal(w.result.note, 'prueba')
+  const dashboard = readLocal(project(state), '/api/dashboard', '1:1', user)
+  assert.equal(dashboard.holdings.cash, 6)
+  assert.equal(dashboard.open_withdrawals.length, 1)
+  const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 6, opening_float: 0 })
+  assert.equal(close.result.expected_cash, 6)
+  assert.equal(close.result.withdrawn_cash, 4)
+  assert.equal(project(state).cash_withdrawals[0].cash_close_id, close.result.id)
+})
+
+test('anular extracción restaura holdings, pero no si ya entró en cierre', () => {
+  const state = fixture()
+  sell(state, 1)
+  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 4 })
+  let dashboard = readLocal(project(state), '/api/dashboard', '1:1', user)
+  assert.equal(dashboard.holdings.cash, 6)
+  const void1 = add(state, 'POST', `/api/cash-withdrawals/${w.result.client_withdrawal_id}/void`, {})
+  assert.equal(void1.kind, 'withdrawal_void')
+  dashboard = readLocal(project(state), '/api/dashboard', '1:1', user)
+  assert.equal(dashboard.holdings.cash, 10)
+  assert.equal(dashboard.open_withdrawals.length, 0)
+  const w2 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 3 })
+  const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 7, opening_float: 0 })
+  assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w2.result.client_withdrawal_id}/void`, {}), /ya entró en un cierre/)
+})
+
+test('cajero no puede extraer dinero', () => {
+  const state = fixture()
+  const cashier = { ...user, role: 'cajero' }
+  assert.throws(() => add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 }, { user: cashier }), /Solo el dueño/)
+  // Create a withdrawal first
+  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 })
+  assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w.result.client_withdrawal_id}/void`, {}, { user: cashier }), /Solo el dueño/)
 })

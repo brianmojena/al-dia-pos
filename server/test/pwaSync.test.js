@@ -99,7 +99,7 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     assert.equal((await operation({ operation_id: 'cashier-other', method: 'PUT', product_id: id, product: { name: 'X', add_stock: 1 } }, cashier.token)).status, 403);
     assert.equal((await operation({ operation_id: 'add-bad', method: 'PUT', product_id: id, product: { add_stock: 1.5 } })).status, 400, 'una pieza no admite decimales');
     const entries = await ctx.api('GET', '/api/products/stock-entries', { token });
-    const mine = entries.body.filter((e) => e.product_id === id);
+    const mine = entries.body.filter((e) => e.product_id === id && e.kind !== 'nuevo');
     assert.deepEqual(mine.map((e) => [Number(e.quantity), Number(e.stock_before), Number(e.stock_after)]).sort(), [[2, 12, 14], [5, 7, 12]]);
   });
 });

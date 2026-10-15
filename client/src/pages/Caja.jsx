@@ -192,7 +192,7 @@ export default function Caja() {
                 Nota (opcional)
               </label>
               <input
-                placeholder="Ej: saqué 2000 para pagar al proveedor"
+                placeholder="Ej: faltó un billete de 100"
                 value={note} onChange={e => setNote(e.target.value)} className={field}
               />
             </div>
@@ -386,9 +386,12 @@ function ResultCard({ result, onNew }) {
         <Row label="Fondo inicial"      value={fmt(result.opening_float)} muted />
         <Row
           label={<><Banknote size={13} className="inline mr-1.5 -mt-0.5 text-green-600" />Ventas en efectivo</>}
-          value={fmt(result.expected_cash - result.opening_float)}
+          value={fmt(result.expected_cash - result.opening_float + (result.withdrawn_cash || 0))}
           muted
         />
+        {(result.withdrawn_cash || 0) > 0 && (
+          <Row label="Extracciones" value={`− ${fmt(result.withdrawn_cash)}`} muted />
+        )}
         <div className="border-t border-gray-100 pt-3">
           <Row label="Debería haber" value={fmt(result.expected_cash)} />
         </div>
@@ -405,12 +408,16 @@ function ResultCard({ result, onNew }) {
         {['usd', 'eur'].map((k) => {
           const expected = Number(result[`expected_${k}`]) || 0
           const counted = Number(result[`counted_${k}`]) || 0
+          const withdrawn = Number(result[`withdrawn_${k}`]) || 0
           if (expected === 0 && counted === 0) return null
           const diff = Number(result[`difference_${k}`]) || 0
           const code = k.toUpperCase()
           return (
             <div key={k} className="border-t border-gray-100 pt-3 space-y-2">
-              <Row label={<><DollarSign size={13} className="inline mr-1.5 -mt-0.5 text-amber-600" />{code} esperados</>} value={`${fmtForeign(expected)} ${code}`} muted />
+              <Row label={<><DollarSign size={13} className="inline mr-1.5 -mt-0.5 text-amber-600" />{code} esperados</>} value={`${fmtForeign(expected + withdrawn)} ${code}`} muted />
+              {withdrawn > 0 && (
+                <Row label="Extracciones" value={`− ${fmtForeign(withdrawn)} ${code}`} muted />
+              )}
               <Row label={`${code} contados`} value={`${fmtForeign(counted)} ${code}`} />
               <Row
                 label={`Diferencia ${code}`}
@@ -422,13 +429,16 @@ function ResultCard({ result, onNew }) {
           )
         })}
 
-        {result.expected_transfer > 0 && (
+        {(result.expected_transfer || 0) > 0 && (
           <div className="border-t border-gray-100 pt-3">
             <Row
               label={<><Smartphone size={13} className="inline mr-1.5 -mt-0.5 text-[#007AFF]" />Cobrado por transferencia</>}
-              value={fmt(result.expected_transfer)}
+              value={fmt((result.expected_transfer || 0) + (result.withdrawn_transfer || 0))}
               muted
             />
+            {(result.withdrawn_transfer || 0) > 0 && (
+              <Row label="Extracciones" value={`− ${fmt(result.withdrawn_transfer)}`} muted />
+            )}
             <p className="text-[11px] text-gray-400 mt-1.5">
               No entra en el conteo — no está en la gaveta.
             </p>

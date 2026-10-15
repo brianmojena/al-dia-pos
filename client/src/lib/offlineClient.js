@@ -20,8 +20,8 @@ if (channel) channel.onmessage = () => window.dispatchEvent(new Event('local:dat
 
 export function handlesOffline(path, method) {
   const route = path.split('?')[0]
-  if (method === 'GET') return /^\/api\/(products$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$)/.test(route)
-  return /^\/api\/(products(?:\/(?:-?\d+|import))?$|sales$|currency-purchases$|inventory-counts$|cash-closes$|sales\/rejected\/\d+\/review$)/.test(route)
+  if (method === 'GET') return /^\/api\/(products$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|cash-withdrawals$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$)/.test(route)
+  return /^\/api\/(products(?:\/(?:-?\d+|import))?$|sales$|currency-purchases$|cash-withdrawals(?:\/[\w-]+\/void)?$|inventory-counts$|cash-closes$|sales\/rejected\/\d+\/review$)/.test(route)
 }
 
 // Copiar primero y retirar después: un cierre de la app entre ambas escrituras
@@ -141,6 +141,16 @@ export async function syncOffline() {
             })
             const { refreshQueueStatus } = await import('./salesQueue.js')
             await refreshQueueStatus()
+            broadcast()
+            continue
+          }
+          if (op.kind === 'withdrawal_void' && [404, 409].includes(res.status)) {
+            // El servidor ya anuló esta extracción desde otro aparato,
+            // o entró en cierre: ignorar y seguir. El snapshot al final restaura el estado real.
+            await update(keyFor(account), (state) => {
+              state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
+              return state
+            })
             broadcast()
             continue
           }

@@ -138,7 +138,35 @@ function purchaseFields(body) {
   };
 }
 
+/**
+ * Extracciones de caja: el dueño retira dinero en cualquiera de sus 4 apartados
+ * (efectivo, transferencia, dólares, euros). La lógica es similar a las compras
+ * de divisa: restan del apartado que corresponde en el arqueo.
+ */
+const WITHDRAWAL_METHODS = ['efectivo', 'transferencia', 'USD', 'EUR'];
+
+// Lo que una extracción le quita a cada apartado. Anulada = no quita nada.
+function withdrawalSplit(w) {
+  const amount = w.voided_at ? 0 : round2(w.amount);
+  return {
+    cash: w.method === 'efectivo' ? -amount : 0,
+    transfer: w.method === 'transferencia' ? -amount : 0,
+    usd: w.method === 'USD' ? -amount : 0,
+    eur: w.method === 'EUR' ? -amount : 0,
+  };
+}
+
+// Valida y normaliza; lanza Error con mensaje en español para el dueño.
+function withdrawalFields(body) {
+  if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido');
+  const amount = Number(body.amount);
+  if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta cuánto dinero se extrae');
+  const note = body.note == null ? null : String(body.note).trim().slice(0, 200) || null;
+  return { method: body.method, amount: round2(amount), note };
+}
+
 module.exports = {
   PAYMENT_METHODS, CURRENCIES, paymentSplit, paymentLabel, offShopRate, foreignFields, round2,
   purchaseSplit, purchaseFields,
+  WITHDRAWAL_METHODS, withdrawalSplit, withdrawalFields,
 };

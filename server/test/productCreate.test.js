@@ -98,4 +98,28 @@ test('alta de productos', async (t) => {
     }
     assert.equal((await catalogo(ctx.api, dueño)).length, 0);
   });
+
+  await t.test('POST /api/products con stock crea una fila en stock_entries con kind "nuevo"', async () => {
+    const dueño = await registerUser(ctx.api);
+    const cajero = await crearCajero(ctx.api, dueño);
+
+    const res = await crear(ctx.api, cajero.token, {
+      name: 'Azúcar', sale_price: 150, purchase_price: 100, stock: 10,
+    });
+
+    assert.equal(res.status, 201);
+
+    const stockEntries = await ctx.db.execute({
+      sql: 'SELECT * FROM stock_entries WHERE product_id = ?',
+      args: [res.body.id],
+    });
+
+    assert.equal(stockEntries.rows.length, 1, 'se creó una entrada de stock');
+    const entry = stockEntries.rows[0];
+    assert.equal(entry.kind, 'nuevo');
+    assert.equal(entry.quantity, 10);
+    assert.equal(entry.stock_before, 0);
+    assert.equal(entry.stock_after, 10);
+    assert.equal(entry.account_email, cajero.email);
+  });
 });

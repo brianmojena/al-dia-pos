@@ -114,11 +114,11 @@ test('correcciones de ventas', async (t) => {
     await api('PUT', `/api/products/${prod}`, { token: dueño, body: { sale_price: 25 } });
     await api('PUT', `/api/products/${prod}`, { token: dueño, body: { stock: 55, stock_reason: 'conteo' } });
     const entradas = (await api('GET', '/api/products/stock-entries', { token: dueño })).body;
-    assert.equal(entradas.length, 1);
-    assert.equal(entradas[0].kind, 'correccion');
-    assert.equal(entradas[0].quantity, -3);
-    assert.equal(entradas[0].stock_before, 58);
-    assert.equal(entradas[0].stock_after, 55);
-    assert.equal(entradas[0].reason, 'conteo');
+    const correccion = entradas.find((e) => e.kind === 'correccion');
+    assert.ok(correccion, 'hay una corrección de stock');
+    assert.equal(correccion.quantity, -3);
+    assert.equal(correccion.stock_before, 58);
+    assert.equal(correccion.stock_after, 55);
+    assert.equal(correccion.reason, 'conteo');
   });
 });

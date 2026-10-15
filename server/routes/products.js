@@ -101,10 +101,26 @@ router.post('/', asyncHandler(async (req, res) => {
     args: [req.userId, name, purchase, sale, trackStock ? Number(stock) || 0 : 0, unit ?? null, trackStock,
            pack.pack_size, pack.pack_price, account.id, account.email],
   });
+  const newId = Number(insertResult.lastInsertRowid);
   const result = await db.execute({
     sql: 'SELECT * FROM products WHERE id = ?',
-    args: [Number(insertResult.lastInsertRowid)],
+    args: [newId],
   });
+
+  // Log stock entry if product tracks stock and has initial stock > 0
+  const storedStock = trackStock ? Number(stock) || 0 : 0;
+  if (trackStock && storedStock > 0) {
+    const logStatement = stockChangeStatement({
+      userId: req.userId,
+      product: { id: newId, name },
+      before: 0,
+      after: storedStock,
+      account,
+      kind: 'nuevo',
+    });
+    if (logStatement) await db.execute(logStatement);
+  }
+
   res.status(201).json(result.rows[0]);
 }));
 
@@ -177,37 +193,72 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
   }
 
   const db = getDb();
+  const account = await describeAccount(db, req);
   const existingResult = await db.execute({
-    sql: 'SELECT id, name FROM products WHERE user_id = ?',
+    sql: 'SELECT id, name, stock, unit, track_stock FROM products WHERE user_id = ?',
     args: [req.userId],
   });
   const existing = new Map();
   for (const row of existingResult.rows) {
     const key = normalizeName(row.name);
-    if (!existing.has(key)) existing.set(key, Number(row.id));
+    if (!existing.has(key)) existing.set(key, row);
   }
 
   let created = 0;
   let updated = 0;
   const statements = clean.map((p) => {
-    const id = existing.get(p.key);
-    if (id !== undefined) {
+    const existingRow = existing.get(p.key);
+    if (existingRow !== undefined) {
       updated++;
-      return {
-        sql: `UPDATE products
-              SET name = ?, sale_price = ?,
-                  purchase_price = COALESCE(?, purchase_price),
-                  stock = ${addStock ? 'stock + COALESCE(?, 0)' : 'COALESCE(?, stock)'}
-              WHERE id = ? AND user_id = ?`,
-        args: [p.name, p.sale, p.purchase, p.stock, id, req.userId],
-      };
+      const before = Number(existingRow.stock);
+      const after = addStock ? before + (p.stock ?? 0) : (p.stock ?? before);
+
+      // Only log if product tracks stock and stock changed
+      const shouldTrack = existingRow.unit ? existingRow.track_stock === 1 : true;
+      const stockLogStmt = shouldTrack && after !== before
+        ? stockChangeStatement({
+            userId: req.userId,
+            product: { id: existingRow.id, name: p.name },
+            before,
+            after,
+            account,
+            kind: 'importacion',
+          })
+        : null;
+
+      return [
+        {
+          sql: `UPDATE products
+                SET name = ?, sale_price = ?,
+                    purchase_price = COALESCE(?, purchase_price),
+                    stock = ${addStock ? 'stock + COALESCE(?, 0)' : 'COALESCE(?, stock)'}
+                WHERE id = ? AND user_id = ?`,
+          args: [p.name, p.sale, p.purchase, p.stock, existingRow.id, req.userId],
+        },
+        ...(stockLogStmt ? [stockLogStmt] : []),
+      ];
     }
     created++;
-    return {
-      sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock) VALUES (?, ?, ?, ?, ?)',
-      args: [req.userId, p.name, p.purchase ?? 0, p.sale, p.stock ?? 0],
-    };
-  });
+
+    // For new products, add stock log after the INSERT using a subquery
+    const stmts = [
+      {
+        sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock) VALUES (?, ?, ?, ?, ?)',
+        args: [req.userId, p.name, p.purchase ?? 0, p.sale, p.stock ?? 0],
+      },
+    ];
+
+    if (p.stock > 0) {
+      stmts.push({
+        sql: `INSERT INTO stock_entries
+                (user_id, product_id, product_name, quantity, stock_before, stock_after, account_id, account_email, kind)
+              VALUES (?, (SELECT id FROM products WHERE user_id = ? AND name = ? ORDER BY id DESC LIMIT 1), ?, ?, ?, ?, ?, ?, ?)`,
+        args: [req.userId, req.userId, p.name, p.name, p.stock, 0, p.stock, account.id, account.email, 'importacion'],
+      });
+    }
+
+    return stmts;
+  }).flat();
 
   await db.batch(statements, 'write');
   res.json({ created, updated, total: clean.length });

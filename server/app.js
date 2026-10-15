@@ -6,6 +6,7 @@ const productsRouter  = require('./routes/products');
 const salesRouter     = require('./routes/sales');
 const dashboardRouter = require('./routes/dashboard');
 const cashClosesRouter = require('./routes/cashCloses');
+const cashWithdrawalsRouter = require('./routes/cashWithdrawals');
 const inventoryCountsRouter = require('./routes/inventoryCounts');
 const reportsRouter = require('./routes/reports');
 const syncRouter = require('./routes/sync');
@@ -25,6 +26,7 @@ app.use('/api/sales',     requireAuth, salesRouter);
 app.use('/api/dashboard', requireAuth, requireOwner, dashboardRouter);
 app.use('/api/push', requireAuth, requireOwner, require('./routes/push'));
 app.use('/api/currency-purchases', requireAuth, require('./routes/currencyPurchases'));
+app.use('/api/cash-withdrawals', requireAuth, cashWithdrawalsRouter);
 app.use('/api/cash-closes', requireAuth, cashClosesRouter);
 app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 // Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner

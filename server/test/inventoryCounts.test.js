@@ -269,8 +269,8 @@ test('arqueo de inventario', async (t) => {
 
     // Existe un stock_entries con kind='correccion'.
     const entries = await ctx.db.execute({
-      sql: 'SELECT * FROM stock_entries WHERE product_id = ? ORDER BY created_at DESC LIMIT 1',
-      args: [productId],
+      sql: 'SELECT * FROM stock_entries WHERE product_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 1',
+      args: [productId, 'correccion'],
     });
     assert.equal(entries.rows.length, 1);
     assert.equal(entries.rows[0].kind, 'correccion');

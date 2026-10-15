@@ -17,6 +17,8 @@ const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '
 // mano por la cuenta principal o unidades que volvieron al anular una venta.
 const ENTRY_KIND = {
   entrada:    { label: 'Entrada',    color: 'text-green-600' },
+  nuevo:      { label: 'Producto nuevo', color: 'text-green-600' },
+  importacion: { label: 'Importación', color: 'text-green-600' },
   correccion: { label: 'Corrección', color: 'text-[#007AFF]' },
   anulacion:  { label: 'Venta anulada', color: 'text-orange-600' },
 }

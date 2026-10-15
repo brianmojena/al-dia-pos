@@ -200,6 +200,27 @@ test('reportes: histórico por día y exportación a Excel', async (t) => {
     assert.equal(res.body[0].id, v.body.id);
   });
 
+  await t.test('un día con solo entradas de mercancía (sin ventas) aparece en el histórico con stock_moves', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, { name: 'Azúcar', stock: 0, sale_price: 50 });
+    const me = await ctx.api('GET', '/api/auth/me', { token });
+    const userId = me.body.user.id;
+
+    // Insertar una entrada de stock
+    await ctx.db.execute({
+      sql: 'INSERT INTO stock_entries (user_id, product_id, product_name, quantity, stock_before, stock_after, kind, account_email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [userId, productId, 'Azúcar', 10, 0, 10, 'entrada', 'test@test.local', '2026-09-11 15:00:00'],
+    });
+
+    const dias = await ctx.api('GET', '/api/reports/days?month=2026-09', { token });
+    assert.equal(dias.status, 200);
+    const dia = dias.body.days.find((d) => d.date === '2026-09-11');
+    assert.ok(dia, 'el día con entrada de stock debe aparecer');
+    assert.equal(dia.sales_count, 0, 'sin ventas');
+    assert.equal(dia.stock_moves, 1, 'una entrada de stock');
+    assert.equal(dia.total, 0, 'sin ventas = sin total');
+  });
+
   await t.test('el Excel trae las hojas de ventas, divisa y cierres del mes', async () => {
     const token = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, token, { name: 'Refresco', stock: 20, sale_price: 80, purchase_price: 50 });
@@ -236,7 +257,7 @@ test('reportes: histórico por día y exportación a Excel', async (t) => {
     await workbook.xlsx.load(buffer);
 
     const nombres = workbook.worksheets.map((s) => s.name);
-    assert.deepEqual(nombres, ['Resumen por día', 'Ventas', 'Cobros en divisa', 'Cierres de caja']);
+    assert.deepEqual(nombres, ['Resumen por día', 'Ventas', 'Cobros en divisa', 'Extracciones', 'Cierres de caja']);
 
     const ventas = workbook.getWorksheet('Ventas');
     // Encabezado + 2 líneas de venta (una de la venta de 2 unidades, otra de la de transferencia).
