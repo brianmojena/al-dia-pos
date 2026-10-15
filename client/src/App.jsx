@@ -38,7 +38,8 @@ export default function App() {
             {/* Cualquier cuenta compra divisas; el historial lo ve solo el dueño. */}
             <Route path="divisas" element={<Divisas />} />
             {/* El empleado entra para dar de alta productos nuevos; la
-                pantalla le oculta editar, borrar, importar y contar. */}
+                pantalla le oculta editar, borrar, importar. Cualquier cuenta
+                puede contar inventario (el servidor registra quién y el dueño lo ve). */}
             <Route path="products" element={<Products />} />
             {/* Todas las cuentas usan el almacén (alta, edición, importación,
                 borrado y transferencia); el servidor registra quién lo hizo
@@ -47,13 +48,16 @@ export default function App() {
               <Route path="almacen" element={<Almacen />} />
               <Route path="almacen/importar" element={<ImportarProductos target="almacen" />} />
             </Route>
+            {/* El conteo de inventario lo puede hacer cualquier cuenta; el dueño ve
+                quién contó. Pero solo el dueño ve el historial de conteos. */}
+            <Route path="inventario" element={<Inventario />} />
 
-            {/* Un cajero solo cobra y cierra la caja: el resto ni lo ve. */}
+            {/* Un cajero solo cobra y cierra la caja: el resto (excepto contar
+                inventario) ni lo ve. */}
             <Route element={<RequireOwner />}>
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="sales"      element={<Sales />} />
               <Route path="cajeros"    element={<Cajeros />} />
-              <Route path="inventario" element={<Inventario />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
           </Route>

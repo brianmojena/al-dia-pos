@@ -42,9 +42,10 @@ const loadItems = (db, countId) =>
     args: [countId],
   });
 
-router.use(requireOwner);
+// GET endpoints are owner-only (list and detail of counts).
+// POST is allowed to any authenticated user (account_email records who counted).
 
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', requireOwner, asyncHandler(async (req, res) => {
   const result = await getDb().execute({
     sql: 'SELECT * FROM inventory_counts WHERE user_id = ? ORDER BY counted_at DESC LIMIT 100',
     args: [req.userId],
@@ -52,7 +53,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-router.get('/:id', asyncHandler(async (req, res) => {
+router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const countResult = await db.execute({
     sql: 'SELECT * FROM inventory_counts WHERE id = ? AND user_id = ?',

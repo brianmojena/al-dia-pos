@@ -191,7 +191,7 @@ test('arqueo de inventario', async (t) => {
     assert.equal(await stockDe(ctx, productId), 60, 'ningún intento inválido tocó el stock');
   });
 
-  await t.test('un cajero no puede hacer ni ver arqueos de inventario', async () => {
+  await t.test('un cajero puede contar pero no ve el historial de arqueos', async () => {
     const dueño = await registerUser(ctx.api);
     const productId = await createProduct(ctx.api, dueño, { name: 'Sal', stock: 10, sale_price: 40 });
 
@@ -200,14 +200,22 @@ test('arqueo de inventario', async (t) => {
     const login = await ctx.api('POST', '/api/auth/login', { body: { email, password: 'caja1234' } });
     const cajero = login.body.token;
 
-    // Si el cajero pudiera declarar el conteo, taparía su propio faltante
-    // escribiendo justo el número que el sistema espera.
+    // El cajero puede hacer conteos; el sistema registra quién contó (account_email).
+    // El dueño ve los conteos en "Arqueos anteriores" con el email del cajero.
     const intento = await contar(ctx.api, cajero, [{ product_id: productId, counted: 3 }]);
-    assert.equal(intento.status, 403);
-    assert.equal(await stockDe(ctx, productId), 10);
+    assert.equal(intento.status, 201, 'el cajero puede contar inventario');
+    assert.equal(await stockDe(ctx, productId), 3, 'el stock se ajusta a lo contado');
+    assert.equal(intento.body.account_email, email, 'queda registrado quién contó');
 
+    // Pero el cajero no ve la lista ni el detalle.
     const historial = await ctx.api('GET', '/api/inventory-counts', { token: cajero });
-    assert.equal(historial.status, 403);
+    assert.equal(historial.status, 403, 'el cajero no ve el historial de arqueos');
+
+    // El dueño sí lo ve y ve quién contó.
+    const lista = await ctx.api('GET', '/api/inventory-counts', { token: dueño });
+    assert.equal(lista.status, 200);
+    assert.equal(lista.body.length, 1);
+    assert.equal(lista.body[0].account_email, email, 'el dueño ve quién contó en la lista');
   });
 
   await t.test('los arqueos de una tienda no se ven desde otra', async () => {

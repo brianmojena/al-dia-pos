@@ -9,10 +9,12 @@ import { apiFetch } from '../lib/api'
 import { newId } from '../lib/newId'
 import { formatDateTime } from '../lib/dates'
 import { accountLabel } from '../lib/accountLabel'
+import { useAuth } from '../context/AuthContext'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Inventario() {
+  const { user } = useAuth()
   const [products,    setProducts]    = useState([])
   const [history,     setHistory]     = useState([])
   const [counts,      setCounts]      = useState({})   // product_id -> texto tecleado (productos sin pack)
@@ -27,12 +29,17 @@ export default function Inventario() {
 
   const load = async () => {
     try {
-      const [p, h] = await Promise.all([
-        apiFetch('/api/products').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
-        apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
-      ])
+      const p = await apiFetch('/api/products').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data })
       setProducts(Array.isArray(p) ? p : [])
-      setHistory(Array.isArray(h) ? h : [])
+
+      // Los cajeros no ven el historial de arqueos: no pueden hacer GET /api/inventory-counts (403).
+      // Solo el dueño ve quién contó en "Arqueos anteriores".
+      if (user?.role === 'cajero') {
+        setHistory([])
+      } else {
+        const h = await apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data })
+        setHistory(Array.isArray(h) ? h : [])
+      }
     } catch (error) { setError(error.message || 'No se pudieron leer los datos locales') }
     finally { setLoading(false) }
   }

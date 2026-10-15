@@ -230,7 +230,6 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.register_id = 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
   } else if (path === '/api/inventory-counts') {
-    assert(owner, 'Solo el dueño puede contar inventario')
     op.kind = 'count'
     op.body.client_count_id ||= ctx.newId()
     const existing = data.inventory_counts.find((c) => c.client_count_id === op.body.client_count_id)
