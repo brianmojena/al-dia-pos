@@ -46,7 +46,7 @@ test('down-sync del escritorio', async (t) => {
           items: [{ product_id: 1000 + producto.id, product_name: 'Producto', quantity: 2, unit_price: 100, unit_cost: 60 }],
         }],
         cash_closes: [], inventory_counts: [],
-        cursors: { sale: 41, close: 0, count: 0 }, has_more: false,
+        cursors: { sale: 41, close: 0, count: 0, close_correction: 0 }, has_more: false,
       };
       servidor = async (method, path) => {
         if (path.startsWith('/api/sync/delta')) return { ok: true, status: 200, data: delta };
@@ -78,7 +78,7 @@ test('down-sync del escritorio', async (t) => {
       const delta = {
         sales: [{ id: 77, client_sale_id: sale.client_sale_id, total: 100, profit: 40,
           payment_method: 'efectivo', created_at: sale.created_at, register_id: 'desk-x', account_email: 'dueno@mitienda.cu', items: [] }],
-        cash_closes: [], inventory_counts: [], cursors: { sale: 77, close: 0, count: 0 }, has_more: false,
+        cash_closes: [], inventory_counts: [], cursors: { sale: 77, close: 0, count: 0, close_correction: 0 }, has_more: false,
       };
       servidor = async (_method, path) => path.startsWith('/api/sync/delta') ? { ok: true, status: 200, data: delta } : path === '/api/products' ? catalog() : path === '/api/auth/me' ? me() : { ok: false, status: 404, data: null };
       await syncOnce();
@@ -96,7 +96,7 @@ test('down-sync del escritorio', async (t) => {
       queries.applyServerDelta({
         sales: [{ id: 91, client_sale_id: null, total: 50, profit: 10, payment_method: 'efectivo', created_at: '2026-09-23 16:00:00', register_id: 'web:9', account_email: 'otra@tienda.cu',
           items: [{ product_id: 9999, product_name: 'Producto remoto borrado', quantity: 1, unit_price: 50, unit_cost: 40 }] }],
-        cash_closes: [], inventory_counts: [], cursors: { sale: 91, close: 0, count: 0 }, has_more: false,
+        cash_closes: [], inventory_counts: [], cursors: { sale: 91, close: 0, count: 0, close_correction: 0 }, has_more: false,
       });
       const item = ctx.db.prepare('SELECT product_id, product_name FROM sale_items').get();
       assert.equal(item.product_id, null);
@@ -116,7 +116,7 @@ test('down-sync del escritorio', async (t) => {
           if (query.get('after_sale') === '0') {
             return { ok: true, status: 200, data: {
               sales: [{ id: 1, client_sale_id: 'page-1', total: 10, profit: 1, payment_method: 'efectivo', created_at: '2026-09-23 16:00:00', register_id: 'web:1', account_email: 'otra@tienda.cu', items: [] }],
-              cash_closes: [], inventory_counts: [], cursors: { sale: 1, close: 0, count: 0 }, has_more: true,
+              cash_closes: [], inventory_counts: [], cursors: { sale: 1, close: 0, count: 0, close_correction: 0 }, has_more: true,
             } };
           }
           throw Object.assign(new Error('Sin conexión'), { isNetworkError: true });
@@ -149,14 +149,14 @@ test('down-sync del escritorio', async (t) => {
           for (let id = start; id <= end; id++) {
             sales.push({ id, client_sale_id: `load-${id}`, total: 1, profit: 0, payment_method: 'efectivo', created_at: '2026-09-23 16:00:00', register_id: 'web:1', account_email: 'otra@tienda.cu', items: [] });
           }
-          return { ok: true, status: 200, data: { sales, cash_closes: [], inventory_counts: [], cursors: { sale: end, close: 0, count: 0 }, has_more: end < 5000 } };
+          return { ok: true, status: 200, data: { sales, cash_closes: [], inventory_counts: [], cursors: { sale: end, close: 0, count: 0, close_correction: 0 }, has_more: end < 5000 } };
         }
         if (path === '/api/products') return catalog();
         if (path === '/api/auth/me') return me();
         return { ok: false, status: 404, data: null };
       };
       const summary = await syncOnce();
-      assert.deepEqual(summary.downSync, { sales: 5000, closes: 0, counts: 0, purchases: 0, withdrawals: 0, more: false, error: null });
+      assert.deepEqual(summary.downSync, { sales: 5000, closes: 0, counts: 0, purchases: 0, withdrawals: 0, close_corrections: 0, more: false, error: null });
       assert.equal(ctx.db.prepare('SELECT COUNT(*) AS n FROM sales').get().n, 5000);
       assert.equal(ctx.queries.getSyncState('delta_after_sale'), '5000');
       assert.equal(ctx.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'syncing'").get().n, 0);
@@ -174,7 +174,7 @@ test('down-sync del escritorio', async (t) => {
       const delta = {
         sales: [],
         cash_closes: [{ id: 9, client_close_id: 'web-close', register_id: 'web:2', opened_at: '2026-09-23 10:00:00', closed_at: '2026-09-23 11:00:00', opening_float: 0, expected_cash: 0, counted_cash: 0, difference: 0, expected_transfer: 0, sales_count: 0, note: null, account_email: 'otra@tienda.cu' }],
-        inventory_counts: [], cursors: { sale: 0, close: 9, count: 0 }, has_more: false,
+        inventory_counts: [], cursors: { sale: 0, close: 9, count: 0, close_correction: 0 }, has_more: false,
       };
       servidor = async (_method, path) => path.startsWith('/api/sync/delta') ? { ok: true, status: 200, data: delta } : path === '/api/products' ? catalog() : path === '/api/auth/me' ? me() : { ok: false, status: 404, data: null };
       await syncOnce();
@@ -183,9 +183,38 @@ test('down-sync del escritorio', async (t) => {
 
       ctx.queries.setSession({ user_id: 1, email: 'cajero@mitienda.cu', store_name: 'Tienda', plan: 'dev', token: 'token', role: 'cajero' });
       llamadas.length = 0;
+      servidor = async (_method, path) => path === '/api/sync/snapshot'
+        ? { ok: true, status: 200, data: { sales: [], cash_closes: [], currency_purchases: [], cash_withdrawals: [] } }
+        : path === '/api/products' ? catalog() : path === '/api/auth/me' ? me() : { ok: false, status: 404, data: null };
       await syncOnce();
       assert.equal(llamadas.some((call) => call.path.startsWith('/api/sync/delta')), false);
+      assert.equal(llamadas.some((call) => call.path === '/api/sync/snapshot'), true, 'baja solo la proyección personal autorizada');
       void producto;
+    } finally {
+      ctx.close();
+    }
+  });
+
+  await t.test('cajero baja sus ventas sincronizadas sin ganancias y las incluye en su cierre', async () => {
+    const ctx = startLocalDb();
+    try {
+      ctx.queries.setSession({ user_id: 1, email: 'cajero@mitienda.cu', store_name: 'Tienda', plan: 'dev', token: 'token', role: 'cajero' });
+      const sale = { id: 61, client_sale_id: 'cashier-cloud-sale', total: 300, payment_method: 'efectivo',
+        created_at: '2026-10-14 10:00:00', register_id: 'web:2', account_email: 'cajero@mitienda.cu',
+        cash_close_id: null, items: [{ id: 1, product_id: null, product_name: 'Pan', quantity: 1, unit_price: 300 }] };
+      servidor = async (_method, path) => path === '/api/sync/snapshot'
+        ? { ok: true, status: 200, data: { sales: [sale], cash_closes: [], currency_purchases: [], cash_withdrawals: [] } }
+        : path === '/api/products' ? catalog() : path === '/api/auth/me' ? me() : { ok: false, status: 404, data: null };
+      const summary = await syncOnce();
+      assert.equal(summary.downSync.sales, 1);
+      assert.equal(llamadas.some((call) => call.path.startsWith('/api/sync/delta')), false);
+      const own = ctx.queries.listSales({ accountEmail: 'cajero@mitienda.cu' });
+      assert.equal(own.length, 1);
+      assert.equal('profit' in own[0], false);
+      assert.equal('unit_cost' in own[0].items[0], false);
+      const close = ctx.queries.createCashCloseLocal({ opening_float: 1000, counted_cash: 1300 });
+      assert.equal(close.expected_cash, 1300);
+      assert.equal(close.difference, 0);
     } finally {
       ctx.close();
     }
@@ -220,8 +249,8 @@ test('down-sync del escritorio', async (t) => {
       ctx.queries.setSyncState('delta_after_count', 3);
       ctx.queries.setSyncState('delta_after_purchase', 9);
       ctx.queries.setSyncState('delta_after_correction', 4);
-      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, withdrawal: 0, close: 7, count: 3, correction: 4 });
-      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, withdrawal: 0, close: 0, count: 0, correction: 0 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, withdrawal: 0, close: 7, count: 3, correction: 4, close_correction: 0 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, withdrawal: 0, close: 0, count: 0, correction: 0, close_correction: 0 });
     } finally {
       ctx.close();
     }
@@ -259,14 +288,17 @@ test('actualizar desde 1.2.1 conserva el período abierto de la caja', () => {
     initLocalDb(dbPath);
     const registerId = ctx.queries.getRegisterId();
     const db = getLocalDb();
-    const ventas = db.prepare('SELECT client_sale_id, origin, register_id, cash_close_id FROM sales ORDER BY id').all();
-    const cierre = db.prepare("SELECT id FROM cash_closes WHERE client_close_id = 'cierre-viejo'").get();
+    const ventas = db.prepare('SELECT client_sale_id, origin, register_id, cash_close_id, account_email FROM sales ORDER BY id').all();
+    const cierre = db.prepare("SELECT id, account_email FROM cash_closes WHERE client_close_id = 'cierre-viejo'").get();
 
     assert.equal(ventas[0].cash_close_id, cierre.id, 'la venta anterior al cierre queda cubierta por él');
     assert.equal(ventas[1].cash_close_id, null, 'la posterior sigue en el período abierto');
-    assert.ok(ventas.every((v) => v.origin === 'local' && v.register_id === registerId));
-
+    assert.equal(ventas[1].account_email, null, 'la migración no inventa autoría en una PC compartida');
+    assert.equal(cierre.account_email, null, 'el cierre legado conserva autoría desconocida');
+    assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, true, 'la caja local conserva su venta legado abierta');
     const cierreNuevo = ctx.queries.createCashCloseLocal({ counted_cash: 250 });
+    assert.equal(cierreNuevo.expected_cash, 250, 'la venta legado sin autor sigue entrando en el cajón local');
+    assert.ok(ventas.every((v) => v.origin === 'local' && v.register_id === registerId));
     assert.equal(cierreNuevo.sales_count, 1, 'el próximo cierre solo cubre lo que seguía abierto');
     assert.equal(cierreNuevo.expected_cash, 250);
   } finally {

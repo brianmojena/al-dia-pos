@@ -201,9 +201,23 @@ test('arqueos en la caja de escritorio', async (t) => {
       const cierre = await routeRequest('POST', '/api/cash-closes', { counted_cash: 150 });
       assert.equal(cierre.status, 201);
       assert.equal(cierre.data.difference, -50);
+      assert.equal(cierre.data.pending, true, 'server_id nulo se presenta como pendiente');
 
       const historial = await routeRequest('GET', '/api/cash-closes');
-      assert.equal(historial.status, 403, 'el historial completo de cierres es solo del dueño');
+      assert.equal(historial.status, 200, 'el cajero puede consultar sus cierres anteriores');
+      assert.equal(historial.data.length, 1);
+      assert.equal(historial.data[0].id, cierre.data.id);
+      assert.equal(historial.data[0].pending, true);
+      assert.deepEqual(ctx.queries.cashCloseSummary(), [], 'los cierres provisionales no entran al resumen financiero');
+      ctx.db.prepare('UPDATE cash_closes SET server_id = ?, expected_cash = ?, difference = ? WHERE id = ?').run(99, 150, -50, cierre.data.id);
+      const confirmado = await routeRequest('GET', '/api/cash-closes');
+      assert.equal(confirmado.data[0].pending, false, 'la siguiente lectura refleja el cierre confirmado al sincronizar');
+      assert.equal(ctx.queries.cashCloseSummary()[0].closes, 1);
+
+      const ventas = await routeRequest('GET', '/api/sales');
+      assert.equal(ventas.status, 200, 'el cajero puede consultar sus ventas cerradas');
+      assert.equal(ventas.data.length, 1);
+      assert.equal(ventas.data[0].cash_close_id, cierre.data.id);
 
       const resumen = await routeRequest('GET', '/api/cash-closes/summary');
       assert.equal(resumen.status, 403, 'el resumen de cierres es solo del dueño');

@@ -36,6 +36,8 @@ test('correcciones de ventas', async (t) => {
     assert.equal(Number(fix.body.cash_close.difference), 0);
     assert.equal(Number(fix.body.cash_close.expected_transfer), 1200);
     assert.equal(Number(fix.body.cash_close.original_difference), -1200);
+    assert.equal(Number(fix.body.cash_close.correction_revision), 1,
+      'una corrección de venta invalida una edición de cierre abierta');
     assert.ok(fix.body.cash_close.corrected_at);
 
     const log = await api('GET', `/api/sales/${venta.body.id}/corrections`, { token: dueño });

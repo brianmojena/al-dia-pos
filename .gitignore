@@ -14,6 +14,8 @@ server/db/inventory.db-*
 client/dist/
 desktop/dist/
 desktop/client-dist/
+marketing-video/node_modules/
+marketing-video/out/
 
 # Notas de trabajo (no forman parte del producto)
 ejecucion y eso

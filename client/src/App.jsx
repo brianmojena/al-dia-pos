@@ -41,6 +41,7 @@ export default function App() {
                 pantalla le oculta editar, borrar, importar. Cualquier cuenta
                 puede contar inventario (el servidor registra quién y el dueño lo ve). */}
             <Route path="products" element={<Products />} />
+            <Route path="sales" element={<Sales />} />
             {/* Todas las cuentas usan el almacén (alta, edición, importación,
                 borrado y transferencia); el servidor registra quién lo hizo
                 y solo la principal ve ese historial. */}
@@ -52,11 +53,9 @@ export default function App() {
                 quién contó. Pero solo el dueño ve el historial de conteos. */}
             <Route path="inventario" element={<Inventario />} />
 
-            {/* Un cajero solo cobra y cierra la caja: el resto (excepto contar
-                inventario) ni lo ve. */}
+            {/* El análisis agregado y la auditoría siguen siendo de la cuenta principal. */}
             <Route element={<RequireOwner />}>
               <Route path="dashboard" element={<Dashboard />} />
-              <Route path="sales"      element={<Sales />} />
               <Route path="cajeros"    element={<Cajeros />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>

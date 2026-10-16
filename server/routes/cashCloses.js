@@ -7,6 +7,7 @@ const { describeAccount } = require('../lib/account');
 const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('../lib/payment');
+const { CashCloseCorrectionError, closeDetails, correctCashClose } = require('../lib/cashCloseCorrections');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -105,7 +106,7 @@ const countedForeign = (value) => {
  * arqueo para siempre. Si después ese escritorio viejo las cierra por ids, el
  * cierre lo deja anotado en `overlap_sales` (ver el POST).
  */
-const openSales = async (executor, userId, mode, registerId, wholeShop = false) => {
+const openSales = async (executor, userId, mode, registerId, wholeShop = false, accountId = null) => {
   if (mode === 'web' && wholeShop) {
     const result = await executor.execute({
       sql: `SELECT * FROM sales WHERE user_id = ? AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
@@ -114,17 +115,19 @@ const openSales = async (executor, userId, mode, registerId, wholeShop = false) 
     return result.rows;
   }
   if (mode === 'web') {
+    const ownLegacy = accountId == null ? '' : ` AND (account_id = ? OR
+      (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))`;
     const result = await executor.execute({
       sql: `SELECT * FROM sales WHERE user_id = ? AND cash_close_id IS NULL
-            AND (register_id = ? OR register_id IS NULL) ORDER BY created_at ASC, id ASC`,
-      args: [userId, registerId],
+            AND (register_id = ? OR register_id IS NULL)${ownLegacy} ORDER BY created_at ASC, id ASC`,
+      args: accountId == null ? [userId, registerId] : [userId, registerId, accountId, accountId],
     });
     return result.rows;
   }
   const result = await executor.execute({
     sql: `SELECT * FROM sales WHERE user_id = ? AND register_id IS NULL
-          AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
-    args: [userId],
+          AND cash_close_id IS NULL${accountId == null ? '' : ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'} ORDER BY created_at ASC, id ASC`,
+    args: accountId == null ? [userId] : [userId, accountId, accountId],
   });
   return result.rows;
 };
@@ -143,20 +146,21 @@ const openSales = async (executor, userId, mode, registerId, wholeShop = false) 
  * mandar contado y esperado iguales y hacer que la caja cuadre siempre, que es
  * justo lo que el conteo a ciegas trata de impedir.
  */
-const salesByClientIds = async (executor, userId, ids) => {
+const salesByClientIds = async (executor, userId, ids, accountId = null) => {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => '?').join(',');
   const result = await executor.execute({
     sql: `SELECT * FROM sales WHERE user_id = ? AND client_sale_id IN (${placeholders})
+          ${accountId == null ? '' : 'AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'}
           ORDER BY created_at ASC, id ASC`,
-    args: [userId, ...ids],
+    args: accountId == null ? [userId, ...ids] : [userId, ...ids, accountId, accountId],
   });
   return result.rows;
 };
 
 // Lo mismo para las compras de divisa: las que le tocan a esta caja y siguen
 // sin arqueo. Misma regla de cobertura que las ventas.
-const openPurchases = async (executor, userId, mode, registerId, wholeShop = false) => {
+const openPurchases = async (executor, userId, mode, registerId, wholeShop = false, accountId = null) => {
   if (mode === 'web' && wholeShop) {
     const all = await executor.execute({
       sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
@@ -164,29 +168,32 @@ const openPurchases = async (executor, userId, mode, registerId, wholeShop = fal
     });
     return all.rows;
   }
+  const ownLegacy = accountId == null ? '' : ` AND (account_id = ? OR
+    (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))`;
   const result = mode === 'web'
     ? await executor.execute({
         sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL
-              AND (register_id = ? OR register_id IS NULL) ORDER BY created_at ASC, id ASC`,
-        args: [userId, registerId],
+              AND (register_id = ? OR register_id IS NULL)${ownLegacy} ORDER BY created_at ASC, id ASC`,
+        args: accountId == null ? [userId, registerId] : [userId, registerId, accountId, accountId],
       })
     : await executor.execute({
         sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND register_id IS NULL
-              AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
-        args: [userId],
+              AND cash_close_id IS NULL${ownLegacy} ORDER BY created_at ASC, id ASC`,
+        args: accountId == null ? [userId] : [userId, accountId, accountId],
       });
   return result.rows;
 };
 
 // Las compras de un conjunto explícito de client_purchase_id (cierre de la
 // app de escritorio, que ya las tiene sincronizadas).
-const purchasesByClientIds = async (executor, userId, ids) => {
+const purchasesByClientIds = async (executor, userId, ids, accountId = null) => {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => '?').join(',');
   const result = await executor.execute({
     sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND client_purchase_id IN (${placeholders})
+          ${accountId == null ? '' : 'AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'}
           ORDER BY created_at ASC, id ASC`,
-    args: [userId, ...ids],
+    args: accountId == null ? [userId, ...ids] : [userId, ...ids, accountId, accountId],
   });
   return result.rows;
 };
@@ -216,8 +223,9 @@ const modeFor = (req, clientSaleIds, requestedRegisterId) => {
 const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const registerId = resolveRegisterId(req, requestedRegisterId);
   const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
-  const sales = await openSales(executor, req.userId, mode, registerId, closesWholeShop(req));
-  const purchases = await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req));
+  const cashierAccountId = req.role === OWNER ? null : req.accountId;
+  const sales = await openSales(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
+  const purchases = await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
   // Las extracciones siempre son de toda la tienda, independiente de la caja.
   const withdrawals = await openWithdrawals(executor, req.userId);
 
@@ -243,14 +251,18 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   };
 };
 
-// Historial: solo el dueño. Cada fila lleva el efectivo esperado de su
-// período, así que dejarlo abierto le daría al cajero justo el número que el
-// conteo a ciegas le esconde.
-router.get('/', requireOwner, asyncHandler(async (req, res) => {
+// El dueño ve el historial de la tienda; cada cajero ve el resultado de sus
+// propios cierres, que ya terminaron y no pueden alterar el conteo abierto.
+router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
+  const cashierColumns = `id, client_close_id, opened_at, closed_at, opening_float,
+    expected_cash, counted_cash, difference, expected_transfer, sales_count, note,
+    register_id, account_id, account_email, expected_usd, counted_usd,
+    difference_usd, expected_eur, counted_eur, difference_eur, withdrawn_cash,
+    withdrawn_transfer, withdrawn_usd, withdrawn_eur, correction_revision`;
   const result = await db.execute({
-    sql: 'SELECT * FROM cash_closes WHERE user_id = ? ORDER BY closed_at DESC LIMIT 100',
-    args: [req.userId],
+    sql: `SELECT ${req.role === OWNER ? '*' : cashierColumns} FROM cash_closes WHERE user_id = ?${req.role === OWNER ? '' : ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'} ORDER BY closed_at DESC${req.role === OWNER ? ' LIMIT 100' : ''}`,
+    args: req.role === OWNER ? [req.userId] : [req.userId, req.accountId, req.accountId],
   });
   res.json(result.rows);
 }));
@@ -302,6 +314,42 @@ router.get('/current', asyncHandler(async (req, res) => {
     is_first_close: period.isFirstClose,
     has_sales: period.sales.length > 0 || period.purchases.length > 0 || period.withdrawals.length > 0,
   });
+}));
+
+// Detalle de un cierre confirmado. El cajero solo puede consultar los suyos;
+// los cambios y su auditoría quedan reservados al dueño de la tienda.
+router.get('/:id', asyncHandler(async (req, res) => {
+  const closeId = Number(req.params.id);
+  if (!Number.isInteger(closeId) || closeId <= 0) return res.status(400).json({ error: 'ID de cierre inválido' });
+  const db = getDb();
+  const ownScope = req.role === OWNER ? '' : ` AND (account_id = ? OR
+    (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))`;
+  const args = req.role === OWNER ? [closeId, req.userId] : [closeId, req.userId, req.accountId, req.accountId];
+  const close = (await db.execute({
+    sql: `SELECT * FROM cash_closes WHERE id = ? AND user_id = ?${ownScope}`,
+    args,
+  })).rows[0];
+  if (!close) return res.status(404).json({ error: 'Cierre de caja no encontrado' });
+  if (req.role !== OWNER) {
+    const { corrected_at, original_expected_cash, original_difference, overlap_sales, ...safeClose } = close;
+    return res.json({ ...safeClose, corrections: [] });
+  }
+  res.json(await closeDetails(db, close));
+}));
+
+router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
+  const closeId = Number(req.params.id);
+  if (!Number.isInteger(closeId) || closeId <= 0) return res.status(400).json({ error: 'ID de cierre inválido' });
+  const account = await describeAccount(getDb(), req);
+  try {
+    const result = await correctCashClose(getDb(), {
+      userId: req.userId, closeId, body: req.body, account,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof CashCloseCorrectionError) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -373,8 +421,8 @@ router.post('/', asyncHandler(async (req, res) => {
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || a.id - b.id);
     };
     let covered = mode === 'desktop'
-      ? await withWholeShop(await salesByClientIds(tx, req.userId, client_sale_ids), await openSales(tx, req.userId, 'web', null, true))
-      : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req));
+      ? await withWholeShop(await salesByClientIds(tx, req.userId, client_sale_ids, req.role === OWNER ? null : req.accountId), await openSales(tx, req.userId, 'web', null, true))
+      : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitIds) {
       const available = new Set(covered.map((sale) => Number(sale.id)));
       if (explicitIds.some((id) => !available.has(id))) {
@@ -391,8 +439,8 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(400).json({ error: 'Compras del cierre inválidas' });
     }
     let coveredPurchases = mode === 'desktop'
-      ? await withWholeShop(await purchasesByClientIds(tx, req.userId, client_purchase_ids || []), await openPurchases(tx, req.userId, 'web', null, true))
-      : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req));
+      ? await withWholeShop(await purchasesByClientIds(tx, req.userId, client_purchase_ids || [], req.role === OWNER ? null : req.accountId), await openPurchases(tx, req.userId, 'web', null, true))
+      : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitPurchaseIds) {
       const available = new Set(coveredPurchases.map((purchase) => Number(purchase.id)));
       if (explicitPurchaseIds.some((id) => !available.has(id))) {

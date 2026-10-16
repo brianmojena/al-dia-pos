@@ -12,18 +12,127 @@ import { paymentSplit, offShopRate, fmtForeign } from '../lib/payment'
 import { formatDayLabel, formatTime } from '../lib/dates'
 import { shiftMonth, monthLabel, dayLabel, closeStatus } from '../lib/months'
 import { accountLabel } from '../lib/accountLabel'
+import { useAuth } from '../context/AuthContext'
 import RejectedSalesPanel from '../components/RejectedSalesPanel'
 import SaleCorrection, { VoidedSales } from '../components/SaleCorrection'
+import { summarizeCashierSales } from '../lib/cashierSalesSummary'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+const fmtCashierTotal = (n) => '$ ' + new Intl.NumberFormat('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n) || 0)
 
 export default function Sales() {
+  const { user } = useAuth()
+  if (user?.role === 'cajero') return <CashierSalesHistory />
   // La caja de escritorio (Electron) todavía no tiene /api/reports/* — vive
   // local en desktop/src/router.js y esa ruta no está ahí. En vez de romper
   // el Historial en la app de escritorio, se deja tal cual funcionaba antes:
   // la lista simple de ventas recientes, sin navegación por mes ni Excel.
   if (isElectron()) return <ElectronHistorial />
   return <HistorialPorMes />
+}
+
+function CashierSalesHistory() {
+  const [sales, setSales] = useState([])
+  const [details, setDetails] = useState({})
+  const [expandedId, setExpandedId] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const load = async () => {
+    try {
+      const res = await apiFetch('/api/sales')
+      if (!res.ok) throw new Error('No se pudo cargar el historial.')
+      const data = await res.json()
+      setSales(Array.isArray(data) ? data : [])
+      setError('')
+    } catch (_) {
+      setError('No se pudo leer el historial guardado. Vuelve a intentar.')
+    } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+  useLocalRefresh(load)
+
+  const toggle = async (sale) => {
+    if (expandedId === sale.id) { setExpandedId(null); return }
+    setExpandedId(sale.id)
+    if (details[sale.id]) return
+    try {
+      const res = await apiFetch(`/api/sales/${sale.id}`)
+      if (!res.ok) throw new Error('No se pudo cargar el detalle de la venta.')
+      const detail = await res.json()
+      setDetails((current) => ({ ...current, [sale.id]: detail }))
+    } catch (err) { setError(err.message); setExpandedId(null) }
+  }
+
+  return (
+    <div className="p-5 md:p-8 max-w-2xl mx-auto pb-24 md:pb-8">
+      <div className="flex items-center justify-between mb-5">
+        <h2 className="text-2xl font-bold text-gray-900">Mis ventas</h2>
+      </div>
+      <p className="text-xs text-gray-500 mb-4">Solo aparecen las ventas de tu cuenta, incluidas las del período abierto.</p>
+      {!loading && !error && <CashierSalesSummary sales={sales} />}
+      {loading ? (
+        <div className="flex items-center justify-center py-16"><div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" /></div>
+      ) : error ? (
+        <div className="bg-white rounded-2xl py-10 text-center text-gray-500 shadow-sm px-6">
+          <p className="text-sm mb-3">{error}</p>
+          <button onClick={load} className="text-sm font-semibold text-[#007AFF]">Reintentar</button>
+        </div>
+      ) : sales.length === 0 ? (
+        <div className="bg-white rounded-2xl py-16 text-center text-gray-400 shadow-sm"><ClipboardList size={36} className="mx-auto mb-3 opacity-30" /><p className="text-sm">Todavía no hay ventas para mostrar.</p></div>
+      ) : (
+        <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+          {sales.map((sale, idx) => {
+            const expanded = expandedId === sale.id
+            const detail = details[sale.id]
+            return (
+              <div key={sale.id} className={idx < sales.length - 1 || expanded ? 'border-b border-gray-100' : ''}>
+                <button onClick={() => toggle(sale)} className="w-full px-5 py-4 text-left hover:bg-gray-50 flex items-center justify-between gap-3">
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-gray-900">{formatDayLabel(sale.created_at)} · {formatTime(sale.created_at)}</span>
+                    <span className="block text-xs text-gray-400 mt-1"><PaymentBadge sale={sale} /></span>
+                  </span>
+                  <span className="flex items-center gap-2 flex-shrink-0 font-bold text-gray-900">{fmt(sale.total)}{expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+                </button>
+                {expanded && <div className="px-5 pb-4 bg-gray-50/70">
+                  {!detail ? <p className="text-xs text-gray-400 py-2">Cargando detalle…</p> : detail.items.map((item) => (
+                    <div key={item.id} className="flex justify-between gap-4 py-2 border-b border-gray-100 last:border-0 text-xs">
+                      <span className="text-gray-600">{item.quantity} × {item.product_name}</span>
+                      <span className="text-gray-700 font-medium">{fmt(item.quantity * item.unit_price)}</span>
+                    </div>
+                  ))}
+                </div>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function CashierSalesSummary({ sales = [], now = new Date() }) {
+  const { count, total, pendingCount } = summarizeCashierSales(sales, now)
+  return (
+    <div className="bg-white rounded-2xl shadow-sm px-5 py-4 mb-4" aria-label="Resumen de mis ventas de hoy">
+      <h3 className="text-sm font-semibold text-gray-900 mb-3">Mis ventas de hoy</h3>
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <p className="text-xs text-gray-400">Ventas</p>
+          <p className="text-xl font-bold text-gray-900">{count}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-400">Importe total (CUP)</p>
+          <p className="text-xl font-bold text-gray-900">{fmtCashierTotal(total)}</p>
+        </div>
+      </div>
+      {pendingCount > 0 && (
+        <p className="text-xs text-amber-700 mt-3">
+          Incluye {pendingCount} venta{pendingCount === 1 ? '' : 's'} pendiente{pendingCount === 1 ? '' : 's'} de sincronizar.
+        </p>
+      )}
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +552,7 @@ function StockMovements({ date, refreshKey }) {
             item_name: t.item_name,
             quantity: t.quantity,
             created_product: t.created_product,
+            direction: t.direction,
             time: t.time,
             account_email: t.account_email,
             created_at: t.created_at,
@@ -539,8 +649,8 @@ function StockMovements({ date, refreshKey }) {
             )}
             {m.type === 'warehouse_transfer' && (
               <p className="text-xs text-gray-400 mt-1">
-                Del almacén a la tienda
-                {m.created_product ? ' · producto nuevo' : ''}
+                {m.direction === 'to_warehouse' ? 'De la tienda al almacén' : 'Del almacén a la tienda'}
+                {m.direction === 'to_warehouse' && m.created_product ? ' · artículo nuevo' : m.direction !== 'to_warehouse' && m.created_product ? ' · producto nuevo' : ''}
               </p>
             )}
             {m.type === 'warehouse_change' && (
@@ -562,7 +672,9 @@ function StockMovements({ date, refreshKey }) {
               </p>
             )}
             {m.type === 'warehouse_transfer' && (
-              <p className="text-sm font-semibold text-gray-900">+{formatQty(m.quantity)}</p>
+              <p className="text-sm font-semibold text-gray-900">
+                {m.direction === 'to_warehouse' ? '−' : '+'}{formatQty(m.quantity)}
+              </p>
             )}
           </div>
         </div>

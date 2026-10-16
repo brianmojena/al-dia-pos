@@ -23,19 +23,30 @@ const findByClientSaleId = (db, userId, clientSaleId) =>
     args: [userId, clientSaleId],
   });
 
-router.get('/', requireOwner, asyncHandler(async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
   const { date } = req.query;
+  // El cajero recupera su historial personal, incluido el día aún abierto;
+  // la proyección nunca incluye ganancias ni costos.
+  const cashierScope = req.role === 'cajero'
+    ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'
+    : '';
+  const columns = req.role === 'cajero'
+    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id'
+    : '*';
+  const argsFor = (dateArgs) => req.role === 'cajero'
+    ? [...dateArgs, req.accountId, req.accountId]
+    : dateArgs;
   // El filtro por fecha usa el día del negocio en Cuba, igual que el dashboard.
   const dia = date ? boundsForDate(date) : null;
   const result = dia
     ? await db.execute({
-        sql: 'SELECT * FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at DESC',
-        args: [req.userId, dia.start, dia.end],
+        sql: `SELECT ${columns} FROM sales WHERE user_id = ? AND created_at >= ? AND created_at < ?${cashierScope} ORDER BY created_at DESC`,
+        args: argsFor([req.userId, dia.start, dia.end]),
       })
     : await db.execute({
-        sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY created_at DESC LIMIT 200',
-        args: [req.userId],
+        sql: `SELECT ${columns} FROM sales WHERE user_id = ?${cashierScope} ORDER BY created_at DESC${req.role === 'cajero' ? ', id DESC' : ' LIMIT 200'}`,
+        args: argsFor([req.userId]),
       });
   res.json(result.rows);
 }));
@@ -208,16 +219,21 @@ router.post('/:id/correct', requireOwner, asyncHandler(async (req, res) => {
   }
 }));
 
-router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
   const db = getDb();
+  const columns = req.role === 'cajero'
+    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id'
+    : '*';
   const saleResult = await db.execute({
-    sql: 'SELECT * FROM sales WHERE id = ? AND user_id = ?',
-    args: [req.params.id, req.userId],
+    sql: `SELECT ${columns} FROM sales WHERE id = ? AND user_id = ?${req.role === 'cajero' ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))' : ''}`,
+    args: req.role === 'cajero' ? [req.params.id, req.userId, req.accountId, req.accountId] : [req.params.id, req.userId],
   });
   const sale = saleResult.rows[0];
   if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
   const itemsResult = await db.execute({
-    sql: 'SELECT * FROM sale_items WHERE sale_id = ?',
+    sql: req.role === 'cajero'
+      ? 'SELECT i.id, i.sale_id, i.product_id, i.product_name, i.quantity, i.unit_price, i.pack_size, p.unit FROM sale_items i LEFT JOIN products p ON p.id = i.product_id WHERE i.sale_id = ?'
+      : 'SELECT * FROM sale_items WHERE sale_id = ?',
     args: [req.params.id],
   });
   res.json({ ...sale, items: itemsResult.rows });

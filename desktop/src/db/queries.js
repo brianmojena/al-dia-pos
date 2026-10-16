@@ -77,6 +77,7 @@ function prepareDeltaSession(userId) {
       setSyncState('delta_after_close', 0);
       setSyncState('delta_after_count', 0);
       setSyncState('delta_after_correction', 0);
+      setSyncState('delta_after_close_correction', 0);
     });
     reset();
   }
@@ -87,6 +88,7 @@ function prepareDeltaSession(userId) {
     close: Number(getSyncState('delta_after_close') || 0),
     count: Number(getSyncState('delta_after_count') || 0),
     correction: Number(getSyncState('delta_after_correction') || 0),
+    close_correction: Number(getSyncState('delta_after_close_correction') || 0),
   };
 }
 
@@ -593,21 +595,32 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
   return create();
 }
 
-function listSales({ date } = {}) {
+function listSales({ date, accountEmail = null, closedOnly = false } = {}) {
   const db = getLocalDb();
-  if (!date) return db.prepare(`SELECT * FROM sales ORDER BY created_at DESC LIMIT 200`).all();
-  // El día del negocio en Cuba, no el día UTC — ver src/lib/businessDay.js.
-  const { start, end } = boundsForDate(date);
-  return db.prepare(
-    `SELECT * FROM sales WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC`
-  ).all(start, end);
+  const filters = [];
+  const args = [];
+  if (date) {
+    const { start, end } = boundsForDate(date);
+    filters.push('created_at >= ?', 'created_at < ?');
+    args.push(start, end);
+  }
+  if (accountEmail != null) { filters.push('account_email = ?'); args.push(accountEmail); }
+  if (closedOnly) filters.push('cash_close_id IS NOT NULL');
+  const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
+  const columns = accountEmail == null ? '*' : 'id, server_id, client_sale_id, origin, register_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, account_email, cash_close_id';
+  const rows = db.prepare(`SELECT ${columns} FROM sales${where} ORDER BY created_at DESC${date || accountEmail != null ? '' : ' LIMIT 200'}`).all(...args);
+  if (accountEmail == null) return rows;
+  return rows.map((sale) => ({ ...sale, items: db.prepare(`SELECT i.id, i.sale_id, i.product_id, i.product_name, i.quantity, i.unit_price, NULL AS pack_size, p.unit FROM sale_items i LEFT JOIN products p ON p.id = i.product_id WHERE i.sale_id = ?`).all(sale.id) }));
 }
 
-function getSale(id) {
+function getSale(id, { accountEmail = null } = {}) {
   const db = getLocalDb();
-  const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(id);
+  const sale = db.prepare(`SELECT ${accountEmail == null ? '*' : 'id, server_id, client_sale_id, origin, register_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, account_email, cash_close_id'} FROM sales WHERE id = ?`).get(id);
   if (!sale) return null;
-  const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(id);
+  if (accountEmail != null && sale.account_email !== accountEmail) return null;
+  const items = accountEmail == null
+    ? db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(id)
+    : db.prepare('SELECT i.id, i.sale_id, i.product_id, i.product_name, i.quantity, i.unit_price, NULL AS pack_size, p.unit FROM sale_items i LEFT JOIN products p ON p.id = i.product_id WHERE i.sale_id = ?').all(id);
   return { ...sale, items };
 }
 
@@ -891,7 +904,10 @@ function getDashboard() {
 const BEGINNING_OF_TIME = '0000-01-01 00:00:00';
 
 const getPeriodStart = (db) => {
-  const row = db.prepare("SELECT closed_at FROM cash_closes WHERE origin = 'local' ORDER BY closed_at DESC LIMIT 1").get();
+  const session = getSession();
+  const row = session?.role === 'cajero'
+    ? db.prepare("SELECT closed_at FROM cash_closes WHERE origin = 'local' AND (account_email = ? OR account_email IS NULL) ORDER BY closed_at DESC LIMIT 1").get(session.email)
+    : db.prepare("SELECT closed_at FROM cash_closes WHERE origin = 'local' ORDER BY closed_at DESC LIMIT 1").get();
   return row ? row.closed_at : BEGINNING_OF_TIME;
 };
 
@@ -905,15 +921,15 @@ const periodSales = (db, wholeShop = false) =>
   db.prepare(
     `SELECT client_sale_id, total, payment_method, transfer_amount,
             foreign_currency, foreign_amount, exchange_rate, created_at
-     FROM sales WHERE ${wholeShop ? '1 = 1' : "origin = 'local'"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
-  ).all();
+     FROM sales WHERE ${wholeShop ? '1 = 1' : "(account_email = ? OR (origin = 'local' AND account_email IS NULL))"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all(...(wholeShop ? [] : [getSession()?.email]));
 
 // Compras de divisa de esta caja que ningún arqueo ha cubierto todavía.
 const periodPurchases = (db, wholeShop = false) =>
   db.prepare(
     `SELECT id, client_purchase_id, foreign_currency, foreign_amount, cup_amount, created_at
-     FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : "origin = 'local'"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
-  ).all();
+     FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : "(account_email = ? OR (origin = 'local' AND account_email IS NULL))"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all(...(wholeShop ? [] : [getSession()?.email]));
 
 // Extracciones de caja que ningún arqueo ha cubierto todavía.
 // El cierre toma TODAS (de cualquier origen) porque la dueña extrae por teléfono
@@ -1082,8 +1098,25 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
 
 const getCashClose = (id) => getLocalDb().prepare('SELECT * FROM cash_closes WHERE id = ?').get(id);
 
-const listCashCloses = () =>
-  getLocalDb().prepare('SELECT * FROM cash_closes ORDER BY closed_at DESC LIMIT 100').all();
+const getCashCloseDetail = (id) => {
+  const db = getLocalDb();
+  const close = db.prepare('SELECT * FROM cash_closes WHERE id = ?').get(id);
+  if (!close) return null;
+  const audit = close.server_id == null ? [] : db.prepare(`SELECT server_id AS id, cash_close_server_id AS cash_close_id,
+    correction_revision, account_id, account_email, before, after, created_at
+    FROM cash_close_corrections WHERE cash_close_server_id = ? ORDER BY correction_revision DESC`).all(close.server_id);
+  return { ...close, pending: close.server_id == null, corrections: audit.map((row) => ({
+    ...row, before: JSON.parse(row.before), after: JSON.parse(row.after),
+  })) };
+};
+
+const listCashCloses = ({ accountEmail = null } = {}) => {
+  const db = getLocalDb();
+  const rows = accountEmail == null
+    ? db.prepare('SELECT * FROM cash_closes ORDER BY closed_at DESC LIMIT 100').all()
+    : db.prepare('SELECT * FROM cash_closes WHERE account_email = ? ORDER BY closed_at DESC LIMIT 100').all(accountEmail);
+  return rows.map((row) => ({ ...row, pending: row.server_id == null }));
+};
 
 // Saldo acumulado por cuenta. En una caja de escritorio suele haber una sola,
 // pero si el dueño y un cajero se turnan en la misma máquina el patrón sigue
@@ -1098,7 +1131,7 @@ const cashCloseSummary = () =>
            COALESCE(SUM(difference_usd), 0) AS total_difference_usd,
            COALESCE(SUM(difference_eur), 0) AS total_difference_eur,
            MAX(closed_at) AS last_close_at
-    FROM cash_closes
+    FROM cash_closes WHERE server_id IS NOT NULL
     GROUP BY account_email
     ORDER BY total_difference ASC
   `).all();
@@ -1281,7 +1314,7 @@ function applyServerDelta(page) {
     throw new Error('Delta del servidor inválido');
   }
   const db = getLocalDb();
-  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0 };
+  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0, close_corrections: 0 };
   const apply = db.transaction(() => {
     const insertSale = db.prepare(`
       INSERT INTO sales
@@ -1373,14 +1406,35 @@ function applyServerDelta(page) {
         (server_id, client_close_id, origin, register_id, opened_at, closed_at,
          opening_float, expected_cash, counted_cash, difference, expected_transfer,
          sales_count, note, account_email,
-         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur)
-      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur,
+         withdrawn_cash, withdrawn_transfer, withdrawn_usd, withdrawn_eur, corrected_at,
+         original_expected_cash, original_difference, correction_revision)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const close of page.cash_closes) {
       const clientCloseId = close.client_close_id || `srv-${close.id}`;
       const existing = db.prepare('SELECT id, server_id FROM cash_closes WHERE client_close_id = ?').get(clientCloseId);
       if (existing) {
         if (existing.server_id == null) db.prepare('UPDATE cash_closes SET server_id = ? WHERE id = ?').run(Number(close.id), existing.id);
+        // Una respuesta confirmada reemplaza los importes provisionales locales
+        // para que la tarjeta y el siguiente historial muestren el mismo cierre.
+        db.prepare(`UPDATE cash_closes SET opened_at = COALESCE(?, opened_at), closed_at = ?,
+          opening_float = ?, expected_cash = ?, counted_cash = ?, difference = ?, expected_transfer = ?,
+          sales_count = ?, expected_usd = ?, counted_usd = ?, difference_usd = ?,
+          expected_eur = ?, counted_eur = ?, difference_eur = ?, withdrawn_cash = ?,
+          withdrawn_transfer = ?, withdrawn_usd = ?, withdrawn_eur = ?, corrected_at = ?,
+          original_expected_cash = ?, original_difference = ?, correction_revision = ? WHERE id = ?`).run(
+          close.opened_at ?? null, close.closed_at, Number(close.opening_float) || 0,
+          Number(close.expected_cash) || 0, Number(close.counted_cash) || 0, Number(close.difference) || 0,
+          Number(close.expected_transfer) || 0, Number(close.sales_count) || 0,
+          Number(close.expected_usd) || 0, Number(close.counted_usd) || 0, Number(close.difference_usd) || 0,
+          Number(close.expected_eur) || 0, Number(close.counted_eur) || 0, Number(close.difference_eur) || 0,
+          Number(close.withdrawn_cash) || 0, Number(close.withdrawn_transfer) || 0,
+          Number(close.withdrawn_usd) || 0, Number(close.withdrawn_eur) || 0,
+          close.corrected_at ?? null, close.original_expected_cash ?? null,
+          close.original_difference ?? null, Number(close.correction_revision) || 0,
+          existing.id,
+        );
         applyCloseCoverage(db, existing.id, close);
         continue;
       }
@@ -1392,6 +1446,10 @@ function applyServerDelta(page) {
         close.note ?? null, close.account_email ?? null,
         Number(close.expected_usd) || 0, Number(close.counted_usd) || 0, Number(close.difference_usd) || 0,
         Number(close.expected_eur) || 0, Number(close.counted_eur) || 0, Number(close.difference_eur) || 0,
+        Number(close.withdrawn_cash) || 0, Number(close.withdrawn_transfer) || 0,
+        Number(close.withdrawn_usd) || 0, Number(close.withdrawn_eur) || 0,
+        close.corrected_at ?? null, close.original_expected_cash ?? null,
+        close.original_difference ?? null, Number(close.correction_revision) || 0,
       );
       applyCloseCoverage(db, Number(insertedClose.lastInsertRowid), close);
       stats.closes++;
@@ -1447,6 +1505,10 @@ function applyServerDelta(page) {
       stats.corrections = (stats.corrections || 0) + 1;
     }
     if (page.cursors.correction != null) setSyncState('delta_after_correction', page.cursors.correction);
+    for (const correction of page.cash_close_corrections || []) {
+      if (applyCashCloseCorrection(db, correction)) stats.close_corrections++;
+    }
+    if (page.cursors.close_correction != null) setSyncState('delta_after_close_correction', page.cursors.close_correction);
   });
   apply();
   return stats;
@@ -1479,16 +1541,108 @@ function applySaleCorrection(db, correction) {
     db.prepare(`
       UPDATE cash_closes SET expected_cash = ?, difference = ?, expected_transfer = ?, sales_count = ?,
         expected_usd = ?, difference_usd = ?, expected_eur = ?, difference_eur = ?,
-        corrected_at = ?, original_difference = ?
+        corrected_at = ?, original_expected_cash = ?, original_difference = ?, correction_revision = ?,
+        opening_float = ?, counted_cash = ?, counted_usd = ?, counted_eur = ?, note = ?,
+        withdrawn_cash = ?, withdrawn_transfer = ?, withdrawn_usd = ?, withdrawn_eur = ?
       WHERE server_id = ? OR client_close_id = ?
     `).run(
       Number(close.expected_cash) || 0, Number(close.difference) || 0, Number(close.expected_transfer) || 0,
       Number(close.sales_count) || 0, Number(close.expected_usd) || 0, Number(close.difference_usd) || 0,
       Number(close.expected_eur) || 0, Number(close.difference_eur) || 0,
-      close.corrected_at ?? null, close.original_difference ?? null,
+      close.corrected_at ?? null, close.original_expected_cash ?? null, close.original_difference ?? null,
+      Number(close.correction_revision) || 0, Number(close.opening_float) || 0,
+      Number(close.counted_cash) || 0, Number(close.counted_usd) || 0, Number(close.counted_eur) || 0,
+      close.note ?? null, Number(close.withdrawn_cash) || 0, Number(close.withdrawn_transfer) || 0,
+      Number(close.withdrawn_usd) || 0, Number(close.withdrawn_eur) || 0,
       Number(close.id), close.client_close_id || `srv-${close.id}`,
     );
   }
+}
+
+function applyCashCloseCorrection(db, correction) {
+  const close = correction.cash_close;
+  if (!close) return false;
+  let local = db.prepare('SELECT id FROM cash_closes WHERE server_id = ? OR client_close_id = ?')
+    .get(Number(close.id), close.client_close_id || `srv-${close.id}`);
+  if (!local) {
+    const inserted = db.prepare(`INSERT INTO cash_closes
+      (server_id, client_close_id, origin, register_id, opened_at, closed_at, opening_float,
+       expected_cash, counted_cash, difference, expected_transfer, sales_count, note, account_email,
+       expected_usd, counted_usd, difference_usd, expected_eur, counted_eur, difference_eur,
+       withdrawn_cash, withdrawn_transfer, withdrawn_usd, withdrawn_eur, corrected_at,
+       original_expected_cash, original_difference, correction_revision)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      Number(close.id), close.client_close_id || `srv-${close.id}`, close.register_id ?? null,
+      close.opened_at, close.closed_at, Number(close.opening_float) || 0,
+      Number(close.expected_cash) || 0, Number(close.counted_cash) || 0,
+      Number(close.difference) || 0, Number(close.expected_transfer) || 0,
+      Number(close.sales_count) || 0, close.note ?? null, close.account_email ?? null,
+      Number(close.expected_usd) || 0, Number(close.counted_usd) || 0,
+      Number(close.difference_usd) || 0, Number(close.expected_eur) || 0,
+      Number(close.counted_eur) || 0, Number(close.difference_eur) || 0,
+      Number(close.withdrawn_cash) || 0, Number(close.withdrawn_transfer) || 0,
+      Number(close.withdrawn_usd) || 0, Number(close.withdrawn_eur) || 0,
+      close.corrected_at ?? null, close.original_expected_cash ?? null,
+      close.original_difference ?? null, Number(close.correction_revision) || 0,
+    );
+    local = { id: Number(inserted.lastInsertRowid) };
+  }
+  db.prepare(`UPDATE cash_closes SET opening_float = ?, expected_cash = ?, counted_cash = ?,
+    difference = ?, expected_transfer = ?, sales_count = ?, note = ?, expected_usd = ?,
+    counted_usd = ?, difference_usd = ?, expected_eur = ?, counted_eur = ?, difference_eur = ?,
+    withdrawn_cash = ?, withdrawn_transfer = ?, withdrawn_usd = ?, withdrawn_eur = ?,
+    corrected_at = ?, original_expected_cash = ?, original_difference = ?, correction_revision = ?
+    WHERE id = ?`).run(
+    Number(close.opening_float) || 0, Number(close.expected_cash) || 0, Number(close.counted_cash) || 0,
+    Number(close.difference) || 0, Number(close.expected_transfer) || 0, Number(close.sales_count) || 0,
+    close.note ?? null, Number(close.expected_usd) || 0, Number(close.counted_usd) || 0,
+    Number(close.difference_usd) || 0, Number(close.expected_eur) || 0, Number(close.counted_eur) || 0,
+    Number(close.difference_eur) || 0, Number(close.withdrawn_cash) || 0,
+    Number(close.withdrawn_transfer) || 0, Number(close.withdrawn_usd) || 0,
+    Number(close.withdrawn_eur) || 0, close.corrected_at ?? null,
+    close.original_expected_cash ?? null, close.original_difference ?? null,
+    Number(close.correction_revision) || 0, local.id,
+  );
+  if (correction.id != null) {
+    db.prepare(`INSERT OR IGNORE INTO cash_close_corrections
+      (server_id, cash_close_server_id, correction_revision, account_id, account_email, before, after, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      Number(correction.id), Number(close.id), Number(correction.correction_revision),
+      correction.account_id ?? null, correction.account_email ?? null,
+      typeof correction.before === 'string' ? correction.before : JSON.stringify(correction.before),
+      typeof correction.after === 'string' ? correction.after : JSON.stringify(correction.after),
+      correction.created_at,
+    );
+  }
+  return true;
+}
+
+function applyCashCloseCorrectionLocal(correction) {
+  // PUT responde { cash_close, correction }; el delta entrega la fila de
+  // auditoría con cash_close anidado. Aceptar ambos contratos evita que la
+  // corrección inmediata dependa de esperar el próximo delta.
+  if (correction?.cash_close && !correction.id && correction.correction) {
+    correction = { ...correction.correction, cash_close: correction.cash_close };
+  }
+  const db = getLocalDb();
+  return db.transaction(() => applyCashCloseCorrection(db, correction))();
+}
+
+function applyCashCloseDetailLocal(detail) {
+  const db = getLocalDb();
+  const close = detail?.cash_close || detail;
+  if (!close?.id) return false;
+  const corrections = detail?.corrections || [];
+  return db.transaction(() => {
+    let updated = false;
+    for (const correction of corrections) {
+      updated = applyCashCloseCorrection(db, { ...correction, cash_close: close }) || updated;
+    }
+    // A GET can refresh the current close without a correction row in older
+    // servers or in an uncorrected close.
+    if (!updated) updated = applyCashCloseCorrection(db, { cash_close: close }) || false;
+    return updated;
+  })();
 }
 
 /** Corrección recién hecha desde esta caja: se aplica sin esperar al delta. */
@@ -1637,15 +1791,42 @@ function resetStuckSyncing() {
   return getLocalDb().prepare(`UPDATE outbox SET status = 'pending' WHERE status = 'syncing'`).run().changes;
 }
 
+/**
+ * Descuenta stock de un producto (para transferencias a almacén).
+ * Nunca baja de 0. Productos sin unidad se mantienen como enteros.
+ * Retorna la fila actualizada o null si no existe.
+ */
+function takeLocalStock(productId, quantity) {
+  const db = getLocalDb();
+  const product = db.prepare('SELECT * FROM products WHERE id = ? AND deleted = 0').get(productId);
+  if (!product) return null;
+
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty < 0) return null;
+
+  let newStock;
+  if (product.unit) {
+    // Productos por peso: mantener 3 decimales
+    newStock = round3(Math.max(0, Number(product.stock) - qty));
+  } else {
+    // Productos por unidad: mantener como entero
+    newStock = Math.trunc(Math.max(0, Number(product.stock) - qty));
+  }
+
+  db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(newStock, productId);
+  return db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+}
+
 module.exports = {
   getSession, setSession, updateSessionSettings, clearSession,
   getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta, applySaleCorrectionLocal,
+  applyCashCloseCorrectionLocal, applyCashCloseDetailLocal,
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
-  listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog,
+  listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog, takeLocalStock,
   createSaleLocal, listSales, getSale,
   createCurrencyPurchaseLocal, listCurrencyPurchases,
   createWithdrawalLocal, listWithdrawals, voidWithdrawalLocal,
   getDashboard, pendingHoldings,
-  getCurrentCashPeriod, createCashCloseLocal, getCashClose, listCashCloses, cashCloseSummary,
+  getCurrentCashPeriod, createCashCloseLocal, getCashClose, getCashCloseDetail, listCashCloses, cashCloseSummary,
   createInventoryCountLocal, listInventoryCounts, getInventoryCount,
 };

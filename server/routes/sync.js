@@ -35,6 +35,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const afterPurchase = numberParam(req.query.after_purchase);
   const afterWithdrawal = numberParam(req.query.after_withdrawal);
   const afterCorrection = numberParam(req.query.after_correction);
+  const afterCloseCorrection = numberParam(req.query.after_close_correction);
   const rawLimit = numberParam(req.query.limit, 500);
   const limit = Math.min(rawLimit || 500, 500);
   const since = typeof req.query.since === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
@@ -101,6 +102,27 @@ router.get('/delta', asyncHandler(async (req, res) => {
     cash_close: c.cash_close_id != null ? correctedCloses.get(Number(c.cash_close_id)) || null : null,
   }));
 
+  // Las correcciones manuales de cierres tienen cursor propio: las cajas que
+  // ya superaron el cursor del cierre deben recibir igualmente la revisión.
+  const closeCorrections = (await db.execute({
+    sql: `SELECT id, cash_close_id, correction_revision, account_id, account_email,
+                 before, after, created_at
+            FROM cash_close_corrections WHERE user_id = ? AND id > ?
+           ORDER BY id ASC LIMIT ?`,
+    args: [req.userId, afterCloseCorrection, limit],
+  })).rows;
+  const correctedCloseIds = [...new Set(closeCorrections.map((row) => Number(row.cash_close_id)))];
+  const manuallyCorrectedCloses = correctedCloseIds.length
+    ? (await db.execute({
+      sql: `SELECT * FROM cash_closes WHERE user_id = ? AND id IN (${correctedCloseIds.map(() => '?').join(',')})`,
+      args: [req.userId, ...correctedCloseIds],
+    })).rows
+    : [];
+  const correctedCloseById = new Map(manuallyCorrectedCloses.map((row) => [Number(row.id), row]));
+  const closeCorrectionRows = closeCorrections.map((row) => ({
+    ...row, cash_close: correctedCloseById.get(Number(row.cash_close_id)) || null,
+  }));
+
   // Qué ventas, compras y extracciones cubrió cada cierre: así la caja de escritorio sabe
   // cuáles de las que ya bajó dejaron de estar abiertas.
   const closeIds = closes.rows.map((row) => Number(row.id));
@@ -141,8 +163,10 @@ router.get('/delta', asyncHandler(async (req, res) => {
     currency_purchases: purchases.rows,
     cash_withdrawals: withdrawals.rows,
     sale_corrections: correctionRows,
+    cash_close_corrections: closeCorrectionRows,
     cursors: {
       correction: last(corrections, afterCorrection),
+      close_correction: last(closeCorrections, afterCloseCorrection),
       purchase: last(purchases.rows, afterPurchase),
       withdrawal: lastWithMax(withdrawals.rows, afterWithdrawal),
       sale: last(sales.rows, afterSale),
@@ -150,7 +174,8 @@ router.get('/delta', asyncHandler(async (req, res) => {
       count: last(counts.rows, afterCount),
     },
     has_more: sales.rows.length === limit || closes.rows.length === limit || counts.rows.length === limit
-      || purchases.rows.length === limit || withdrawals.rows.length === limit || corrections.length === limit,
+      || purchases.rows.length === limit || withdrawals.rows.length === limit
+      || corrections.length === limit || closeCorrections.length === limit,
   });
 }));
 

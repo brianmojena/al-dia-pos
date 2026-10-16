@@ -80,4 +80,67 @@ test('almacén', async (t) => {
     const mala = await api('POST', '/api/warehouse/import', { token: dueño, body: { items: [{ name: 'Arroz', unit: 'kg', cost: 1 }] } });
     assert.equal(mala.status, 400);
   });
+
+  await t.test('de la tienda al almacén: baja el stock, suma o crea el artículo', async () => {
+    const dueño = await registerUser(api);
+    const cajero = await crearCajero(api, dueño);
+    // Crear un producto en la tienda con stock
+    const prod = await api('POST', '/api/products', { token: dueño, body: { name: 'Queso', sale_price: 100, purchase_price: 60, stock: 10 } });
+    const productId = prod.body.id;
+    // Crear un artículo en el almacén para que se sume
+    const item = await api('POST', '/api/warehouse', { token: dueño, body: { name: 'queso', cost: 60, quantity: 5 } });
+
+    // El cajero puede transferir de la tienda al almacén
+    const transfer = await api('POST', '/api/warehouse/from-store', { token: cajero, body: { product_id: productId, quantity: 3 } });
+    assert.equal(transfer.status, 201);
+    assert.equal(transfer.body.direction, 'to_warehouse');
+
+    // El stock del producto baja
+    const prodAfter = (await api('GET', '/api/products', { token: dueño })).body.find((p) => p.id === productId);
+    assert.equal(prodAfter.stock, 7);
+
+    // El artículo del almacén suma cantidad (caso insensitivo)
+    const warehouseAfter = (await api('GET', '/api/warehouse', { token: dueño })).body.find((i) => i.name === 'queso');
+    assert.equal(warehouseAfter.quantity, 8);
+    assert.equal(warehouseAfter.cost, 60);
+
+    // Nuevo producto sin artículo en almacén: crea uno con purchase_price como costo
+    const prod2 = await api('POST', '/api/products', { token: dueño, body: { name: 'Leche', sale_price: 120, purchase_price: 70, stock: 5 } });
+    const transfer2 = await api('POST', '/api/warehouse/from-store', { token: dueño, body: { product_id: prod2.body.id, quantity: 2 } });
+    assert.equal(transfer2.status, 201);
+    const newItem = (await api('GET', '/api/warehouse', { token: dueño })).body.find((i) => i.name === 'Leche');
+    assert.equal(newItem.quantity, 2);
+    assert.equal(newItem.cost, 70);
+
+    // No se puede pasar más de lo que hay en stock
+    const tooMuch = await api('POST', '/api/warehouse/from-store', { token: dueño, body: { product_id: productId, quantity: 10 } });
+    assert.equal(tooMuch.status, 409);
+    assert.match(tooMuch.body.error, /solo hay 7/);
+
+    // No se puede pasar 0
+    const cero = await api('POST', '/api/warehouse/from-store', { token: dueño, body: { product_id: productId, quantity: 0 } });
+    assert.equal(cero.status, 400);
+
+    // Idempotencia: replay con mismo client_transfer_id no baja stock dos veces
+    const transfer3 = await api('POST', '/api/warehouse/from-store', { token: dueño, body: { product_id: productId, quantity: 2, client_transfer_id: 'xyz' } });
+    assert.equal(transfer3.status, 201);
+    const prod3a = (await api('GET', '/api/products', { token: dueño })).body.find((p) => p.id === productId);
+    assert.equal(prod3a.stock, 5);
+    const replay = await api('POST', '/api/warehouse/from-store', { token: dueño, body: { product_id: productId, quantity: 2, client_transfer_id: 'xyz' } });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.idempotent_replay, true);
+    const prod3b = (await api('GET', '/api/products', { token: dueño })).body.find((p) => p.id === productId);
+    assert.equal(prod3b.stock, 5, 'stock no baja en replay');
+
+    // GET /transfers muestra dirección correcta
+    const transfers = (await api('GET', '/api/warehouse/transfers', { token: dueño })).body;
+    const toWarehouse = transfers.filter((t) => t.direction === 'to_warehouse');
+    const toStore = transfers.filter((t) => t.direction === 'to_store');
+    assert.ok(toWarehouse.length >= 3, 'hay transferencias to_warehouse');
+    // Hacer una transferencia to_store para verificar que aparece
+    const itemToTransfer = (await api('GET', '/api/warehouse', { token: dueño })).body[0];
+    await api('POST', '/api/warehouse/transfer', { token: dueño, body: { warehouse_item_id: itemToTransfer.id, quantity: 1, sale_price: 100, client_transfer_id: 'store1' } });
+    const transfersAfter = (await api('GET', '/api/warehouse/transfers', { token: dueño })).body;
+    assert.ok(transfersAfter.some((t) => t.direction === 'to_store'), 'hay transferencias to_store');
+  });
 });

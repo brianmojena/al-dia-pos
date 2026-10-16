@@ -36,15 +36,23 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
   await t.test('snapshot descarga historial completo sin filtrar por pantallas visitadas ni por 200 ventas', async () => {
     const snapshot = await ctx.api('GET', '/api/sync/snapshot', { token });
     assert.equal(snapshot.status, 200);
+    assert.equal(snapshot.body.cash_close_coverage_version, 1);
     assert.ok(snapshot.body.products.every((p) => p.name !== 'Otra tienda'));
     assert.equal(snapshot.body.sales[0].items[0].product_name, 'Pan');
+    assert.equal(snapshot.body.sales[0].items[0].pack_size, null);
     assert.equal(snapshot.body.sales[0].cash_close_id, null);
     assert.equal(snapshot.body.cashiers[0].id, cashier.id);
     const own = await ctx.api('GET', '/api/sync/snapshot', { token: other });
     assert.equal(own.body.sales.length, 0);
     const limited = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
+    assert.equal(limited.body.cash_close_coverage_version, 1);
+    assert.equal(limited.body.cash_close_coverage_version, 1);
     assert.equal(limited.status, 200); assert.ok(limited.body.products.length);
-    for (const key of ['sales', 'cash_closes', 'inventory_counts', 'rejected_sales', 'cashiers']) assert.equal(limited.body[key], undefined);
+    assert.deepEqual(limited.body.sales, [], 'sin ventas cerradas propias, el historial está vacío');
+    assert.deepEqual(limited.body.currency_purchases, []);
+    assert.deepEqual(limited.body.cash_withdrawals, []);
+    assert.deepEqual(limited.body.cash_closes, []);
+    for (const key of ['inventory_counts', 'rejected_sales', 'cashiers']) assert.equal(limited.body[key], undefined);
   });
   await t.test('cierre exacto deja abierta una venta posterior y conserva la fecha offline', async () => {
     const next = await call('/api/sales', { client_sale_id: 'next-sale', register_id: 'web', items: [{ product_id: product, quantity: 1, unit_price: 10 }] });
@@ -57,6 +65,64 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     const snapshot = await ctx.api('GET', '/api/sync/snapshot', { token });
     assert.equal(snapshot.body.sales.find((s) => s.id === next.body.id).cash_close_id, null);
     assert.equal((await call('/api/cash-closes', { ...body, client_close_id: 'invalid-close', covered_sale_ids: [9999999] })).status, 409);
+    const cashierClose = await ctx.api('POST', '/api/cash-closes', { token: cashier.token, body: { register_id: 'web', counted_cash: 0 } });
+    assert.equal(cashierClose.status, 201);
+    const cashierSale = await ctx.api('POST', '/api/sales', { token: cashier.token, body: {
+      register_id: 'web', items: [{ product_id: product, quantity: 1, unit_price: 300 }],
+    } });
+    assert.equal(cashierSale.status, 201);
+    const beforeCount = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
+    assert.equal(beforeCount.body.sales.length, 1, 'el snapshot personal incluye ventas abiertas ya sincronizadas');
+    assert.equal(beforeCount.body.sales[0].total, 300);
+    assert.equal('profit' in beforeCount.body.sales[0], false);
+    assert.equal('unit_cost' in beforeCount.body.sales[0].items[0], false);
+    const laterSale = await ctx.api('POST', '/api/sales', { token: cashier.token, body: {
+      register_id: 'web', items: [{ product_id: product, quantity: 1, unit_price: 50 }],
+    } });
+    const cashierSaleClose = await ctx.api('POST', '/api/cash-closes', { token: cashier.token, body: {
+      client_close_id: 'cashier-offline-exact', register_id: 'web', covered_sale_ids: [cashierSale.body.id],
+      opening_float: 1000, counted_cash: 1300,
+    } });
+    assert.equal(cashierSaleClose.status, 201);
+    assert.equal(cashierSaleClose.body.expected_cash, 1300, 'fondo 1000 más venta sincronizada de 300');
+    assert.equal(cashierSaleClose.body.difference, 0);
+    assert.equal(cashierSaleClose.body.sales_count, 1, 'la venta de otro dispositivo posterior al conteo queda fuera');
+    const cashierSales = await ctx.api('GET', '/api/sales', { token: cashier.token });
+    assert.deepEqual(cashierSales.body.map((sale) => sale.id).sort((a, b) => a - b), [cashierSale.body.id, laterSale.body.id]);
+    assert.ok(cashierSales.body.every((sale) => !('profit' in sale)));
+    const cashierDetail = await ctx.api('GET', `/api/sales/${cashierSale.body.id}`, { token: cashier.token });
+    assert.equal(cashierDetail.status, 200);
+    assert.equal('profit' in cashierDetail.body, false);
+    assert.equal('unit_cost' in cashierDetail.body.items[0], false);
+    assert.equal((await call('/api/cash-withdrawals', { client_withdrawal_id: 'global-cashier-close', method: 'efectivo', amount: 5, note: 'nota privada' })).status, 201);
+    const limited = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
+    assert.deepEqual(limited.body.sales.map((sale) => sale.id).sort((a, b) => a - b), [cashierSale.body.id, laterSale.body.id]);
+    assert.ok(limited.body.sales.every((sale) => !('profit' in sale) && sale.id !== saleId));
+    const cashierLine = limited.body.sales.find((sale) => sale.id === cashierSale.body.id).items[0];
+    assert.equal(cashierLine.pack_size, null);
+    assert.equal(cashierLine.unit, null);
+    assert.equal('unit_cost' in cashierLine, false);
+    assert.equal(limited.body.sales.find((sale) => sale.id === cashierSale.body.id).cash_close_id, cashierSaleClose.body.id);
+    assert.equal(limited.body.sales.find((sale) => sale.id === laterSale.body.id).cash_close_id, null);
+    assert.ok(limited.body.cash_closes.some((close) => close.id === cashierClose.body.id));
+    assert.ok(limited.body.cash_closes.some((close) => close.id === cashierSaleClose.body.id));
+    assert.equal('corrected_at' in limited.body.cash_closes[0], false);
+    assert.equal('original_difference' in limited.body.cash_closes[0], false);
+    assert.equal(limited.body.cash_withdrawals[0].amount, 5, 'la cobertura de extracción global se conserva');
+    assert.equal('account_email' in limited.body.cash_withdrawals[0], false);
+    assert.equal('note' in limited.body.cash_withdrawals[0], false);
+    assert.equal('withdrawn_at' in limited.body.cash_withdrawals[0], false);
+    const cashierOwnerId = (await ctx.db.execute({ sql: 'SELECT user_id FROM sales WHERE id = ?', args: [cashierSale.body.id] })).rows[0].user_id;
+    for (let i = 0; i < 205; i++) {
+      await ctx.db.execute({
+        sql: 'INSERT INTO sales (user_id, client_sale_id, total, payment_method, account_id, account_email, register_id) VALUES (?, ?, 1, \'efectivo\', ?, ?, \'web\')',
+        args: [cashierOwnerId, `open-over-200-${i}`, cashier.id, cashier.email],
+      });
+    }
+    const complete = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
+    assert.equal(complete.body.sales.length, 207, 'incluye las 205 abiertas y el historial propio ya cerrado sin truncar');
+    assert.equal(complete.body.sales.filter((sale) => sale.cash_close_id == null).length, 206);
+    assert.equal((await ctx.api('GET', '/api/sales', { token: cashier.token })).body.length, 207, 'el historial online tampoco se corta en 200');
   });
   await t.test('conteo conserva fecha e historial de líneas', async () => {
     const count = await call('/api/inventory-counts', { client_count_id: 'count-pwa', counted_at: '2026-09-01T02:10:00.000Z', items: [{ product_id: product, counted: 15 }] });

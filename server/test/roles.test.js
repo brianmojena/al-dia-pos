@@ -25,20 +25,52 @@ test('roles: dueño y cajero', async (t) => {
   const ctx = await startTestServer();
   t.after(() => ctx.close());
 
-  await t.test('un cajero no puede ver el dashboard, el historial ni los cierres', async () => {
+  await t.test('el cajero ve su historial personal abierto/cerrado sin costos ni auditoría', async () => {
     const dueño = await registerUser(ctx.api);
     const cajero = await crearCajero(ctx.api, dueño, `caja1${Date.now()}@test.local`);
 
-    // Justo las tres pantallas donde se podría leer el total esperado.
-    const prohibidas = [
-      ['GET', '/api/dashboard'],
-      ['GET', '/api/sales'],
-      ['GET', '/api/cash-closes'],
-    ];
+    const prohibidas = [['GET', '/api/dashboard'], ['GET', '/api/cash-closes/summary']];
     for (const [method, path] of prohibidas) {
       const res = await ctx.api(method, path, { token: cajero.token });
       assert.equal(res.status, 403, `${method} ${path} debe estar prohibido para un cajero`);
     }
+    const productId = await createProduct(ctx.api, dueño, { stock: 10 });
+    const abierto = await ctx.api('POST', '/api/sales', { token: cajero.token, body: {
+      items: [{ product_id: productId, quantity: 1, unit_price: 100 }],
+    } });
+    assert.equal(abierto.status, 201);
+    const abierta = await ctx.api('GET', '/api/sales', { token: cajero.token });
+    assert.deepEqual(abierta.body.map((sale) => sale.id), [abierto.body.id], 'se muestra su venta del período abierto');
+    assert.equal('profit' in abierta.body[0], false);
+    const detalleAbierto = await ctx.api('GET', `/api/sales/${abierto.body.id}`, { token: cajero.token });
+    assert.equal('profit' in detalleAbierto.body, false);
+    assert.equal('unit_cost' in detalleAbierto.body.items[0], false);
+    const otroCajero = await crearCajero(ctx.api, dueño, `caja-otro-${Date.now()}@test.local`);
+    const ajena = await ctx.api('POST', '/api/sales', { token: otroCajero.token, body: {
+      items: [{ product_id: productId, quantity: 1, unit_price: 500 }],
+    } });
+    await ctx.db.execute({ sql: 'UPDATE sales SET account_id = NULL, register_id = NULL WHERE id = ?', args: [ajena.body.id] });
+    const close = await ctx.api('POST', '/api/cash-closes', { token: cajero.token, body: { counted_cash: 100, register_id: 'web' } });
+    assert.equal(close.status, 201);
+    assert.equal(close.body.expected_cash, 100, 'una venta legacy NULL de otro cajero no se mezcla en el cierre');
+    assert.equal(close.body.sales_count, 1);
+    await ctx.db.execute({ sql: "UPDATE cash_closes SET corrected_at = '2026-10-14 12:00:00', original_difference = 25 WHERE id = ?", args: [close.body.id] });
+    const historial = await ctx.api('GET', '/api/sales', { token: cajero.token });
+    assert.equal(historial.status, 200);
+    assert.deepEqual(historial.body.map((sale) => sale.id), [abierto.body.id]);
+    assert.equal((await ctx.api('GET', `/api/sales/${abierto.body.id}`, { token: cajero.token })).status, 200);
+    const cierres = await ctx.api('GET', '/api/cash-closes', { token: cajero.token });
+    assert.equal(cierres.status, 200);
+    assert.deepEqual(cierres.body.map((item) => item.id), [close.body.id]);
+    assert.equal('corrected_at' in cierres.body[0], false, 'el historial del cajero no expone correcciones');
+    assert.equal('original_difference' in cierres.body[0], false);
+    assert.deepEqual((await ctx.api('GET', '/api/sales', { token: otroCajero.token })).body.map((sale) => sale.id), [ajena.body.id]);
+    assert.equal((await ctx.api('GET', `/api/sales/${abierto.body.id}`, { token: otroCajero.token })).status, 404);
+    assert.deepEqual((await ctx.api('GET', '/api/cash-closes', { token: otroCajero.token })).body, []);
+    await ctx.db.execute({ sql: 'UPDATE sales SET account_id = NULL WHERE id = ?', args: [abierto.body.id] });
+    await ctx.db.execute({ sql: 'UPDATE cash_closes SET account_id = NULL WHERE id = ?', args: [close.body.id] });
+    assert.equal((await ctx.api('GET', '/api/sales', { token: cajero.token })).body[0].id, abierto.body.id, 'se recupera el legado atribuible por email');
+    assert.equal((await ctx.api('GET', '/api/cash-closes', { token: cajero.token })).body[0].id, close.body.id);
   });
 
   // Dar de ALTA productos sí puede (el dueño delega la carga de mercancía):

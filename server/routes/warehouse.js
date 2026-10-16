@@ -8,9 +8,10 @@ const { parseUnit, validQuantity, roundQty } = require('../lib/units');
 
 /**
  * Almacén. Cualquier cuenta lo ve, lo modifica (alta, edición, reposición,
- * importación, borrado) y TRANSFIERE mercancía a la tienda. Cada cambio deja
- * un registro con quién lo hizo, que solo revisa la cuenta principal.
- * Un artículo tiene costo y cantidad: no tiene precio de venta.
+ * importación, borrado) y TRANSFIERE mercancía en ambas direcciones (a la tienda
+ * y desde la tienda). Cada cambio deja un registro con quién lo hizo, que solo
+ * revisa la cuenta principal. Un artículo tiene costo y cantidad: no tiene precio
+ * de venta.
  */
 
 const normalizeName = (name) =>
@@ -227,7 +228,7 @@ router.delete('/:id', asyncHandler(async (req, res) => {
  * Transferencia almacén -> tienda, cualquier cuenta. Todo en una transacción:
  * baja el almacén (con UPDATE condicional, así dos transferencias a la vez no
  * dejan cantidades negativas), sube el stock del producto de la tienda —lo crea
- * si no existe, con su precio de venta— y deja el registro.
+ * si no existe, con su precio de venta— y deja el registro con direction='to_store'.
  * Idempotente por client_transfer_id: la caja de escritorio reintenta.
  */
 router.post('/transfer', asyncHandler(async (req, res) => {
@@ -301,9 +302,97 @@ router.post('/transfer', asyncHandler(async (req, res) => {
     }
     const log = await tx.execute({
       sql: `INSERT INTO warehouse_transfers
-              (user_id, client_transfer_id, warehouse_item_id, product_id, item_name, quantity, unit_cost, created_product, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [req.userId, client_transfer_id, item.id, productId, item.name, quantity, item.cost, created, account.id, account.email],
+              (user_id, client_transfer_id, warehouse_item_id, product_id, item_name, quantity, unit_cost, created_product, account_id, account_email, direction)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_transfer_id, item.id, productId, item.name, quantity, item.cost, created, account.id, account.email, 'to_store'],
+    });
+    await tx.commit();
+    const row = await db.execute({ sql: 'SELECT * FROM warehouse_transfers WHERE id = ?', args: [Number(log.lastInsertRowid)] });
+    res.status(201).json(row.rows[0]);
+  } catch (err) {
+    await tx.rollback().catch(() => {});
+    if (client_transfer_id && /UNIQUE/i.test(String(err.message))) {
+      const dup = await db.execute({
+        sql: 'SELECT * FROM warehouse_transfers WHERE user_id = ? AND client_transfer_id = ?',
+        args: [req.userId, client_transfer_id],
+      });
+      if (dup.rows[0]) return res.status(200).json({ ...dup.rows[0], idempotent_replay: true });
+    }
+    throw err;
+  }
+}));
+
+/**
+ * Transferencia tienda -> almacén, cualquier cuenta. Espejo de /transfer:
+ * baja el stock del producto de la tienda (con UPDATE condicional), suma o crea
+ * el artículo del almacén y deja el registro con direction='to_warehouse'.
+ * Idempotente por client_transfer_id: la tienda reintenta.
+ */
+router.post('/from-store', asyncHandler(async (req, res) => {
+  const { product_id, client_transfer_id = null } = req.body;
+  const db = getDb();
+  const productResult = await db.execute({
+    sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
+    args: [product_id ?? null, req.userId],
+  });
+  const product = productResult.rows[0];
+
+  if (client_transfer_id) {
+    const dup = await db.execute({
+      sql: 'SELECT * FROM warehouse_transfers WHERE user_id = ? AND client_transfer_id = ?',
+      args: [req.userId, client_transfer_id],
+    });
+    if (dup.rows[0]) return res.status(200).json({ ...dup.rows[0], idempotent_replay: true });
+  }
+  if (!product) return res.status(404).json({ error: 'Producto no encontrado en la tienda' });
+
+  const unit = product.unit ?? null;
+  if (unit && Number(product.track_stock ?? 1) === 0) {
+    return res.status(400).json({ error: 'Este producto no lleva control de stock: no se puede pasar al almacén' });
+  }
+
+  const qty = req.body.quantity;
+  if (!validQuantity(qty, unit) || Number(qty) <= 0) {
+    return res.status(400).json({ error: unit ? 'La cantidad debe ser mayor que 0 (hasta 3 decimales)' : 'La cantidad debe ser un entero mayor que 0' });
+  }
+  const quantity = roundQty(qty);
+  if (quantity > Number(product.stock)) {
+    return res.status(409).json({ error: `En la tienda solo hay ${product.stock} de ${product.name}` });
+  }
+
+  const item = await findByName(db, req.userId, product.name);
+  if (item && (item.unit ?? null) !== unit) {
+    return res.status(409).json({ error: 'El artículo del almacén tiene otra unidad de medida que el producto de la tienda' });
+  }
+
+  const account = await describeAccount(db, req);
+  const tx = await db.transaction('write');
+  try {
+    const down = await tx.execute({
+      sql: 'UPDATE products SET stock = ROUND(stock - ?, 3) WHERE id = ? AND user_id = ? AND stock >= ?',
+      args: [quantity, product.id, req.userId, quantity],
+    });
+    if (!down.rowsAffected) {
+      await tx.rollback();
+      return res.status(409).json({ error: `En la tienda ya no hay suficiente ${product.name}` });
+    }
+    let warehouse_item_id, created = 0;
+    if (item) {
+      warehouse_item_id = Number(item.id);
+      await tx.execute({ sql: 'UPDATE warehouse_items SET quantity = ROUND(quantity + ?, 3) WHERE id = ?', args: [quantity, warehouse_item_id] });
+    } else {
+      const ins = await tx.execute({
+        sql: 'INSERT INTO warehouse_items (user_id, name, unit, cost, quantity, created_by_email) VALUES (?, ?, ?, ?, ?, ?)',
+        args: [req.userId, product.name, unit, Number(product.purchase_price) || 0, quantity, account.email],
+      });
+      warehouse_item_id = Number(ins.lastInsertRowid);
+      created = 1;
+    }
+    const log = await tx.execute({
+      sql: `INSERT INTO warehouse_transfers
+              (user_id, client_transfer_id, warehouse_item_id, product_id, item_name, quantity, unit_cost, created_product, account_id, account_email, direction)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [req.userId, client_transfer_id, warehouse_item_id, product.id, product.name, quantity, product.purchase_price, created, account.id, account.email, 'to_warehouse'],
     });
     await tx.commit();
     const row = await db.execute({ sql: 'SELECT * FROM warehouse_transfers WHERE id = ?', args: [Number(log.lastInsertRowid)] });

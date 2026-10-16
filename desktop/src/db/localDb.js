@@ -130,6 +130,18 @@ function initLocalDb(dbPath) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS cash_close_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER UNIQUE,
+      cash_close_server_id INTEGER NOT NULL,
+      correction_revision INTEGER NOT NULL,
+      account_id INTEGER,
+      account_email TEXT,
+      before TEXT NOT NULL,
+      after TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS inventory_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       server_id INTEGER,
@@ -249,6 +261,8 @@ function initLocalDb(dbPath) {
     // una de sus ventas (ver server/lib/saleCorrections.js).
     'ALTER TABLE cash_closes ADD COLUMN corrected_at TEXT',
     'ALTER TABLE cash_closes ADD COLUMN original_difference REAL',
+    'ALTER TABLE cash_closes ADD COLUMN original_expected_cash REAL',
+    'ALTER TABLE cash_closes ADD COLUMN correction_revision INTEGER NOT NULL DEFAULT 0',
     // Las entradas de stock locales también distinguen la corrección a mano.
     "ALTER TABLE stock_entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'entrada'",
     'ALTER TABLE stock_entries ADD COLUMN reason TEXT',
@@ -295,6 +309,8 @@ function initLocalDb(dbPath) {
   const backfill = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('local_backfill_v1');
   if (!backfill) {
     const registerId = db.prepare('SELECT value FROM sync_state WHERE key = ?').get('register_id').value;
+    // No se inventa autoría en instalaciones compartidas. Las filas históricas
+    // sin cuenta conservan NULL y las consultas locales del cajón las incluyen.
     db.prepare(`UPDATE sales SET register_id = ? WHERE origin = 'local' AND register_id IS NULL`).run(registerId);
     db.exec(`
       UPDATE sales SET cash_close_id = (

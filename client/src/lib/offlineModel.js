@@ -3,6 +3,7 @@ import { parseServerDate } from './dates.js'
 import { isValidUnit, validQuantity, roundQty, lineTotal, lineUnits } from './units.js'
 
 export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], cash_withdrawals: [], rejected_sales: [], cashiers: [], current_period: null })
+export const CASH_CLOSE_COVERAGE_VERSION = 1
 export const businessDate = (value = new Date()) => {
   const date = value instanceof Date ? value : parseServerDate(value)
   if (!date) return ''
@@ -291,8 +292,19 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.saleIds = covered.map((s) => s.id)
     op.purchaseIds = coveredPurchases.map((p) => p.id)
     op.withdrawalIds = coveredWithdrawals.map((w) => w.id)
-    op.coverageExact = owner
-    if (owner) { op.body.covered_sale_ids = op.saleIds; op.body.covered_purchase_ids = op.purchaseIds }
+    // El cierre es un corte sobre lo descargado antes del conteo. Enviar IDs
+    // exactos también para cajeros evita que el servidor agregue ventas que
+    // llegaron desde otra pestaña/dispositivo después de ese conteo.
+    op.coverageVersion = data.cash_close_coverage_version
+    op.coverageComplete = owner || data.cash_close_coverage_version === CASH_CLOSE_COVERAGE_VERSION
+    op.coverageExact = op.coverageComplete
+    if (op.coverageExact) {
+      op.body.covered_sale_ids = op.saleIds
+      op.body.covered_purchase_ids = op.purchaseIds
+    } else {
+      delete op.body.covered_sale_ids
+      delete op.body.covered_purchase_ids
+    }
     op.body.closed_at = now
     op.body.register_id = 'web'
     const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0) + coveredWithdrawals.reduce((n, w) => n + withdrawalSplit(w)[key], 0))
@@ -303,7 +315,7 @@ export function prepareOperation(data, method, path, body, ctx) {
     const withdrawnTransfer = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'transferencia' ? w.amount : 0), 0))
     const withdrawnUsd = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'USD' ? w.amount : 0), 0))
     const withdrawnEur = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'EUR' ? w.amount : 0), 0))
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || coveredWithdrawals[0]?.created_at || now, expected_cash: cash, expected_transfer: transfer, difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), withdrawn_cash: withdrawnCash, withdrawn_transfer: withdrawnTransfer, withdrawn_usd: withdrawnUsd, withdrawn_eur: withdrawnEur, sales_count: covered.length, pending: true }
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || coveredWithdrawals[0]?.created_at || now, expected_cash: cash, expected_transfer: transfer, difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), withdrawn_cash: withdrawnCash, withdrawn_transfer: withdrawnTransfer, withdrawn_usd: withdrawnUsd, withdrawn_eur: withdrawnEur, sales_count: covered.length, pending: true, coverage_incomplete: !op.coverageComplete }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -328,6 +340,7 @@ export function monthlyReport(data, month) {
     if (offShopRate(sale)) day.off_rate_count++
   }
   for (const close of data.cash_closes) {
+    if (close.pending || close.coverage_incomplete) continue
     const date = businessDate(close.closed_at)
     if (!date.startsWith(month)) continue
     const day = dayFor(date)
@@ -345,6 +358,32 @@ export function monthlyReport(data, month) {
 export function readLocal(data, path, account, user) {
   const url = new URL(path, 'https://local.invalid'), route = url.pathname
   const owner = user.role !== 'cajero'
+  const accountId = Number(account.split(':')[1])
+  const belongsToAccount = (row) => Number(row.account_id) === accountId || (row.account_id == null && row.account_email === user.email)
+  const ownSales = data.sales.filter(belongsToAccount)
+  const cashierSale = (sale) => {
+    if (!sale) return sale
+    const { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
+      foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id,
+      pending, items = [] } = sale
+    return { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
+      foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id, pending,
+      items: items.map(({ id: itemId, sale_id, product_id, product_name, quantity, unit_price, pack_size, unit }) =>
+        ({ id: itemId, sale_id, product_id, product_name, quantity, unit_price, pack_size, unit })) }
+  }
+  if (route === '/api/sales') {
+    const rows = owner ? data.sales : ownSales
+    const filtered = newest(rows.filter((s) => !url.searchParams.has('date') || businessDate(s.created_at) === url.searchParams.get('date')), 'created_at')
+    return owner ? filtered : filtered.map(cashierSale)
+  }
+  if (/^\/api\/sales\/-?\d+$/.test(route)) {
+    const sale = data.sales.find((s) => s.id === Number(route.split('/').pop()))
+    return sale && (owner || belongsToAccount(sale)) ? (owner ? sale : cashierSale(sale)) : undefined
+  }
+  if (route === '/api/cash-closes') {
+    const rows = owner ? data.cash_closes : data.cash_closes.filter(belongsToAccount)
+    return newest(rows, 'closed_at')
+  }
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
     const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)]
@@ -360,15 +399,13 @@ export function readLocal(data, path, account, user) {
     return newest(filtered, 'created_at')
   }
   if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
-  if (route === '/api/sales') return newest(data.sales.filter((s) => !url.searchParams.has('date') || businessDate(s.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales/rejected') return data.rejected_sales.filter((s) => !s.reviewed_at)
-  if (/^\/api\/sales\/-?\d+$/.test(route)) return data.sales.find((s) => s.id === Number(route.split('/').pop()))
   if (route === '/api/inventory-counts') return newest(data.inventory_counts, 'counted_at')
   if (/^\/api\/inventory-counts\/-?\d+$/.test(route)) return data.inventory_counts.find((c) => c.id === Number(route.split('/').pop()))
-  if (route === '/api/cash-closes') return newest(data.cash_closes, 'closed_at')
   if (route === '/api/cash-closes/summary') {
     const summary = new Map()
     for (const c of data.cash_closes) {
+      if (c.pending || c.coverage_incomplete) continue
       const key = `${c.account_id}:${c.account_email}`
       if (!summary.has(key)) summary.set(key, { account_id: c.account_id, account_email: c.account_email, closes: 0, total_difference: 0, worst_difference: 0, times_short: 0, total_difference_usd: 0, total_difference_eur: 0 })
       const s = summary.get(key); s.closes++; s.total_difference += Number(c.difference); s.worst_difference = Math.min(s.worst_difference, c.difference); s.times_short += c.difference < -0.5 ? 1 : 0

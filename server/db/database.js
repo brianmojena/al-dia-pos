@@ -254,6 +254,19 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS cash_close_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      cash_close_id INTEGER NOT NULL,
+      correction_revision INTEGER NOT NULL,
+      account_id INTEGER,
+      account_email TEXT,
+      before TEXT NOT NULL,
+      after TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, cash_close_id, correction_revision)
+    );
+
     CREATE TABLE IF NOT EXISTS pwa_product_operations (
       user_id INTEGER NOT NULL,
       account_id INTEGER NOT NULL,
@@ -410,6 +423,13 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN corrected_at TEXT',
     'ALTER TABLE cash_closes ADD COLUMN original_expected_cash REAL',
     'ALTER TABLE cash_closes ADD COLUMN original_difference REAL',
+    'ALTER TABLE cash_closes ADD COLUMN correction_revision INTEGER NOT NULL DEFAULT 0',
+    `CREATE TRIGGER IF NOT EXISTS cash_close_corrections_no_update
+      BEFORE UPDATE ON cash_close_corrections
+      BEGIN SELECT RAISE(ABORT, 'cash close correction audit is append-only'); END`,
+    `CREATE TRIGGER IF NOT EXISTS cash_close_corrections_no_delete
+      BEFORE DELETE ON cash_close_corrections
+      BEGIN SELECT RAISE(ABORT, 'cash close correction audit is append-only'); END`,
     // Venta por paquete (ver lib/units.js, parsePack): cuántos sueltos trae y
     // su precio entero. NULL = solo se vende suelto.
     'ALTER TABLE products ADD COLUMN pack_size INTEGER',
@@ -424,6 +444,9 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_transfer REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_usd REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_eur REAL NOT NULL DEFAULT 0',
+    // Dirección de la transferencia: 'to_store' (almacén → tienda, la de ahora) o
+    // 'to_warehouse' (tienda → almacén, la nueva).
+    'ALTER TABLE warehouse_transfers ADD COLUMN direction TEXT NOT NULL DEFAULT \'to_store\'',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

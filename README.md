@@ -69,11 +69,12 @@ of over the network. One UI, two transports.
 ```
 ├── client/     React 18 + Vite + Tailwind — the POS UI (also bundled into the desktop app)
 ├── server/     Express 4 API, deployed to Vercel as a serverless function, data in Turso
-└── desktop/    Electron shell — local SQLite mirror + outbox sync worker
+├── desktop/    Electron shell — local SQLite mirror + outbox sync worker
+└── marketing-video/ Standalone Remotion project for Al Día videos
 ```
 
 Each folder has its own README with details:
-[`client/`](./client/README.md) · [`server/`](./server/README.md) · [`desktop/`](./desktop/README.md)
+[`client/`](./client/README.md) · [`server/`](./server/README.md) · [`desktop/`](./desktop/README.md) · [`marketing-video/`](./marketing-video/README.md)
 
 ---
 

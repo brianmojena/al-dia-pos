@@ -296,12 +296,35 @@ const sinceLast60Days = () => {
  * siguiente, porque cada página guarda su cursor junto con sus filas.
  */
 async function pullDelta(session, summary) {
-  if (session.role === 'cajero') return;
+  if (session.role === 'cajero') {
+    try {
+      // La delta general contiene correcciones e información de toda la tienda.
+      // El snapshot de PWA ya ofrece una proyección personal sin costos.
+      const res = await apiRequest('GET', '/api/sync/snapshot', { token: session.token });
+      if (!res.ok) {
+        summary.downSync = { error: res.data?.error || `HTTP ${res.status}` };
+        return;
+      }
+      const snapshot = res.data;
+      const maxId = (rows) => Math.max(0, ...(rows || []).map((row) => Number(row.id) || 0));
+      const stats = applyServerDelta({
+        sales: snapshot.sales || [], cash_closes: snapshot.cash_closes || [],
+        inventory_counts: [], currency_purchases: snapshot.currency_purchases || [],
+        cash_withdrawals: snapshot.cash_withdrawals || [], sale_corrections: [],
+        cursors: { sale: maxId(snapshot.sales), close: maxId(snapshot.cash_closes), count: 0,
+          purchase: maxId(snapshot.currency_purchases), withdrawal: maxId(snapshot.cash_withdrawals), correction: 0 },
+      });
+      summary.downSync = { sales: stats.sales, closes: stats.closes, purchases: stats.purchases, withdrawals: stats.withdrawals };
+    } catch (err) {
+      if (!err?.isNetworkError) summary.downSync = { error: err?.message || String(err) };
+    }
+    return;
+  }
   let cursors = prepareDeltaSession(session.user_id);
   let pages = 0;
   let more = false;
   let error = null;
-  const totals = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0 };
+  const totals = { sales: 0, closes: 0, counts: 0, purchases: 0, withdrawals: 0, close_corrections: 0 };
   try {
     do {
       const query = new URLSearchParams({
@@ -309,6 +332,7 @@ async function pullDelta(session, summary) {
         after_count: String(cursors.count), after_purchase: String(cursors.purchase),
         after_withdrawal: String(cursors.withdrawal), after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500',
       });
+      query.set('after_close_correction', String(cursors.close_correction));
       const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
       if (!res.ok) {
         error = res.data?.error || `HTTP ${res.status}`;
@@ -320,6 +344,7 @@ async function pullDelta(session, summary) {
       totals.counts += stats.counts;
       totals.purchases += stats.purchases;
       totals.withdrawals += stats.withdrawals;
+      totals.close_corrections += stats.close_corrections;
       cursors = prepareDeltaSession(session.user_id);
       more = res.data.has_more === true;
       pages++;

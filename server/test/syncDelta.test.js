@@ -11,7 +11,7 @@ test('delta de sincronización', async (t) => {
     const empty = await ctx.api('GET', '/api/sync/delta?after_sale=0&after_close=0&after_count=0', { token });
     assert.equal(empty.status, 200);
     assert.deepEqual(empty.body.sales, []);
-    assert.deepEqual(empty.body.cursors, { correction: 0, sale: 0, close: 0, count: 0, purchase: 0, withdrawal: 0 });
+    assert.deepEqual(empty.body.cursors, { correction: 0, close_correction: 0, sale: 0, close: 0, count: 0, purchase: 0, withdrawal: 0 });
     assert.equal(empty.body.has_more, false);
 
     const productId = await createProduct(ctx.api, token, { name: 'Pan', stock: 10, sale_price: 100 });

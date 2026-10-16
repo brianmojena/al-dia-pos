@@ -145,6 +145,7 @@ async function routeRequest(method, fullPath, body) {
     // Leer y transferir funcionan sin red (la caja trabaja con su espejo). Dar
     // de alta, editar o borrar artículos lo puede hacer cualquier cuenta (el servidor lo registra) y se
     // hace en el servidor, que es donde vive el almacén: hace falta internet.
+    // Transferir de tienda a almacén requiere red (se valida stock local y se sincroniza).
     if (parts[0] === 'api' && parts[1] === 'warehouse') {
       if (parts.length === 2 && method === 'GET') return ok(200, queries.listWarehouse());
       if (parts.length === 3 && parts[2] === 'transfer' && method === 'POST') {
@@ -155,6 +156,42 @@ async function routeRequest(method, fullPath, body) {
         } catch (err) {
           return fail(err.code === 'NEEDS_SALE_PRICE' ? 400 : 409, err.message);
         }
+      }
+      if (parts.length === 3 && parts[2] === 'from-store' && method === 'POST') {
+        // Transferencia de tienda a almacén: solo online.
+        const product = queries.listProducts().find(p => p.id === Number(body?.product_id));
+        if (!product) return fail(404, 'Producto no encontrado en la tienda');
+        if (product.server_id == null) {
+          return fail(409, 'Este producto todavía no se ha subido a la nube. Espera a que sincronice y vuelve a intentarlo.');
+        }
+        if ((!product.unit || Number(product.track_stock) === 1) && Number(body.quantity) > Number(product.stock)) {
+          return fail(409, `En la tienda solo hay ${product.stock} de ${product.name}`);
+        }
+
+        const { apiRequest } = require('./sync/apiClient');
+        let res;
+        try {
+          res = await apiRequest('POST', '/api/warehouse/from-store', {
+            token: session.token,
+            body: {
+              product_id: product.server_id,
+              quantity: body.quantity,
+              client_transfer_id: body.client_transfer_id,
+            },
+          });
+        } catch (_) {
+          return fail(503, 'Para esto hace falta internet');
+        }
+        if (res.status === 401) return fail(403, 'Tu sesión con la nube venció. Vuelve a iniciar sesión.');
+
+        if (res.status === 201) {
+          queries.takeLocalStock(product.id, Number(body.quantity));
+          const wh = await apiRequest('GET', '/api/warehouse', { token: session.token }).catch(() => null);
+          if (wh && wh.ok) queries.applyServerWarehouse(wh.data);
+          require('./sync/syncWorker').syncOnce().catch(() => {});
+        }
+
+        return { ok: res.ok, status: res.status, data: res.data };
       }
       const { apiRequest } = require('./sync/apiClient');
       let res;
@@ -207,12 +244,14 @@ async function routeRequest(method, fullPath, body) {
         return { ok: res.ok, status: res.status, data: res.data };
       }
       if (parts.length === 2 && method === 'GET') {
-        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
-        return ok(200, queries.listSales({ date: query.date }));
+        return ok(200, queries.listSales({
+          date: query.date,
+          ...(session.role === 'cajero' && { accountEmail: session.email }),
+        }));
       }
       if (parts.length === 3 && method === 'GET') {
-        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
-        const sale = queries.getSale(Number(parts[2]));
+        const sale = queries.getSale(Number(parts[2]), session.role === 'cajero' ? { accountEmail: session.email } : {});
+        if (session.role === 'cajero' && sale?.account_email !== session.email) return fail(404, 'Venta no encontrada');
         return sale ? ok(200, sale) : fail(404, 'Venta no encontrada');
       }
       if (parts.length === 2 && method === 'POST') {
@@ -307,9 +346,41 @@ async function routeRequest(method, fullPath, body) {
         if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
         return ok(200, queries.cashCloseSummary());
       }
+      if (parts.length === 3 && method === 'GET' && /^\d+$/.test(parts[2])) {
+        const local = queries.getCashClose(Number(parts[2]));
+        if (!local) return fail(404, 'Cierre de caja no encontrado');
+        if (session.role === 'cajero' && local.account_email !== session.email) return fail(404, 'Cierre de caja no encontrado');
+        if (local.server_id == null) return ok(200, queries.getCashCloseDetail(local.id));
+        const { apiRequest } = require('./sync/apiClient');
+        let res;
+        try { res = await apiRequest('GET', `/api/cash-closes/${local.server_id}`, { token: session.token }); }
+        catch (_) { return fail(503, 'Para cargar el detalle actualizado hace falta conexión.'); }
+        if (res.ok) {
+          queries.applyCashCloseDetailLocal(res.data);
+          return { ok: true, status: res.status, data: { ...res.data, id: local.id, server_id: local.server_id } };
+        }
+        return { ok: res.ok, status: res.status, data: res.data };
+      }
+      if (parts.length === 3 && method === 'PUT' && /^\d+$/.test(parts[2])) {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede corregir cierres de caja');
+        const local = queries.getCashClose(Number(parts[2]));
+        if (!local) return fail(404, 'Cierre de caja no encontrado');
+        if (local.server_id == null) return fail(409, 'Este cierre todavía no se sincroniza. Conéctate y vuelve a intentarlo.');
+        const { apiRequest } = require('./sync/apiClient');
+        let res;
+        try { res = await apiRequest('PUT', `/api/cash-closes/${local.server_id}`, { token: session.token, body }); }
+        catch (_) { return fail(503, 'Para corregir cierres hace falta internet.'); }
+        if (res.ok) {
+          queries.applyCashCloseCorrectionLocal(res.data);
+          return { ok: true, status: res.status, data: {
+            ...res.data,
+            cash_close: { ...res.data.cash_close, id: local.id, server_id: local.server_id },
+          } };
+        }
+        return { ok: res.ok, status: res.status, data: res.data };
+      }
       if (parts.length === 2 && method === 'GET') {
-        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
-        return ok(200, queries.listCashCloses());
+        return ok(200, queries.listCashCloses(session.role === 'cajero' ? { accountEmail: session.email } : undefined));
       }
       if (parts.length === 2 && method === 'POST') {
         try {
@@ -331,7 +402,8 @@ async function routeRequest(method, fullPath, body) {
               await syncOnce();
               const close = queries.createCashCloseLocal(body);
               await syncOnce();
-              return ok(201, queries.getCashClose(close.id));
+              const saved = queries.getCashClose(close.id);
+              return ok(201, { ...saved, pending: saved.server_id == null });
             }
             // Sin internet: se cierra con lo que ya bajó. Al sincronizar, el
             // servidor suma lo que falte (p. ej. ventas de un teléfono que no
@@ -339,14 +411,17 @@ async function routeRequest(method, fullPath, body) {
             const close = queries.createCashCloseLocal(body);
             const asOf = queries.getSyncState('last_delta_at');
             const ago = asOf ? Math.max(0, Math.round((Date.now() - Date.parse(asOf)) / 60000)) : null;
+            const saved = queries.getCashClose(close.id);
             return ok(201, {
-              ...queries.getCashClose(close.id),
+              ...saved,
+              pending: saved.server_id == null,
               offline_notice: ago == null
                 ? 'Cerrado sin internet y sin haber bajado nunca las ventas de otros aparatos. El servidor puede ajustar la diferencia al sincronizar.'
                 : `Cerrado con los datos de hace ${ago} min; el servidor puede ajustar la diferencia al sincronizar.`,
             });
           }
-          return ok(201, queries.createCashCloseLocal(body));
+          const saved = queries.createCashCloseLocal(body);
+          return ok(201, { ...saved, pending: saved.server_id == null });
         } catch (err) {
           return fail(400, err.message);
         }

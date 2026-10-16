@@ -14,7 +14,7 @@ Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, confi
 globalThis.BroadcastChannel = undefined
 const { apiFetch, setToken } = await import('./api.js')
 const { cacheUser } = await import('./offlineCache.js')
-const { syncOffline, localSyncStatus, retrySync, resolveProductConflict } = await import('./offlineClient.js')
+const { syncOffline, localSyncStatus, retrySync, resolveProductConflict, handlesOffline, cacheCashCloseCorrection, refreshOfflineSnapshot } = await import('./offlineClient.js')
 const tokenFor = (shop, account = shop) => `x.${Buffer.from(JSON.stringify({ userId: shop, accountId: account })).toString('base64url')}.x`
 const login = (shop) => { setToken(tokenFor(shop)); cacheUser({ id: shop, email: `${shop}@test.local`, role: 'dueño', transfer_limit: null }) }
 const stateKey = (shop) => `mypimes_local_v1:${shop}:${shop}`
@@ -70,10 +70,139 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     await updated.syncOffline()
     assert.equal((await updated.localSyncStatus()).pending, 0)
     assert.equal(uploaded.length, 1)
-    resetStore(); login(1); seed(); navigator.onLine = false
-    await write('/api/sales', saleBody())
+  })
+  await t.test('cierre offline del cajero sincroniza IDs exactos y sustituye el resultado provisional', async () => {
+    resetStore();
+    setToken(tokenFor(1, 2));
+    cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' });
+    navigator.onLine = false;
+    const key = 'mypimes_local_v1:1:2';
+    const syncedSale = { id: 51, client_sale_id: 'synced-before-count', account_id: 2,
+      account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null,
+      total: 300, payment_method: 'efectivo', created_at: '2026-10-14 10:00:00',
+      profit: 250, items: [{ id: 1, product_name: 'Pan', quantity: 1, unit_price: 300, unit_cost: 50 }] };
+    records.set(key, { base: { ...emptyData(), cash_close_coverage_version: 1, products: [], sales: [syncedSale] }, outbox: [], initialized: true, nextId: -1 });
+    const saved = await write('/api/cash-closes', { client_close_id: 'offline-cash-close', register_id: 'web', opening_float: 1000, counted_cash: 1300 });
+    assert.equal(saved.status, 202);
+    const provisional = await saved.json();
+    assert.equal(provisional.expected_cash, 1300);
+    assert.equal(provisional.difference, 0);
+    assert.deepEqual(records.get(key).outbox[0].body.covered_sale_ids, [51]);
+
+    navigator.onLine = true;
+    const confirmed = { ...provisional, id: 80, pending: false, expected_cash: 1300, difference: 0, sales_count: 1 };
+    const laterSale = { id: 52, client_sale_id: 'arrived-after-count', account_id: 2,
+      account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null,
+      total: 75, payment_method: 'efectivo', created_at: '2026-10-14 10:05:00', items: [] };
+    let uploadedCoverage;
+    globalThis.fetch = async (path, options = {}) => {
+      if (path === '/api/cash-closes') {
+        uploadedCoverage = JSON.parse(options.body).covered_sale_ids;
+        return jsonResponse(confirmed);
+      }
+      assert.equal(path, '/api/sync/snapshot');
+      return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, sales: [{ ...syncedSale, cash_close_id: 80 }, laterSale], cash_closes: [confirmed], current_period: { has_sales: true } });
+    };
+    await syncOffline();
+    assert.deepEqual(uploadedCoverage, [51], 'la venta llegada tras el conteo queda fuera del cierre');
+    assert.equal((await localSyncStatus()).pending, 0);
+    const history = await (await apiFetch('/api/cash-closes')).json();
+    assert.equal(history[0].client_close_id, 'offline-cash-close');
+    assert.equal(history[0].expected_cash, 1300, 'el historial reemplaza los importes provisionales por los confirmados');
+    assert.equal(history[0].difference, 0);
+  })
+  await t.test('una caché antigua se refresca antes de enviar el cierre y conserva la respuesta confirmada', async () => {
+    resetStore(); setToken(tokenFor(1, 2));
+    cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' });
+    const key = 'mypimes_local_v1:1:2';
+    records.set(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [], sales: [] }, outbox: [], initialized: true, nextId: -1 });
+    navigator.onLine = false;
+    const local = await write('/api/cash-closes', { client_close_id: 'legacy-cache-close', opening_float: 1000, counted_cash: 1300 });
+    const provisional = await local.json();
+    assert.equal(provisional.pending, true);
+    assert.equal(provisional.coverage_incomplete, true);
+    const stored = records.get(key).outbox[0];
+    assert.equal(stored.coverageExact, false);
+    assert.equal('covered_sale_ids' in stored.body, false);
+    const localHistory = await (await apiFetch('/api/cash-closes')).json();
+    assert.equal(localHistory[0].pending, true);
+    assert.equal(localHistory[0].coverage_incomplete, true);
+
+    const sale = { id: 51, client_sale_id: 'already-synced', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 300, payment_method: 'efectivo', created_at: '2026-10-14 10:00:00' };
+    const confirmed = { ...provisional, id: 81, expected_cash: 1300, difference: 0, sales_count: 1, pending: false, coverage_incomplete: false };
+    navigator.onLine = true;
+    let snapshots = 0, postedBody;
+    globalThis.fetch = async (path, options = {}) => {
+      if (path === '/api/cash-closes') {
+        postedBody = JSON.parse(options.body);
+        return jsonResponse(confirmed);
+      }
+      assert.equal(path, '/api/sync/snapshot');
+      snapshots++;
+      return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1,
+        sales: [{ ...sale, ...(snapshots > 1 ? { cash_close_id: 81 } : {}) }],
+        cash_closes: snapshots > 1 ? [confirmed] : [], current_period: { has_sales: true } });
+    };
+    await syncOffline();
+    assert.deepEqual(postedBody.covered_sale_ids, [51]);
+    assert.ok(snapshots >= 2, 'descarga cobertura antes del POST y estado confirmado después');
+    assert.equal((await localSyncStatus()).pending, 0, 'el outbox antiguo no queda bloqueado');
+    const finalHistory = await (await apiFetch('/api/cash-closes')).json();
+    assert.equal(finalHistory[0].pending, false);
+    assert.equal(finalHistory[0].expected_cash, 1300);
+    assert.equal(finalHistory[0].difference, 0);
+  })
+  await t.test('rehidratar cierres viejos respeta el corte UTC y no proyecta ventas posteriores de la cola', async () => {
+    resetStore(); setToken(tokenFor(1, 2));
+    cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' });
+    const key = 'mypimes_local_v1:1:2';
+    records.set(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }], sales: [] }, outbox: [], initialized: true, nextId: -1 });
+    navigator.onLine = false;
+    await write('/api/cash-closes', { client_close_id: 'legacy-close-one', opening_float: 1000, counted_cash: 1300 });
+    const state = records.get(key), first = state.outbox[0];
+    const firstAt = new Date(Date.now() - 5000).toISOString();
+    first.body.closed_at = firstAt; first.result.closed_at = firstAt;
+    await write('/api/sales', { ...saleBody('legacy-sale-b'), items: [{ product_id: 10, quantity: 1, unit_price: 75 }] });
+    await write('/api/cash-closes', { client_close_id: 'legacy-close-two', counted_cash: 150 });
+    assert.deepEqual(records.get(key).outbox.map((op) => op.kind), ['close', 'sale', 'close']);
+    assert.equal(records.get(key).outbox[2].body.client_close_id, 'legacy-close-two');
+
+    const saleA = { id: 51, client_sale_id: 'already-synced-a', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 300, payment_method: 'efectivo', created_at: new Date(Date.parse(firstAt) - 60000).toISOString() };
+    const saleFromOtherDevice = { id: 52, client_sale_id: 'other-device-after-count', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 75, payment_method: 'efectivo', created_at: new Date(Date.parse(firstAt) + 1000).toISOString() };
+    const saleBAt = records.get(key).outbox[1].body.sold_at;
+    const closeOne = { id: 81, client_close_id: 'legacy-close-one', account_id: 2, account_email: 'cajero@test.local', closed_at: firstAt, expected_cash: 1300, counted_cash: 1300, difference: 0, pending: false, sales_count: 1 };
+    const closeTwo = { id: 82, client_close_id: 'legacy-close-two', account_id: 2, account_email: 'cajero@test.local', expected_cash: 150, counted_cash: 150, difference: 0, pending: false, sales_count: 2 };
+    navigator.onLine = true;
+    let snapshotNumber = 0, firstCoverage, secondCoverage;
+    globalThis.fetch = async (path, options = {}) => {
+      if (path === '/api/cash-closes') {
+        const body = JSON.parse(options.body);
+        if (body.client_close_id === 'legacy-close-one') { firstCoverage = body.covered_sale_ids; return jsonResponse(closeOne); }
+        secondCoverage = body.covered_sale_ids; return jsonResponse(closeTwo);
+      }
+      if (path === '/api/sales') {
+        const body = JSON.parse(options.body);
+        return jsonResponse({ ...body, id: 53, total: 75, created_at: body.sold_at, pending: false });
+      }
+      assert.equal(path, '/api/sync/snapshot');
+      snapshotNumber++;
+      if (snapshotNumber === 1) return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, products: [{ id: 10, name: 'Pan', stock: 18, sale_price: 10, purchase_price: 6 }], sales: [saleA, saleFromOtherDevice], current_period: { has_sales: true } });
+      const saleB = { id: 53, client_sale_id: 'legacy-sale-b', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 75, payment_method: 'efectivo', created_at: saleBAt };
+      if (snapshotNumber === 2) return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, products: [{ id: 10, name: 'Pan', stock: 18, sale_price: 10, purchase_price: 6 }], sales: [{ ...saleA, cash_close_id: 81 }, saleFromOtherDevice, saleB], cash_closes: [closeOne], current_period: { has_sales: true } });
+      const finalSales = [{ ...saleA, cash_close_id: 81 }, { ...saleFromOtherDevice, cash_close_id: 82 }, { ...saleB, cash_close_id: 82 }];
+      return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, products: [{ id: 10, name: 'Pan', stock: 18, sale_price: 10, purchase_price: 6 }], sales: finalSales, cash_closes: [closeTwo, closeOne], current_period: { has_sales: false } });
+    };
+    await syncOffline();
+    assert.deepEqual(firstCoverage, [51], 'el primer cierre incluye A y excluye la venta posterior de otro dispositivo');
+    assert.deepEqual(secondCoverage, [52, 53], 'el segundo cierre cubre las ventas que quedaron después del primer corte');
+    assert.equal((await localSyncStatus()).pending, 0, 'los cierres y dependencias posteriores conservan su orden y sincronizan');
+    const history = await (await apiFetch('/api/cash-closes')).json();
+    assert.equal(history.find((close) => close.client_close_id === 'legacy-close-one').difference, 0);
+    assert.equal(history.find((close) => close.client_close_id === 'legacy-close-two').sales_count, 2);
   })
   await t.test('un 5xx o respuesta perdida conserva la operación hasta el reintento exitoso', async () => {
+    resetStore(); login(1); seed(); navigator.onLine = false
+    await write('/api/sales', saleBody())
     navigator.onLine = true
     globalThis.fetch = async () => jsonResponse({ error: 'Servidor caído' }, 503)
     await syncOffline(); assert.equal((await localSyncStatus()).pending, 1)
@@ -283,4 +412,42 @@ test('una edición de cajero guardada con el producto entero por una versión an
   await retrySync()
   assert.deepEqual(sent, ['product', 'sale'])
   assert.equal((await localSyncStatus()).pending, 0)
+})
+
+test('corregir un cierre PWA requiere red, no crea outbox y refresca el snapshot confirmado', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  assert.equal(handlesOffline('/api/cash-closes/9', 'PUT'), false)
+  globalThis.fetch = () => { throw new TypeError('offline') }
+  await assert.rejects(apiFetch('/api/cash-closes/9', { method: 'PUT', body: JSON.stringify({ correction_revision: 0 }) }), /offline/)
+  assert.equal((await localSyncStatus()).pending, 0, 'no se devuelve un éxito local ni se encola la corrección')
+
+  const key = stateKey(1)
+  const confirmed = { id: 9, client_close_id: 'close-9', expected_cash: 150, counted_cash: 150, difference: 0, correction_revision: 1 }
+  const ownerIdentity = { account: '1:1', token: tokenFor(1) }
+  records.set(key, { base: { ...emptyData(), cash_closes: [
+    { id: 8, client_close_id: null, expected_cash: 1 },
+    { id: 9, client_close_id: null, expected_cash: 2 },
+  ] }, outbox: [], initialized: true })
+  await cacheCashCloseCorrection({ cash_close: { ...confirmed, client_close_id: null } }, ownerIdentity)
+  assert.equal(records.get(key).base.cash_closes.find((row) => row.id === 8).expected_cash, 1,
+    'cierres legacy sin client_close_id no colisionan')
+  assert.equal(records.get(key).base.cash_closes.find((row) => row.id === 9).expected_cash, 150)
+  setToken(tokenFor(2)); cacheUser({ id: 2, email: 'other@test.local', role: 'dueño' })
+  assert.equal(await cacheCashCloseCorrection({ cash_close: { ...confirmed, id: 10 } }, ownerIdentity), false,
+    'no aplica la respuesta anterior después de cambiar la cuenta')
+  assert.equal((records.get(stateKey(2))?.base.cash_closes || []).length, 0)
+  login(1)
+  const ownerState = records.get(key)
+  ownerState.base.cash_closes = [confirmed]
+  records.set(key, ownerState)
+  let requested = ''
+  globalThis.fetch = async (path) => {
+    requested = path
+    return jsonResponse({ ...emptyData(), cash_closes: [confirmed], current_period: { has_sales: false } })
+  }
+  await refreshOfflineSnapshot()
+  assert.equal(requested, '/api/sync/snapshot')
+  const history = await (await apiFetch('/api/cash-closes')).json()
+  assert.equal(history[0].difference, 0)
+  assert.equal(records.get(key).outbox.length, 0)
 })

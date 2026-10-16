@@ -66,3 +66,29 @@ test('cierre del dueño con lo bajado: cuenta ventas de teléfonos y respeta las
   assert.equal(queries.getCurrentCashPeriod().has_sales, false);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM sales WHERE cash_close_id IS NULL').get().n, 0);
 }));
+
+test('takeLocalStock: descuenta, nunca baja de 0, mantiene formato', async () => conCaja(({ queries }) => {
+  // Producto por unidad: descuenta como entero
+  const p = crearProductoSincronizado(queries, { name: 'Manzana', stock: 10, unit: null });
+  let updated = queries.takeLocalStock(p.id, 3);
+  assert.equal(updated.stock, 7);
+  assert.equal(Number.isInteger(updated.stock), true);
+
+  // Nunca baja de 0
+  updated = queries.takeLocalStock(p.id, 10);
+  assert.equal(updated.stock, 0);
+  assert.equal(Number.isInteger(updated.stock), true);
+
+  // Intento descontar más: se queda en 0
+  updated = queries.takeLocalStock(p.id, 5);
+  assert.equal(updated.stock, 0);
+
+  // Producto por peso (kg): mantiene 3 decimales
+  const kg = crearProductoSincronizado(queries, { name: 'Arroz', stock: 10.5, unit: 'kg', track_stock: 1 });
+  updated = queries.takeLocalStock(kg.id, 2.3);
+  assert.equal(updated.stock, 8.2);
+
+  // Producto no encontrado
+  const notFound = queries.takeLocalStock(99999, 5);
+  assert.equal(notFound, null);
+}));

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Upload, Plus, Pencil, Trash2, X, Warehouse, ArrowRightLeft, History, AlertTriangle, PackagePlus } from 'lucide-react'
+import { Upload, Plus, Pencil, Trash2, X, Warehouse, ArrowRightLeft, History, AlertTriangle, PackagePlus, Store } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
@@ -29,6 +29,9 @@ export default function Almacen() {
   const [formError, setFormError] = useState('')
   const [saving, setSaving] = useState(false)
   const [transfer, setTransfer] = useState(null) // { item, quantity, sale_price }
+  const [fromStore, setFromStore] = useState(null) // { product, quantity, client_transfer_id }
+  const [addQty, setAddQty] = useState(null) // { item, quantity, cost }
+  const [storeSearch, setStoreSearch] = useState('')
   const [history, setHistory] = useState(null)
   const [changes, setChanges] = useState([])
   const [historyError, setHistoryError] = useState('')
@@ -53,10 +56,21 @@ export default function Almacen() {
 
   const saveItem = async (e) => {
     e.preventDefault(); setSaving(true); setFormError('')
-    const add = num(form.add_quantity)
+    const add = String(form.add_quantity ?? '').trim()
+
+    // Check for duplicates on create
+    if (!form.editing) {
+      const existing = items.find((i) => norm(i.name) === norm(form.name))
+      if (existing) {
+        setFormError(`«${existing.name}» ya está en el almacén. Usa el botón «Añadir cantidad» de su fila para sumar lo que llegó.`)
+        setSaving(false)
+        return
+      }
+    }
+
     const body = {
       name: form.name, cost: num(form.cost) || 0, unit: form.unit || null,
-      ...(form.editing ? (add > 0 ? { add_quantity: add } : {}) : { quantity: num(form.quantity) || 0 }),
+      ...(form.editing ? (add ? { add_quantity: num(add) } : {}) : { quantity: num(form.quantity) || 0 }),
     }
     try {
       const res = await apiFetch(form.editing ? `/api/warehouse/${form.editing.id}` : '/api/warehouse', { method: form.editing ? 'PUT' : 'POST', body: JSON.stringify(body) })
@@ -75,6 +89,38 @@ export default function Almacen() {
       if (!res.ok) { setNotice(data.error || 'No se pudo eliminar.'); return }
       await load()
     } catch (_) { setNotice('No se pudo eliminar. Hace falta conexión.') }
+  }
+
+  const doFromStore = async (e) => {
+    e.preventDefault(); setSaving(true); setFormError('')
+    try {
+      const res = await apiFetch('/api/warehouse/from-store', {
+        method: 'POST',
+        body: JSON.stringify({
+          product_id: fromStore.product.id, quantity: num(fromStore.quantity),
+          client_transfer_id: fromStore.clientId,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { setFormError(data.error || 'No se pudo pasar.'); return }
+      setNotice(`${formatQty(num(fromStore.quantity), fromStore.product.unit)} de «${fromStore.product.name}» pasaron al almacén.`)
+      setFromStore(null); await load()
+    } catch (_) { setFormError('No se pudo pasar. Hace falta conexión.') }
+    finally { setSaving(false) }
+  }
+
+  const doAddQty = async (e) => {
+    e.preventDefault(); setSaving(true); setFormError('')
+    const cost = String(addQty.cost ?? '').trim()
+    const body = { add_quantity: num(addQty.quantity), ...(cost ? { cost: num(cost) } : {}) }
+    try {
+      const res = await apiFetch(`/api/warehouse/${addQty.item.id}`, { method: 'PUT', body: JSON.stringify(body) })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { setFormError(data.error || 'No se pudo añadir.'); return }
+      setNotice(`Se añadieron ${formatQty(num(addQty.quantity), addQty.item.unit)} a «${addQty.item.name}».`)
+      setAddQty(null); await load()
+    } catch (_) { setFormError('No se pudo añadir. Hace falta conexión.') }
+    finally { setSaving(false) }
   }
 
   const doTransfer = async (e) => {
@@ -135,6 +181,7 @@ export default function Almacen() {
         </div>
         <div className="flex gap-2">
             {isOwner && <button onClick={openHistory} className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50"><History size={16} />Historial</button>}
+            <button onClick={() => { setFromStore({ product: null, quantity: '', clientId: crypto.randomUUID() }); setFormError(''); setStoreSearch('') }} className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50"><Store size={16} />Desde la tienda</button>
             <Link to="/almacen/importar" className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50"><Upload size={16} />Importar</Link>
             <button onClick={() => { setForm({ ...EMPTY }); setFormError('') }} className="flex items-center gap-2 bg-[#007AFF] text-white px-4 py-2.5 rounded-xl text-sm font-semibold"><Plus size={16} />Nuevo</button>
         </div>
@@ -161,9 +208,12 @@ export default function Almacen() {
                 <td className="px-5 py-4 text-right text-sm font-semibold">{formatQty(i.quantity, i.unit)}</td>
                 <td className="px-5 py-4 text-right text-sm text-gray-600 hidden sm:table-cell">{fmt(Number(i.quantity) * Number(i.cost))}</td>
                 <td className="px-5 py-4"><div className="flex items-center justify-end gap-1">
-                  <button disabled={Number(i.quantity) <= 0} title="Transferir a la tienda" aria-label="Transferir a la tienda"
+                  <button disabled={Number(i.quantity) <= 0} title="Pasar a la tienda" aria-label="Pasar a la tienda"
                     onClick={() => { setTransfer({ item: i, quantity: '', sale_price: '', clientId: crypto.randomUUID() }); setFormError('') }}
                     className="p-2 hover:bg-blue-50 rounded-xl text-[#007AFF] disabled:opacity-30"><ArrowRightLeft size={16} /></button>
+                  <button title="Añadir cantidad" aria-label="Añadir cantidad"
+                    onClick={() => { setAddQty({ item: i, quantity: '', cost: i.cost }); setFormError('') }}
+                    className="p-2 hover:bg-green-50 rounded-xl text-green-600"><PackagePlus size={16} /></button>
                   <>
                     <button title="Editar" aria-label="Editar" onClick={() => { setForm({ editing: i, name: i.name, cost: i.cost, unit: i.unit || '', add_quantity: '' }); setFormError('') }} className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-700"><Pencil size={15} /></button>
                     <button title="Eliminar" aria-label="Eliminar" onClick={() => removeItem(i)} className="p-2 hover:bg-red-50 rounded-xl text-gray-300 hover:text-red-500"><Trash2 size={15} /></button>
@@ -204,7 +254,7 @@ export default function Almacen() {
       {transfer && (() => {
         const existing = inStore(transfer.item), q = num(transfer.quantity) || 0
         return (
-          <Modal title="Transferir a la tienda" onClose={() => setTransfer(null)}>
+          <Modal title="Pasar a la tienda" onClose={() => setTransfer(null)}>
             <form onSubmit={doTransfer} className="px-6 py-5 space-y-4">
               <p className="text-sm text-gray-700"><span className="font-semibold">{transfer.item.name}</span> — en el almacén hay {formatQty(transfer.item.quantity, transfer.item.unit)}</p>
               <div><label className={labelCls}>Cantidad a pasar{transfer.item.unit ? ` (${transfer.item.unit})` : ''}</label>
@@ -223,6 +273,74 @@ export default function Almacen() {
         )
       })()}
 
+      {fromStore && (() => {
+        const storeProducts = products.filter((p) => Number(p.stock) > 0 && !(p.unit && Number(p.track_stock) === 0)).sort((a, b) => a.name.localeCompare(b.name))
+        const filtered = storeProducts.filter((p) => p.name.toLowerCase().includes(storeSearch.toLowerCase()))
+        const selected = fromStore.product ? storeProducts.find((p) => p.id === fromStore.product.id) : null
+        const existingWh = selected ? items.find((i) => norm(i.name) === norm(selected.name)) : null
+        const q = num(fromStore.quantity) || 0
+        return (
+          <Modal title="Pasar de la tienda al almacén" onClose={() => setFromStore(null)}>
+            <form onSubmit={doFromStore} className="px-6 py-5 space-y-4">
+              <div>
+                <label className={labelCls}>Buscar producto</label>
+                <input autoFocus type="text" placeholder="Buscar en la tienda..." className={inputCls} value={storeSearch} onChange={(e) => setStoreSearch(e.target.value)} />
+              </div>
+              {!selected ? (
+                <div>
+                  <label className={labelCls}>Producto</label>
+                  <select value={''} onChange={(e) => {
+                    const p = storeProducts.find((p) => p.id === parseInt(e.target.value))
+                    setFromStore((fs) => ({ ...fs, product: p, quantity: '' }))
+                  }} className={inputCls}>
+                    <option value="">Selecciona un producto</option>
+                    {filtered.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name} — hay {formatQty(p.stock, p.unit)}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <>
+                  <div className="bg-blue-50 rounded-xl px-4 py-3 text-sm">
+                    <p className="font-semibold text-blue-900">{selected.name}</p>
+                    <p className="text-xs text-blue-700 mt-1">hay {formatQty(selected.stock, selected.unit)}</p>
+                  </div>
+                  <button type="button" onClick={() => { setFromStore((fs) => ({ ...fs, product: null })); setStoreSearch('') }} className="text-sm text-[#007AFF] font-semibold">Cambiar producto</button>
+                  <div><label className={labelCls}>{selected.pack_size && Number(selected.pack_size) > 1 ? 'Cantidad a pasar (unidades sueltas)' : 'Cantidad a pasar'}</label>
+                    <input required type="number" min="0" max={selected.stock} step={selected.unit ? 'any' : '1'} placeholder="0" className={inputCls} value={fromStore.quantity} onChange={(e) => setFromStore((fs) => ({ ...fs, quantity: e.target.value }))} /></div>
+                  {existingWh ? (
+                    <>
+                      <p className="text-xs text-gray-500">Ya está en el almacén con {formatQty(existingWh.quantity, existingWh.unit)}{q > 0 ? `; quedará en ${formatQty(Number(existingWh.quantity) + q, existingWh.unit)}` : ''}.</p>
+                      {existingWh.unit !== selected.unit && <p className="text-xs text-red-600 font-semibold">El artículo del almacén tiene otra unidad de medida</p>}
+                    </>
+                  ) : (
+                    <p className="text-xs text-gray-500">Se creará en el almacén con costo {fmt(selected.purchase_price)}.</p>
+                  )}
+                  <ErrorBox />
+                  <button type="submit" disabled={saving || (existingWh && existingWh.unit !== selected.unit)} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Pasando...' : 'Pasar'}</button>
+                </>
+              )}
+            </form>
+          </Modal>
+        )
+      })()}
+
+      {addQty && (() => {
+        return (
+          <Modal title="Añadir al almacén" onClose={() => setAddQty(null)}>
+            <form onSubmit={doAddQty} className="px-6 py-5 space-y-4">
+              <p className="text-sm text-gray-700"><span className="font-semibold">{addQty.item.name}</span> — hay {formatQty(addQty.item.quantity, addQty.item.unit)}</p>
+              <div><label className={labelCls}>Cantidad que llegó</label>
+                <input autoFocus required type="number" min="0" step={addQty.item.unit ? 'any' : '1'} placeholder="0" className={inputCls} value={addQty.quantity} onChange={(e) => setAddQty((aq) => ({ ...aq, quantity: e.target.value }))} /></div>
+              <div><label className={labelCls}>Costo{addQty.item.unit ? ` por ${addQty.item.unit}` : ''}</label>
+                <input type="number" min="0" step="0.01" placeholder="0.00" className={inputCls} value={addQty.cost} onChange={(e) => setAddQty((aq) => ({ ...aq, cost: e.target.value }))} /></div>
+              <ErrorBox />
+              <button type="submit" disabled={saving} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Añadiendo...' : 'Añadir'}</button>
+            </form>
+          </Modal>
+        )
+      })()}
+
       {history && (
         <Modal title="Historial del almacén" onClose={() => setHistory(null)}>
           <div className="px-6 py-5 space-y-2">
@@ -235,14 +353,23 @@ export default function Almacen() {
                   <p className="text-xs text-gray-400">{accountLabel(c.account_email)} · {c.created_at}</p>
                 </div>
               ))}
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide pt-2">Transferencias a la tienda</p>
             </>}
-            {historyError ? <p className="text-sm text-red-600">{historyError}</p> : history.length === 0 ? <p className="text-sm text-gray-400">Todavía no hay transferencias.</p> : history.map((h) => (
-              <div key={h.id} className="border-b border-gray-100 pb-2 text-sm">
-                <p className="font-medium text-gray-900">{h.item_name} · {formatQty(h.quantity, null)}</p>
-                <p className="text-xs text-gray-400">{accountLabel(h.account_email)} · {h.created_at}{Number(h.created_product) ? ' · creó el producto en la tienda' : ''}</p>
-              </div>
-            ))}
+            {!historyError && <>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide pt-2">Pases entre tienda y almacén</p>
+              {history.length === 0 ? (
+                <p className="text-sm text-gray-400">Todavía no hay pases.</p>
+              ) : history.map((h) => (
+                <div key={h.id} className="border-b border-gray-100 pb-2 text-sm">
+                  <p className="font-medium text-gray-900">{h.item_name} · {formatQty(h.quantity, null)}</p>
+                  <p className="text-xs text-gray-500">
+                    {h.direction === 'to_warehouse' ? 'Tienda → almacén' : 'Almacén → tienda'}
+                    {h.direction === 'to_warehouse' && Number(h.created_product) ? ' · creó el artículo en el almacén' : h.direction !== 'to_warehouse' && Number(h.created_product) ? ' · creó el producto en la tienda' : ''}
+                  </p>
+                  <p className="text-xs text-gray-400">{accountLabel(h.account_email)} · {h.created_at}</p>
+                </div>
+              ))}
+            </>}
+            {historyError && <p className="text-sm text-red-600">{historyError}</p>}
           </div>
         </Modal>
       )}

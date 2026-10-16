@@ -29,6 +29,8 @@ const pick = (row, keys) => Object.fromEntries(keys.map((k) => [k, row[k] ?? nul
 const CLOSE_FIELDS = [
   'expected_cash', 'counted_cash', 'difference', 'expected_transfer', 'sales_count',
   'expected_usd', 'counted_usd', 'difference_usd', 'expected_eur', 'counted_eur', 'difference_eur',
+  'opening_float', 'note', 'withdrawn_cash', 'withdrawn_transfer', 'withdrawn_usd', 'withdrawn_eur',
+  'corrected_at', 'original_expected_cash', 'original_difference', 'correction_revision',
 ];
 
 // La forma de pago nueva, validada igual que al cobrar.
@@ -83,7 +85,7 @@ async function adjustClose(tx, userId, closeId, before, after) {
             expected_usd = ?, difference_usd = ?, expected_eur = ?, difference_eur = ?,
             original_expected_cash = COALESCE(original_expected_cash, ?),
             original_difference = COALESCE(original_difference, ?),
-            corrected_at = datetime('now')
+            corrected_at = datetime('now'), correction_revision = correction_revision + 1
           WHERE id = ?`,
     args: [
       expectedCash, round2(Number(close.counted_cash) - expectedCash), expectedTransfer, Math.max(0, salesCount),

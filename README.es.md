@@ -68,11 +68,12 @@ SQLite, en vez de por la red. Una sola UI, dos transportes.
 ```
 ├── client/     React 18 + Vite + Tailwind — la interfaz del POS (también se empaqueta en la app de escritorio)
 ├── server/     API Express 4, desplegada en Vercel como función serverless, datos en Turso
-└── desktop/    Cáscara Electron — espejo SQLite local + worker de sincronización
+├── desktop/    Cáscara Electron — espejo SQLite local + worker de sincronización
+└── marketing-video/ Proyecto Remotion independiente para videos de Al Día
 ```
 
 Cada carpeta tiene su propio README con el detalle:
-[`client/`](./client/README.md) · [`server/`](./server/README.md) · [`desktop/`](./desktop/README.md)
+[`client/`](./client/README.md) · [`server/`](./server/README.md) · [`desktop/`](./desktop/README.md) · [`marketing-video/`](./marketing-video/README.md)
 
 ---
 

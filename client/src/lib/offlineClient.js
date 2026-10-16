@@ -4,13 +4,20 @@ import { getCachedUser, getCachedProducts } from './offlineCache.js'
 import { accountKeyFromToken, splitByAccount } from './queueOwnership.js'
 import { newId } from './newId.js'
 import { requestPersistentStorage } from './storagePersistence.js'
-import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation } from './offlineModel.js'
+import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
 
 const keyFor = (account) => `mypimes_local_v1:${account}`
 const accountNow = () => accountKeyFromToken(getToken())
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 const initialState = (account) => ({ base: { ...emptyData(), products: (accountNow() === account && getCachedProducts()) || [] }, outbox: [], nextId: -1, initialized: false, lastSynced: null, syncError: '' })
 const readState = async (account) => (await get(keyFor(account))) || initialState(account)
+const utcMillis = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const normalized = value.trim().replace(' ', 'T')
+  const explicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized)
+  const millis = Date.parse(explicitZone ? normalized : `${normalized}Z`)
+  return Number.isFinite(millis) ? millis : null
+}
 const broadcast = () => {
   window.dispatchEvent(new Event('local:data-changed'))
   channel?.postMessage('changed')
@@ -123,6 +130,50 @@ export async function syncOffline() {
       while (stillCurrent()) {
         const state = await readState(account), op = state.outbox[0]
         if (!op) break
+        if (op.kind === 'close' && getCachedUser()?.role === 'cajero' && op.coverageVersion !== CASH_CLOSE_COVERAGE_VERSION) {
+          // Las instalaciones que ya tenían IndexedDB podían declarar has_sales
+          // sin haber descargado ventas. Rehidratar antes de cerrar y reconstruir
+          // la misma operación conservando su client_close_id y su lugar en cola.
+          const snapshotResponse = await request('/api/sync/snapshot')
+          if (!snapshotResponse.ok) throw new Error(snapshotResponse.status === 401 ? 'Renueva tu sesión para sincronizar. Los datos locales siguen disponibles.' : 'No se pudo actualizar la cobertura de caja; el cierre sigue pendiente')
+          const snapshot = await snapshotResponse.json()
+          if (snapshot.cash_close_coverage_version !== CASH_CLOSE_COVERAGE_VERSION) throw new Error('La nube no confirmó una cobertura completa de caja; el cierre sigue pendiente')
+          if (!stillCurrent()) return
+          await update(keyFor(account), (current = initialState(account)) => {
+            current.base = { ...emptyData(), ...snapshot }
+            const closeIndex = current.outbox.findIndex((pending) => pending.id === op.id)
+            const prefix = current.outbox.slice(0, Math.max(0, closeIndex))
+            const cutoff = utcMillis(op.body.closed_at || op.result.closed_at || op.queued_at)
+            const baseAtCut = structuredClone(current.base)
+            if (cutoff != null) {
+              baseAtCut.sales = (baseAtCut.sales || []).filter((sale) => {
+                const created = utcMillis(sale.created_at)
+                return created != null && created <= cutoff
+              })
+              baseAtCut.currency_purchases = (baseAtCut.currency_purchases || []).filter((purchase) => {
+                const created = utcMillis(purchase.created_at)
+                return created != null && created <= cutoff
+              })
+            }
+            // Solo se proyecta lo que estaba antes del cierre en la cola. Las
+            // operaciones posteriores permanecen intactas y no alteran su corte.
+            const data = project({ ...current, base: baseAtCut, outbox: prefix })
+            data.cash_closes = data.cash_closes.filter((close) => close.client_close_id !== op.body.client_close_id)
+            const rebuilt = prepareOperation(data, op.method, op.path, op.body, {
+              account, user: getCachedUser(), now: op.result.closed_at || op.body.closed_at || op.queued_at,
+              newId: () => op.id, localId: () => op.result.id ?? current.nextId--,
+            })
+            rebuilt.id = op.id
+            rebuilt.queued_at = op.queued_at
+            rebuilt.result.id = op.result.id
+            rebuilt.result.pending = true
+            current.outbox = current.outbox.map((pending) => pending.id === op.id ? rebuilt : pending)
+            current.initialized = true
+            return current
+          })
+          broadcast()
+          continue
+        }
         if (op.error) throw new Error(op.error)
         const path = op.kind === 'product' ? '/api/sync/product-operation' : op.path
         const body = op.kind === 'product' ? { operation_id: op.id, method: op.method, product_id: op.productId, product: cashierEdit(op) ? priceAndStockOnly(op.body) : op.body, expected: op.before } : { ...op.body }
@@ -197,6 +248,44 @@ export async function retrySync() {
   if (!account) return
   await update(keyFor(account), (s = initialState(account)) => ({ ...s, outbox: s.outbox.map(({ error, ...op }) => op), syncError: '' }))
   return syncOffline()
+}
+
+// Una corrección de cierre nunca va al outbox. Tras respuesta 2xx actualizamos
+// la base local con el valor confirmado y refrescamos el snapshot del servidor.
+export async function cacheCashCloseCorrection(payload, expectedIdentity = null) {
+  const current = { account: accountNow(), token: getToken() };
+  const identity = expectedIdentity || current;
+  if (!identity.account || !identity.token || identity.account !== current.account || identity.token !== current.token
+      || isElectron() || !payload?.cash_close) return false;
+  await update(keyFor(identity.account), (state = initialState(identity.account)) => {
+    const close = payload.cash_close;
+    const index = (state.base.cash_closes || []).findIndex((row) =>
+      (Boolean(close.client_close_id) && row.client_close_id === close.client_close_id)
+      || Number(row.id) === Number(close.id));
+    if (index < 0) state.base.cash_closes = [close, ...(state.base.cash_closes || [])];
+    else state.base.cash_closes[index] = { ...state.base.cash_closes[index], ...close };
+    return state;
+  });
+  broadcast();
+  return true;
+}
+
+export async function refreshOfflineSnapshot(expectedIdentity = null) {
+  const current = { account: accountNow(), token: getToken() };
+  const identity = expectedIdentity || current;
+  const { account, token } = identity;
+  if (!account || !token || isElectron()) return;
+  const stillCurrent = () => accountNow() === account && getToken() === token;
+  if (!stillCurrent()) throw new Error('La sesión cambió antes de actualizar el historial.');
+  const response = await networkFetch('/api/sync/snapshot', { token, preserveSession: true });
+  const snapshot = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(snapshot.error || 'No se pudo actualizar el historial confirmado.');
+  if (!stillCurrent()) throw new Error('La sesión cambió antes de actualizar el historial.');
+  await update(keyFor(account), (state = initialState(account)) => ({
+    ...state, base: { ...emptyData(), ...snapshot }, initialized: true,
+    lastSynced: Date.now(), syncError: '',
+  }));
+  broadcast();
 }
 export async function resolveProductConflict(choice) {
   const resolve = async () => {
