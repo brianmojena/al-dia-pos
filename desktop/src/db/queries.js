@@ -126,6 +126,22 @@ function listProducts() {
     .all();
 }
 
+function applyServerDayStock(dayStock) {
+  const { validDayStock } = require('../lib/dailyStock');
+  if (!validDayStock(dayStock)) throw new Error('Resumen diario de stock inválido');
+  setSyncState('daily_stock_snapshot', JSON.stringify(dayStock));
+}
+
+function getDayStock(date) {
+  const { businessToday } = require('../lib/businessDay');
+  const { withDayStock } = require('../lib/dailyStock');
+  const today = businessToday('America/Havana');
+  const products = listProducts();
+  let snapshot = null;
+  try { snapshot = JSON.parse(getSyncState('daily_stock_snapshot') || 'null'); } catch (_) { /* cache is absent/corrupt */ }
+  return withDayStock(snapshot, products, date || today);
+}
+
 /** "  Arroz   (1 LB) " y "arroz (1 lb)" son el mismo producto — misma regla que el servidor. */
 const normalizeName = (name) =>
   String(name ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -1822,7 +1838,7 @@ module.exports = {
   getSyncState, setSyncState, getRegisterId, prepareDeltaSession, applyServerDelta, applySaleCorrectionLocal,
   applyCashCloseCorrectionLocal, applyCashCloseDetailLocal,
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
-  listProducts, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog, takeLocalStock,
+  listProducts, getDayStock, applyServerDayStock, createProduct, updateProduct, deleteProduct, listStockEntries, importProducts, listWarehouse, applyServerWarehouse, transferWarehouseLocal, applyServerCatalog, takeLocalStock,
   createSaleLocal, listSales, getSale,
   createCurrencyPurchaseLocal, listCurrencyPurchases,
   createWithdrawalLocal, listWithdrawals, voidWithdrawalLocal,

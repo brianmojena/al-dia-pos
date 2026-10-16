@@ -96,6 +96,10 @@ async function routeRequest(method, fullPath, body) {
     // no las aplicara, el cambio quedaría hecho aquí, el servidor lo rechazaría
     // al sincronizar, y la caja y la web contarían historias distintas.
     if (parts[0] === 'api' && parts[1] === 'products') {
+      if (parts.length === 3 && parts[2] === 'day-stock' && method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.getDayStock());
+      }
       if (parts.length === 2 && method === 'GET') return ok(200, queries.listProducts());
       if (parts.length === 2 && method === 'POST') {
         if (!body.name || !String(body.name).trim() || body.sale_price === undefined || body.sale_price === null) {

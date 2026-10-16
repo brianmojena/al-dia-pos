@@ -6,6 +6,7 @@ const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
 const { stockChangeStatement } = require('../lib/stockLog');
 const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
+const { dailyStock } = require('../lib/dailyStock');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
 //
@@ -29,6 +30,15 @@ router.get('/stock-entries', requireOwner, asyncHandler(async (req, res) => {
     args: [req.userId],
   });
   res.json(result.rows);
+}));
+
+router.get('/day-stock', requireOwner, asyncHandler(async (req, res) => {
+  const tx = await getDb().transaction('read');
+  try {
+    const result = await dailyStock(tx, req.userId);
+    await tx.commit();
+    res.json(result);
+  } catch (error) { await tx.rollback().catch(() => {}); throw error; }
 }));
 
 /**

@@ -391,6 +391,26 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
 
 })
 
+test('la ruta de stock diario funciona offline para dueño y queda protegida para cajero', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const stored = records.get(stateKey(1))
+  stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 20, current_stock: 20 }] }
+  records.set(stateKey(1), stored)
+  assert.equal(handlesOffline('/api/products/day-stock', 'GET'), true)
+  const sold = await write('/api/sales', saleBody('daily-stock-sale'))
+  assert.equal(sold.status, 202)
+  const ownerResponse = await (await import('./offlineClient.js?daily-owner')).offlineRequest('/api/products/day-stock')
+  assert.equal(ownerResponse.status, 200)
+  assert.deepEqual((await ownerResponse.json()).products[0], { id: 10, opening_stock: 20, current_stock: 18, tracked: true })
+
+  setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cashier@test.local', role: 'cajero' })
+  records.set('mypimes_local_v1:1:2', structuredClone(records.get(stateKey(1))))
+  const cashierResponse = await (await import('./offlineClient.js?daily-cashier')).offlineRequest('/api/products/day-stock')
+  assert.equal(cashierResponse.status, 400)
+  assert.match((await cashierResponse.json()).error, /Solo el dueño/)
+})
+
 test('una edición de cajero guardada con el producto entero por una versión antigua sube sin 403 y no frena las ventas', async () => {
   resetStore(); seed()
   setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' })

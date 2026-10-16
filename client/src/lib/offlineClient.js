@@ -27,7 +27,7 @@ if (channel) channel.onmessage = () => window.dispatchEvent(new Event('local:dat
 
 export function handlesOffline(path, method) {
   const route = path.split('?')[0]
-  if (method === 'GET') return /^\/api\/(products$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|cash-withdrawals$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$)/.test(route)
+  if (method === 'GET') return /^\/api\/(products(?:\/day-stock)?$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|cash-withdrawals$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$)/.test(route)
   return /^\/api\/(products(?:\/(?:-?\d+|import))?$|sales$|currency-purchases$|cash-withdrawals(?:\/[\w-]+\/void)?$|inventory-counts$|cash-closes$|sales\/rejected\/\d+\/review$)/.test(route)
 }
 

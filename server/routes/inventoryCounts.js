@@ -209,10 +209,10 @@ router.post('/', asyncHandler(async (req, res) => {
     for (const line of lines) {
       await tx.execute({
         sql: `INSERT INTO inventory_count_items
-                (count_id, product_id, product_name, expected, counted, difference, unit_cost, unit_price)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                (count_id, product_id, product_name, expected, counted, difference, initial_difference, unit_cost, unit_price)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [countId, line.product_id, line.product_name, line.expected,
-               line.counted, line.difference, line.unit_cost, line.unit_price],
+               line.counted, line.difference, line.difference, line.unit_cost, line.unit_price],
       });
     }
 

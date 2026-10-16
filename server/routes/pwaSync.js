@@ -6,6 +6,7 @@ const { describeAccount } = require('../lib/account');
 const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
 const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
+const { dailyStock } = require('../lib/dailyStock');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 // Una fotografía bajo la misma transacción: no mezclar stock anterior a una
@@ -25,6 +26,7 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
     const last = (await tx.execute({ sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1', args: [req.userId, register] })).rows[0];
     const snapshot = { products, cash_close_coverage_version: 1, current_period: { opened_at: last?.closed_at || open?.created_at || openPurchase?.created_at || openWithdrawal?.created_at || null, has_sales: !!(open || openPurchase || openWithdrawal), is_first_close: !last } };
     if (req.role === 'dueño') {
+      snapshot.daily_stock = await dailyStock(tx, req.userId);
       snapshot.sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? ORDER BY i.id', args: [req.userId] })).rows;
       const bySale = new Map();

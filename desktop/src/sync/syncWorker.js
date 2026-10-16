@@ -1,6 +1,6 @@
 const { getLocalDb } = require('../db/localDb');
 const {
-  getPendingOutbox, getSession, updateSessionSettings, applyServerCatalog, resetStuckSyncing,
+  getPendingOutbox, getSession, updateSessionSettings, applyServerCatalog, applyServerDayStock, resetStuckSyncing,
   getRegisterId, prepareDeltaSession, applyServerDelta, applyServerWarehouse, setSyncState,
 } = require('../db/queries');
 const { apiRequest } = require('./apiClient');
@@ -474,6 +474,19 @@ async function syncOnce() {
   }
 
   if (!summary.authExpired) await pullDelta(session, summary);
+
+  // El inicio canónico y el flag de control los calcula el servidor a partir de
+  // los movimientos de toda la tienda. El stock actual de esta caja se toma de
+  // products.stock al leer la ruta, así no se vuelve a aplicar la outbox.
+  if (!summary.authExpired && session.role !== 'cajero') {
+    try {
+      const dailyStock = await apiRequest('GET', '/api/products/day-stock', { token: session.token });
+      if (dailyStock.ok) {
+        applyServerDayStock(dailyStock.data);
+        summary.dayStockRefreshed = true;
+      }
+    } catch (_) { /* sin red: se conserva la última base y se valida su fecha al leer */ }
+  }
 
   // El límite de transferencia y la tasa del dólar los cambia el dueño desde
   // su teléfono, no desde esta caja — así que la única forma de que la caja

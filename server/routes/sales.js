@@ -329,7 +329,7 @@ router.post('/', asyncHandler(async (req, res) => {
       // Lectura DENTRO de la transacción (antes se hacía fuera, lo que abría una
       // ventana entre la comprobación de stock y el descuento).
       const productResult = await tx.execute({
-        sql: 'SELECT id, name, purchase_price, unit, track_stock FROM products WHERE id = ? AND user_id = ?',
+        sql: 'SELECT id, name, purchase_price, stock, unit, track_stock FROM products WHERE id = ? AND user_id = ?',
         args: [item.product_id, req.userId],
       });
       const product = productResult.rows[0];
@@ -350,6 +350,9 @@ router.post('/', asyncHandler(async (req, res) => {
         }
       }
       const stockQty = lineUnits({ quantity, pack_size: packSize });
+      const stockDelta = product.unit
+        ? Number(product.track_stock) === 1 ? -roundQty(Math.min(Number(product.stock) || 0, quantity)) : 0
+        : -stockQty;
       const unitCost = packSize ? round2(product.purchase_price * packSize) : (product.purchase_price || 0);
       // Solo un producto por peso admite fracciones (hasta 3 decimales); uno por
       // pieza sigue vendiéndose en unidades enteras.
@@ -397,6 +400,7 @@ router.post('/', asyncHandler(async (req, res) => {
         unit_price: unitPrice,
         unit_cost: packSize ? unitCost : product.purchase_price || 0,
         pack_size: packSize,
+        stock_delta: stockDelta,
       });
     }
 
@@ -438,16 +442,17 @@ router.post('/', asyncHandler(async (req, res) => {
     const saleId = Number(saleResult.lastInsertRowid);
 
     for (const line of lines) {
-      // Una venta normal no depende de la columna nueva.
+      // stock_delta conserva lo que el UPDATE aplicó realmente; en una venta
+      // por peso puede ser menor que quantity por el clamp a cero.
       if (line.pack_size == null) {
         await tx.execute({
-          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost) VALUES (?, ?, ?, ?, ?, ?)',
-          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost],
+          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost, stock_delta) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost, line.stock_delta],
         });
       } else {
         await tx.execute({
-          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost, pack_size) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost, line.pack_size],
+          sql: 'INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, unit_cost, pack_size, stock_delta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          args: [saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost, line.pack_size, line.stock_delta],
         });
       }
     }

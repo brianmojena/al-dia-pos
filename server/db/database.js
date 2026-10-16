@@ -438,6 +438,9 @@ async function initDb() {
     // unit_cost son por paquete, y pack_size los sueltos que salieron por cada
     // uno (congelado: si mañana el paquete trae otra cantidad, la venta no cambia).
     'ALTER TABLE sale_items ADD COLUMN pack_size INTEGER',
+    // Stock realmente descontado por esta línea (puede diferir de quantity
+    // cuando una venta por peso llega a cero por el clamp).
+    'ALTER TABLE sale_items ADD COLUMN stock_delta REAL',
     // Extracciones de caja: lo que el dueño retiró en cada cierre. Los totales
     // por cada uno de los 4 apartados se guardan en el cierre.
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_cash REAL NOT NULL DEFAULT 0',
@@ -447,6 +450,9 @@ async function initDb() {
     // Dirección de la transferencia: 'to_store' (almacén → tienda, la de ahora) o
     // 'to_warehouse' (tienda → almacén, la nueva).
     'ALTER TABLE warehouse_transfers ADD COLUMN direction TEXT NOT NULL DEFAULT \'to_store\'',
+    // Diferencia original al crear el arqueo. difference cambia al corregirlo;
+    // este dato queda inmutable para reconstruir los movimientos del día.
+    'ALTER TABLE inventory_count_items ADD COLUMN initial_difference REAL',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

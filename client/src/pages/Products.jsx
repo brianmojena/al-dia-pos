@@ -1,4 +1,5 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
+import { useBusinessDayRefresh } from '../lib/useBusinessDayRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTriangle } from 'lucide-react'
@@ -6,6 +7,7 @@ import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix, hasPack, formatPackStock } from '../lib/units'
+import ProductDayStock from '../components/ProductDayStock.jsx'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const fmt2 = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Number(n) || 0)
@@ -32,6 +34,7 @@ export default function Products() {
   const isOwner = user?.role !== 'cajero'
 
   const [products,  setProducts]  = useState([])
+  const [dayStock,  setDayStock]  = useState(null)
   const [loading,   setLoading]   = useState(true)
   const [showForm,  setShowForm]  = useState(false)
   const [editing,   setEditing]   = useState(null)
@@ -48,10 +51,25 @@ export default function Products() {
       setProducts(Array.isArray(data) ? data : [])
     } catch (error) { setNotice(error.message) }
     finally { setLoading(false) }
+    if (isOwner) {
+      try {
+        const res = await apiFetch('/api/products/day-stock')
+        const data = await res.json()
+        if (res.ok && Array.isArray(data.products)) setDayStock(data)
+        else setDayStock(null)
+      } catch (_) { setDayStock(null) }
+    } else setDayStock(null)
   }
 
   useEffect(() => { load() }, [])
   useLocalRefresh(load)
+  useBusinessDayRefresh(load)
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') load() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
+  }, [])
 
   // En la caja de escritorio el catálogo puede cambiar desde la web con esta
   // pantalla abierta: el sync worker avisa y la lista se recarga sola.
@@ -636,6 +654,7 @@ export default function Products() {
                           agregado por {accountLabel(p.created_by_email)}
                         </span>
                       )}
+                      {isOwner && <ProductDayStock product={p} dayStock={dayStock} className="mt-1" />}
                     </td>
                     {isOwner && (
                       <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}{priceSuffix(p.unit)}</td>

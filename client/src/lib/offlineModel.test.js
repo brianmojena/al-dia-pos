@@ -4,6 +4,7 @@ import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyRepo
 import { monthCsv } from './offlineExport.js'
 import { summarizeCashierSales } from './cashierSalesSummary.js'
 import { withdrawalSplit } from './payment.js'
+import { dailyStockFor } from './dailyStock.js'
 const user = { id: 1, role: 'dueño', email: 'owner@test.local', transfer_limit: 200 }
 const fixture = () => ({ base: { ...emptyData(), cash_close_coverage_version: 1, products: [{ id: 10, name: 'Pan', purchase_price: 6, sale_price: 10, stock: 20 }] }, outbox: [], nextId: -1 })
 let sequence = 0
@@ -20,6 +21,16 @@ test('venta local persiste al reabrir y aparece en stock, historial, detalle e I
   const report = monthlyReport(data, '2026-09')
   assert.deepEqual(report.totals, { sales_count: 1, off_rate_count: 0, total: 20, profit: 8, cash_total: 20, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0 })
   assert.equal(state.base.products[0].stock, 20, 'la base no se modifica al proyectar')
+})
+test('inicio del día local es solo para dueño, conserva la apertura y refleja ventas y conteos pendientes', () => {
+  const state = fixture()
+  state.base.daily_stock = { date: businessDate(), products: [{ id: 10, opening_stock: 20 }] }
+  sell(state, 3)
+  const count = add(state, 'POST', '/api/inventory-counts', { items: [{ product_id: 10, counted: 15 }] })
+  const ownerRows = readLocal(project(state), '/api/products/day-stock', '1:1', user)
+  assert.deepEqual(ownerRows.products[0], { id: 10, opening_stock: 20, current_stock: 15, tracked: true })
+  assert.throws(() => readLocal(project(state), '/api/products/day-stock', '1:2', { ...user, id: 2, role: 'cajero' }), /Solo el dueño/)
+  assert.equal(count.result.items[0].counted, 15)
 })
 test('producto nuevo → editar → venta → conteo → cierre conserva dependencias al obtener IDs de nube', () => {
   const state = fixture()
@@ -43,6 +54,13 @@ test('producto nuevo → editar → venta → conteo → cierre conserva depende
   assert.deepEqual(close.saleIds, [50])
   assert.equal(project(state).sales[0].id, 50)
   assert.notEqual(saleId, 50)
+})
+test('un producto creado localmente guarda timestamp y tiene apertura cero ese día', () => {
+  const state = fixture()
+  const created = add(state, 'POST', '/api/products', { name: 'Jugo', purchase_price: 2, sale_price: 3, stock: 6 })
+  const date = businessDate(created.result.created_at)
+  assert.equal(created.result.created_at, '2026-09-15T14:00:00.000Z')
+  assert.equal(dailyStockFor({ products: [created.result] }, date).products[0].opening_stock, 0)
 })
 test('cierre cubre exactamente sus ventas y no incluye la siguiente venta offline', () => {
   const state = fixture(), first = sell(state)

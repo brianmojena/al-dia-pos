@@ -1,5 +1,6 @@
 import { validQuantity, hasPack, packCountTotal, formatPackStock } from '../lib/units'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
+import { useBusinessDayRefresh } from '../lib/useBusinessDayRefresh.js'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import {
@@ -11,12 +12,15 @@ import { formatDateTime } from '../lib/dates'
 import { accountLabel } from '../lib/accountLabel'
 import { useAuth } from '../context/AuthContext'
 import { retrySync } from '../lib/offlineClient'
+import ProductDayStock from '../components/ProductDayStock.jsx'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
 export default function Inventario() {
   const { user } = useAuth()
+  const isOwner = user?.role !== 'cajero'
   const [products,      setProducts]      = useState([])
+  const [dayStock,      setDayStock]      = useState(null)
   const [history,       setHistory]       = useState([])
   const [counts,        setCounts]        = useState({})   // product_id -> texto tecleado (productos sin pack)
   const [packCounts,    setPackCounts]    = useState({})   // product_id -> { packs: '', loose: '' } (productos con pack)
@@ -41,6 +45,10 @@ export default function Inventario() {
       } else {
         const h = await apiFetch('/api/inventory-counts').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data })
         setHistory(Array.isArray(h) ? h : [])
+        try {
+          const stock = await apiFetch('/api/products/day-stock').then(r => r.json().then(data => ({ ok: r.ok, data })))
+          setDayStock(stock.ok && Array.isArray(stock.data.products) ? stock.data : null)
+        } catch (_) { setDayStock(null) }
       }
     } catch (error) { setError(error.message || 'No se pudieron leer los datos locales') }
     finally { setLoading(false) }
@@ -48,6 +56,13 @@ export default function Inventario() {
 
   useEffect(() => { load() }, [])
   useLocalRefresh(load)
+  useBusinessDayRefresh(load)
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') load() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
+  }, [])
 
   const filtered = useMemo(
     () => products.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) && (!p.unit || Number(p.track_stock) === 1)),
@@ -152,9 +167,11 @@ export default function Inventario() {
       <div className="flex items-start gap-2.5 bg-blue-50 text-[#007AFF] rounded-xl px-4 py-3 mb-5">
         <Eye size={16} className="flex-shrink-0 mt-0.5" />
         <p className="text-xs leading-relaxed font-medium">
-          Escribe lo que <strong>cuentas en el estante</strong>. No te mostramos lo que dice el
-          sistema hasta el final, para que cuentes de verdad en vez de confirmar un número.
-          Lo que dejes en blanco no se toca.
+          {isOwner ? (
+            <>Escribe lo que <strong>cuentas en el estante</strong>. Compara con el inicio del día y el stock actual para detectar diferencias. Lo que dejes en blanco no se toca.</>
+          ) : (
+            <>Escribe lo que <strong>cuentas en el estante</strong>. No te mostramos lo que dice el sistema hasta el final, para que cuentes de verdad en vez de confirmar un número. Lo que dejes en blanco no se toca.</>
+          )}
         </p>
       </div>
 
@@ -194,7 +211,10 @@ export default function Inventario() {
                 idx < filtered.length - 1 ? 'border-b border-gray-50' : ''
               } ${hasValue ? 'bg-blue-50/40' : ''}`}
             >
-              <span className="flex-1 text-sm font-medium text-gray-900 min-w-0 truncate">{p.name}</span>
+              <div className="flex-1 min-w-0">
+                <span className="block text-sm font-medium text-gray-900 truncate">{p.name}</span>
+                {isOwner && <ProductDayStock product={p} dayStock={dayStock} className="mt-0.5" />}
+              </div>
               {p.unit && <span className="text-xs font-semibold text-gray-400">{p.unit}</span>}
 
               {isPack ? (

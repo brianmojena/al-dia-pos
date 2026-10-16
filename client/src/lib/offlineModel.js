@@ -1,6 +1,7 @@
 import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES, withdrawalSplit, withdrawalFields, WITHDRAWAL_METHODS } from './payment.js'
 import { parseServerDate } from './dates.js'
 import { isValidUnit, validQuantity, roundQty, lineTotal, lineUnits } from './units.js'
+import { dailyStockFor } from './dailyStock.js'
 
 export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], cash_withdrawals: [], rejected_sales: [], cashiers: [], current_period: null })
 export const CASH_CLOSE_COVERAGE_VERSION = 1
@@ -182,7 +183,7 @@ export function prepareOperation(data, method, path, body, ctx) {
     // La entrada de mercancía sube como cantidad a sumar, nunca como stock final:
     // si otra caja vendió mientras tanto, un total absoluto pisaría esas ventas.
     if (addStock != null && addStock !== '') { delete op.body.stock; op.body.add_stock = Number(addStock) }
-    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, pack_size: packSize ?? null, pack_price: packPrice ?? null, created_by_email: previous?.created_by_email ?? ctx.user.email }
+    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, pack_size: packSize ?? null, pack_price: packPrice ?? null, created_by_email: previous?.created_by_email ?? ctx.user.email, ...(!previous && { created_at: now }) }
   } else if (path === '/api/sales') {
     op.kind = 'sale'
     op.body.client_sale_id ||= ctx.newId()
@@ -392,6 +393,7 @@ export function readLocal(data, path, account, user) {
     return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || withdrawals[0]?.created_at || null, has_sales: sales.length > 0 || withdrawals.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')
+  if (route === '/api/products/day-stock') return dailyStockFor(data, businessDate())
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
   if (route === '/api/cash-withdrawals') {
     const filtered = (data.cash_withdrawals || []).filter((w) => !url.searchParams.has('date') || businessDate(w.created_at) === url.searchParams.get('date'))
