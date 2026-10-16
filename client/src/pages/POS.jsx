@@ -1,18 +1,20 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
 import { Search, Plus, Minus, Trash2, ShoppingCart, CheckCircle, X, Banknote, Smartphone, AlertCircle, CloudOff, DollarSign, Pencil } from 'lucide-react'
-import { apiFetch, isElectron } from '../lib/api'
+import { apiFetch, getToken, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { subscribe as subscribeQueue, acknowledgeRejected } from '../lib/salesQueue'
 import { isTransferBlocked } from '../lib/transferGuard'
 import { maxTransfer, paymentLabel } from '../lib/payment'
 import MixedPayment from '../components/MixedPayment'
 import ForeignPayment from '../components/ForeignPayment'
+import CashPayment from '../components/CashPayment'
 import DeviceRatesEditor from '../components/DeviceRatesEditor'
 import { useExchangeRates } from '../lib/exchangeRates'
 import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 import { formatQty, lineTotal, priceSuffix, roundQty, hasPack, lineUnits, formatPackStock } from '../lib/units'
+import { cashPaymentBreakdown, isMontevaldesCashEnabled } from '../lib/cashPayment.js'
 
 // Hasta 2 decimales: 1,3 lb a $55 son $71,50 y el cliente tiene que ver ese importe.
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Math.round((n || 0) * 100) / 100)
@@ -185,6 +187,7 @@ export default function POS() {
   // El cobro mixto necesita poder transferir al menos un peso y dejar al menos
   // uno en efectivo; con un techo en 0 no hay nada que repartir.
   const canSplit = total >= 2 && maxTransfer(total, user?.transfer_limit) >= 1
+  const guidedCashPayment = isMontevaldesCashEnabled(getToken())
 
   // El modal siempre abre en la lista de formas de pago, y el cobro mixto
   // siempre arranca en 50/50 (MixedPayment se monta de nuevo cada vez).
@@ -237,6 +240,14 @@ export default function POS() {
     } finally {
       setCompleting(false)
     }
+  }
+
+  // La pantalla guiada valida de nuevo al confirmar; al servidor solo se envía
+  // el cobro normal en CUP, nunca el efectivo recibido ni el vuelto.
+  const handleCashCheckout = (amountReceived) => {
+    if (!isMontevaldesCashEnabled(getToken()) || cart.length === 0 || completing) return
+    if (!cashPaymentBreakdown(total, amountReceived).canConfirm) return
+    return handleCheckout({ payment_method: 'efectivo' })
   }
 
   if (loading) return (
@@ -416,10 +427,20 @@ export default function POS() {
                 onConfirm={handleCheckout}
                 onBack={() => setPaymentView('list')}
               />
+            ) : paymentView === 'cash' && guidedCashPayment ? (
+              <CashPayment
+                total={total}
+                fmt={fmt}
+                disabled={completing}
+                onConfirm={handleCashCheckout}
+                onBack={() => setPaymentView('list')}
+              />
             ) : (<>
             <div className="space-y-3">
               <button
-                onClick={() => handleCheckout({ payment_method: 'efectivo' })}
+                onClick={() => guidedCashPayment
+                  ? setPaymentView('cash')
+                  : handleCheckout({ payment_method: 'efectivo' })}
                 disabled={completing}
                 className="w-full bg-green-500 text-white py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 active:scale-95 transition-all shadow-md shadow-green-200 disabled:opacity-50"
               >
