@@ -1,23 +1,25 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, Navigate, useSearchParams } from 'react-router-dom'
 import { Mail, Lock, AlertCircle } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
-  const { login } = useAuth()
+  const { login, sharedDevice } = useAuth()
+  const [params] = useSearchParams()
   const navigate = useNavigate()
   const [email,       setEmail]       = useState('')
   const [password,    setPassword]    = useState('')
   const [error,       setError]       = useState('')
   const [submitting,  setSubmitting]  = useState(false)
+  if (sharedDevice && params.get('admin') !== '1') return <Navigate to="/cajero" replace />
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
     setSubmitting(true)
     try {
-      await login(email, password)
-      navigate('/pos')
+      const next = await login(email, password)
+      navigate(sharedDevice && next.is_admin ? '/admin' : '/pos')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -31,7 +33,7 @@ export default function Login() {
         <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 bg-[#007AFF] rounded-2xl flex items-center justify-center text-white font-bold text-2xl mb-3">M</div>
           <h1 className="text-2xl font-bold text-gray-900">Mi Tienda</h1>
-          <p className="text-sm text-gray-500 mt-1">Inicia sesión para continuar</p>
+          <p className="text-sm text-gray-500 mt-1">{sharedDevice ? 'Administración del dispositivo' : 'Inicia sesión para continuar'}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="bg-white rounded-3xl p-6 shadow-sm space-y-4">
@@ -75,12 +77,12 @@ export default function Login() {
           </button>
         </form>
 
-        <p className="text-center text-sm text-gray-500 mt-5">
+        {sharedDevice ? <Link to="/cajero" className="block text-center text-sm text-[#007AFF] mt-5">Volver a los cajeros</Link> : <p className="text-center text-sm text-gray-500 mt-5">
           ¿No tienes cuenta?{' '}
           <Link to="/register" className="text-[#007AFF] font-semibold hover:underline">
             Regístrate
           </Link>
-        </p>
+        </p>}
       </div>
     </div>
   )

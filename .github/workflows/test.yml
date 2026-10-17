@@ -32,3 +32,42 @@ jobs:
 
       - name: Ejecutar tests
         run: npm test
+
+  client:
+    name: web e integración (Node 24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Instalar dependencias de servidor y cliente
+        run: |
+          npm ci --prefix server
+          npm ci --prefix client
+      - name: Pruebas del cliente e integración con SQLite
+        run: |
+          npm test --prefix client
+          npm run test:integration --prefix client
+      - name: Compilar la PWA
+        run: npm run build --prefix client
+
+  desktop:
+    name: escritorio (Node 24)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      # Las pruebas usan Node y SQLite, sin arrancar Electron. Evitar que el
+      # postinstall reconstruya SQLite para la ABI de Electron.
+      - name: Instalar SQLite para Node
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild better-sqlite3
+      - name: Ejecutar tests
+        run: npm test

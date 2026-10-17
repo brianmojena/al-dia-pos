@@ -4,11 +4,19 @@ import { useState, useEffect } from 'react'
 import { Users, Plus, Trash2, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { formatDateTime } from '../lib/dates'
+import { useAuth } from '../context/AuthContext'
+import { maxUsersOf, planLabel } from '../lib/plans'
 
 const EMPTY = { email: '', password: '' }
 
 export default function Cajeros() {
+  const { user } = useAuth()
   const [cajeros,  setCajeros]  = useState([])
+  // El tope del plan cuenta también la cuenta principal (igual que el servidor,
+  // que es el árbitro: aquí solo se muestra para no chocar con un 409 sorpresa).
+  const maxUsers  = maxUsersOf(user?.plan)
+  const seatsUsed = cajeros.length + 1
+  const atLimit   = seatsUsed >= maxUsers
   const [loading,  setLoading]  = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [form,     setForm]     = useState(EMPTY)
@@ -59,10 +67,18 @@ export default function Cajeros() {
     <div className="p-5 md:p-8 max-w-2xl mx-auto pb-24 md:pb-8">
       {error && !showForm && <p role="alert" className="text-sm text-red-600 mb-3">{error}</p>}
       <div className="flex items-center justify-between mb-5">
-        <h2 className="text-2xl font-bold text-gray-900">Cajeros</h2>
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">Cajeros</h2>
+          <p className={`text-xs mt-1 font-medium ${atLimit ? 'text-amber-600' : 'text-gray-400'}`}>
+            {seatsUsed} de {maxUsers} usuarios del Plan {planLabel(user?.plan)}
+            {atLimit && ' — límite alcanzado'}
+          </p>
+        </div>
         <button
           onClick={() => { setShowForm(true); setError('') }}
-          className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"
+          disabled={atLimit}
+          title={atLimit ? `El Plan ${planLabel(user?.plan)} permite hasta ${maxUsers} usuarios por tienda` : undefined}
+          className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#007AFF]"
         >
           <Plus size={18} />
           Nuevo

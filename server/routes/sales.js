@@ -11,6 +11,7 @@ const { notifySale } = require('../lib/push');
 const { roundQty, validQuantity, lineUnits } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 const { correctSale, parseCorrection, CorrectionError } = require('../lib/saleCorrections');
+const { sharedOperationMatches, sharedSaleResponse } = require('../lib/sharedDevices');
 
 const isUniqueViolation = (err) => {
   const msg = String(err?.message || '');
@@ -282,7 +283,8 @@ router.post('/', asyncHandler(async (req, res) => {
   if (client_sale_id) {
     const existing = await findByClientSaleId(db, req.userId, client_sale_id);
     if (existing.rows[0]) {
-      return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+      if (!sharedOperationMatches(req, existing.rows[0])) return res.status(409).json({ error: 'Este identificador de venta pertenece a otra caja o cajero' });
+      return res.status(200).json({ ...sharedSaleResponse(req, existing.rows[0]), idempotent_replay: true });
     }
   }
 
@@ -464,7 +466,7 @@ router.post('/', asyncHandler(async (req, res) => {
     // Vercel la función se congela al enviar la respuesta y un envío "en
     // segundo plano" se perdería. Nunca hace fallar el cobro.
     await notifySale(db, req.userId, finalResult.rows[0]);
-    return res.status(201).json(finalResult.rows[0]);
+    return res.status(201).json(sharedSaleResponse(req, finalResult.rows[0]));
   } catch (err) {
     await tx.rollback().catch(() => { /* la transacción ya estaba cerrada */ });
 
@@ -473,7 +475,8 @@ router.post('/', asyncHandler(async (req, res) => {
     if (client_sale_id && isUniqueViolation(err)) {
       const existing = await findByClientSaleId(db, req.userId, client_sale_id);
       if (existing.rows[0]) {
-        return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+        if (!sharedOperationMatches(req, existing.rows[0])) return res.status(409).json({ error: 'Este identificador de venta pertenece a otra caja o cajero' });
+        return res.status(200).json({ ...sharedSaleResponse(req, existing.rows[0]), idempotent_replay: true });
       }
     }
     throw err;

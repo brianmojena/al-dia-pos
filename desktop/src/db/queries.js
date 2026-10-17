@@ -130,16 +130,61 @@ function applyServerDayStock(dayStock) {
   const { validDayStock } = require('../lib/dailyStock');
   if (!validDayStock(dayStock)) throw new Error('Resumen diario de stock inválido');
   setSyncState('daily_stock_snapshot', JSON.stringify(dayStock));
+  // El resumen ya incluye toda entrada que esta caja subió y el servidor
+  // confirmó, así que esas operaciones quedan cubiertas y dejan de sumarse
+  // encima. Se marca solo lo 'synced': lo pendiente o en vuelo todavía no
+  // está en este resumen (el ACK va antes del GET, pero si el GET falla la
+  // operación ya sincronizada se conserva porque no quedó cubierta).
+  getLocalDb().prepare("UPDATE outbox SET covered_by_snapshot = 1 WHERE status = 'synced'").run();
+}
+
+/**
+ * Entradas de mercancía de ESTA caja que todavía no aparecen en el resumen del
+ * servidor: el alta de un producto con stock inicial, cada "añadir stock" y la
+ * mercancía recibida del almacén (transferencia to_store). Se leen del outbox.
+ *
+ * Se incluyen las pendientes/sincronizando/en conflicto (todavía no confirmadas)
+ * y las ya sincronizadas que NO quedaron cubiertas por el último resumen
+ * (covered_by_snapshot = 0): el sync marca 'synced' antes de refrescar el
+ * resumen, así que si ese GET falla la entrada confirmada sigue contándose; al
+ * bajar un resumen nuevo esas operaciones quedan cubiertas y no se duplican.
+ * El filtro por día evita arrastrar operaciones de ayer.
+ *
+ * Devuelve un Map id local → cantidad recibida.
+ */
+function pendingEntriesByProduct(db = getLocalDb(), { date = null } = {}) {
+  const { createdBusinessDate } = require('../lib/dailyStock');
+  const out = new Map();
+  const rows = db.prepare(`
+    SELECT op_type, local_ref_id, payload, status, created_at FROM outbox
+    WHERE op_type IN ('product.create', 'product.update', 'warehouse.transfer')
+      AND (status IN ('pending', 'syncing', 'conflict')
+           OR (status = 'synced' AND covered_by_snapshot = 0))
+  `).all();
+  for (const row of rows) {
+    if (date && createdBusinessDate(row.created_at) !== date) continue;
+    let payload;
+    try { payload = JSON.parse(row.payload); } catch (_) { continue; }
+    // La transferencia guarda el producto en el payload (local_ref_id es el
+    // artículo del almacén) y siempre es almacén → tienda.
+    const id = Number(row.op_type === 'warehouse.transfer' ? payload.local_product_id : row.local_ref_id);
+    const quantity = Number(row.op_type === 'product.create' ? payload.stock
+      : row.op_type === 'warehouse.transfer' ? payload.quantity : payload.add_stock);
+    if (!Number.isFinite(id) || !(quantity > 0)) continue;
+    out.set(id, round3((out.get(id) || 0) + quantity));
+  }
+  return out;
 }
 
 function getDayStock(date) {
   const { businessToday } = require('../lib/businessDay');
   const { withDayStock } = require('../lib/dailyStock');
   const today = businessToday('America/Havana');
+  const target = date || today;
   const products = listProducts();
   let snapshot = null;
   try { snapshot = JSON.parse(getSyncState('daily_stock_snapshot') || 'null'); } catch (_) { /* cache is absent/corrupt */ }
-  return withDayStock(snapshot, products, date || today);
+  return withDayStock(snapshot, products, target, pendingEntriesByProduct(undefined, { date: target }));
 }
 
 /** "  Arroz   (1 LB) " y "arroz (1 lb)" son el mismo producto — misma regla que el servidor. */

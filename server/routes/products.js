@@ -225,6 +225,11 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
 
       // Only log if product tracks stock and stock changed
       const shouldTrack = existingRow.unit ? existingRow.track_stock === 1 : true;
+      // Sumar es recibir mercancía → 'importacion' (entrada). Reemplazar el
+      // stock es un ajuste → 'correccion', que NO cuenta como entrada, igual
+      // que un stock puesto a mano. (Las filas históricas ya escritas como
+      // 'importacion' se conservan tal cual: no se puede saber a posteriori si
+      // fueron suma o reemplazo, y no se inventan datos.)
       const stockLogStmt = shouldTrack && after !== before
         ? stockChangeStatement({
             userId: req.userId,
@@ -232,7 +237,8 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
             before,
             after,
             account,
-            kind: 'importacion',
+            kind: addStock ? 'importacion' : 'correccion',
+            reason: addStock ? null : 'Importación: reemplazo de stock',
           })
         : null;
 

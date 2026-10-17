@@ -395,20 +395,56 @@ test('la ruta de stock diario funciona offline para dueño y queda protegida par
   resetStore(); login(1); seed(); navigator.onLine = false
   const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
   const stored = records.get(stateKey(1))
-  stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 20, current_stock: 20 }] }
+  stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 20, entries_stock: 3, current_stock: 20 }] }
   records.set(stateKey(1), stored)
   assert.equal(handlesOffline('/api/products/day-stock', 'GET'), true)
   const sold = await write('/api/sales', saleBody('daily-stock-sale'))
   assert.equal(sold.status, 202)
   const ownerResponse = await (await import('./offlineClient.js?daily-owner')).offlineRequest('/api/products/day-stock')
   assert.equal(ownerResponse.status, 200)
-  assert.deepEqual((await ownerResponse.json()).products[0], { id: 10, opening_stock: 20, current_stock: 18, tracked: true })
+  assert.deepEqual((await ownerResponse.json()).products[0], { id: 10, opening_stock: 20, entries_stock: 3, current_stock: 18, tracked: true })
 
   setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cashier@test.local', role: 'cajero' })
   records.set('mypimes_local_v1:1:2', structuredClone(records.get(stateKey(1))))
   const cashierResponse = await (await import('./offlineClient.js?daily-cashier')).offlineRequest('/api/products/day-stock')
   assert.equal(cashierResponse.status, 400)
   assert.match((await cashierResponse.json()).error, /Solo el dueño/)
+})
+
+test('las entradas locales de la PWA (recibir y vender) cuadran offline y tras sincronizar', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const stored = records.get(stateKey(1))
+  stored.base.products[0].stock = 1
+  stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 1, entries_stock: 0, current_stock: 1, tracked: true }] }
+  records.set(stateKey(1), stored)
+
+  assert.equal((await write('/api/products/10', { name: 'Pan 1', purchase_price: 6, sale_price: 10, add_stock: 24 }, 'PUT')).status, 202)
+  assert.equal((await write('/api/sales', { ...saleBody('trifecta'), items: [{ product_id: 10, quantity: 3, unit_price: 10 }] })).status, 202)
+
+  // Sin conexión: inicial 1, se reciben 24, se venden 3 → disponible 22.
+  let day = await (await apiFetch('/api/products/day-stock')).json()
+  assert.deepEqual(day.products[0], { id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true })
+
+  // Sincroniza: sube la entrada y la venta y baja el resumen confirmado.
+  navigator.onLine = true
+  const saleOp = records.get(stateKey(1)).outbox.find((o) => o.kind === 'sale')
+  globalThis.fetch = async (path, options) => {
+    if (path === '/api/sync/product-operation') {
+      const body = JSON.parse(options.body)
+      assert.equal(body.method, 'PUT')
+      assert.equal(body.product.add_stock, 24)
+      return jsonResponse({ id: 10, name: 'Pan 1', purchase_price: 6, sale_price: 10, stock: 25, unit: null, track_stock: 1, pending: false })
+    }
+    if (path === '/api/sales') return jsonResponse({ ...saleOp.result, id: 55, pending: false })
+    assert.equal(path, '/api/sync/snapshot')
+    return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 22, sale_price: 10, purchase_price: 6, unit: null, track_stock: 1 }], daily_stock: { date: today, products: [{ id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true }] } })
+  }
+  await syncOffline()
+  assert.equal((await localSyncStatus()).pending, 0)
+  assert.equal(records.get(stateKey(1)).base.local_entries, undefined, 'el snapshot confirmado sustituye la cifra local')
+  day = await (await apiFetch('/api/products/day-stock')).json()
+  assert.deepEqual(day.products[0], { id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true })
 })
 
 test('una edición de cajero guardada con el producto entero por una versión antigua sube sin 403 y no frena las ventas', async () => {

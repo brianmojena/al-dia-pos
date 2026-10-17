@@ -5,12 +5,20 @@ import { accountKeyFromToken, splitByAccount } from './queueOwnership.js'
 import { newId } from './newId.js'
 import { requestPersistentStorage } from './storagePersistence.js'
 import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
+import { getSharedDevice, getSharedContext, getSharedCredential, getLastSharedAccount, isSharedLocked, isSharedExpired } from './sharedDevice.js'
 
-const keyFor = (account) => `mypimes_local_v1:${account}`
+const sharedFor = (account) => {
+  const device = getSharedContext()
+  return device && getSharedCredential(account) ? device : null
+}
+const keyFor = (account) => {
+  const shared = sharedFor(account)
+  return shared ? `mypimes_shared_v1:${shared.owner_id}:${shared.id}` : `mypimes_local_v1:${account}`
+}
 const accountNow = () => accountKeyFromToken(getToken())
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
-const initialState = (account) => ({ base: { ...emptyData(), products: (accountNow() === account && getCachedProducts()) || [] }, outbox: [], nextId: -1, initialized: false, lastSynced: null, syncError: '' })
-const readState = async (account) => (await get(keyFor(account))) || initialState(account)
+const initialState = (account, device = sharedFor(account)) => ({ base: { ...emptyData(), ...(device ? { shared_device: device } : {}), products: (accountNow() === account && getCachedProducts()) || [] }, outbox: [], nextId: -1, initialized: false, lastSynced: null, syncError: '' })
+const readState = async (account, storageKey = keyFor(account)) => (await get(storageKey)) || initialState(account)
 const utcMillis = (value) => {
   if (typeof value !== 'string' || !value.trim()) return null
   const normalized = value.trim().replace(' ', 'T')
@@ -65,6 +73,7 @@ export async function offlineRequest(path, options = {}) {
   }
   if (accountNow() !== account) return response({ error: 'La sesión cambió' }, 401)
   const method = options.method || 'GET', route = path.split('?')[0]
+  if (getSharedContext() && (isSharedLocked() || isSharedExpired())) return response({ error: 'Desbloquea la caja con tu PIN para continuar' }, 423)
   try {
     if (method === 'GET') {
       if (!state.initialized && !state.base.products.length && !state.outbox.length) return response({ error: 'Conéctate una vez para descargar los datos de esta tienda' }, 503)
@@ -84,7 +93,16 @@ export async function offlineRequest(path, options = {}) {
         const norm = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
         for (const item of body.items) {
           const existing = data.products.find((p) => norm(p.name) === norm(item.name))
-          const clean = { ...item, purchase_price: item.purchase_price ?? existing?.purchase_price ?? 0, stock: body.stock_mode === 'sumar' ? (existing?.stock ?? 0) + (item.stock ?? 0) : item.stock ?? existing?.stock ?? 0 }
+          const clean = { ...item, purchase_price: item.purchase_price ?? existing?.purchase_price ?? 0 }
+          // Sumar es una recepción: entra como cantidad a añadir (y cuenta como
+          // entrada del día). Reemplazar es un ajuste: viaja como stock final.
+          if (existing && body.stock_mode === 'sumar') {
+            delete clean.stock
+            const add = Number(item.stock ?? 0)
+            if (add > 0) clean.add_stock = add
+          } else {
+            clean.stock = existing ? (item.stock ?? existing.stock) : (item.stock ?? 0)
+          }
           const op = prepareOperation(data, existing ? 'PUT' : 'POST', existing ? `/api/products/${existing.id}` : '/api/products', clean, ctx)
           current.outbox.push(op); applyOperation(data, op)
           result[existing ? 'updated' : 'created']++
@@ -112,25 +130,25 @@ export async function offlineRequest(path, options = {}) {
 // Las versiones antiguas de la app guardaban la edición de un cajero con el
 // producto entero; el servidor solo admite precio de venta y entrada de stock
 // y rechazaba (403) la operación, dejando parada toda la cola detrás de ella.
-const cashierEdit = (op) => op.method === 'PUT' && getCachedUser()?.role === 'cajero'
+const cashierEdit = (op) => op.method === 'PUT' && (getSharedContext() ? getSharedCredential(op.account_key)?.user : getCachedUser())?.role === 'cajero'
 const priceAndStockOnly = ({ sale_price, add_stock }) => ({ ...(sale_price !== undefined && { sale_price }), ...(add_stock !== undefined && { add_stock }) })
 let syncing = null
 export async function syncOffline() {
   if (isElectron() || navigator.onLine === false || !accountNow() || !getCachedUser()) return
   if (syncing) return syncing
   const run = async () => {
-    const account = accountNow(), token = getToken()
-    const stillCurrent = () => accountNow() === account && getToken() === token
-    const request = (path, options = {}) => networkFetch(path, { ...options, token, preserveSession: true })
+    const account = accountNow(), token = getToken(), shared = getSharedContext(), storageKey = keyFor(account)
+    const stillCurrent = () => shared ? getSharedContext()?.id === shared.id : accountNow() === account && getToken() === token
+    const request = (path, options = {}) => networkFetch(path, { token, ...options, preserveSession: true })
     try {
       await migrateLegacy(account)
       const { flushQueue } = await import('./salesQueue.js')
       await flushQueue()
       if (!stillCurrent()) return
       while (stillCurrent()) {
-        const state = await readState(account), op = state.outbox[0]
+        const state = await readState(account, storageKey), op = state.outbox[0]
         if (!op) break
-        if (op.kind === 'close' && getCachedUser()?.role === 'cajero' && op.coverageVersion !== CASH_CLOSE_COVERAGE_VERSION) {
+        if (op.kind === 'close' && !shared && getCachedUser()?.role === 'cajero' && op.coverageVersion !== CASH_CLOSE_COVERAGE_VERSION) {
           // Las instalaciones que ya tenían IndexedDB podían declarar has_sales
           // sin haber descargado ventas. Rehidratar antes de cerrar y reconstruir
           // la misma operación conservando su client_close_id y su lugar en cola.
@@ -139,7 +157,7 @@ export async function syncOffline() {
           const snapshot = await snapshotResponse.json()
           if (snapshot.cash_close_coverage_version !== CASH_CLOSE_COVERAGE_VERSION) throw new Error('La nube no confirmó una cobertura completa de caja; el cierre sigue pendiente')
           if (!stillCurrent()) return
-          await update(keyFor(account), (current = initialState(account)) => {
+          await update(storageKey, (current = initialState(account, shared)) => {
             current.base = { ...emptyData(), ...snapshot }
             const closeIndex = current.outbox.findIndex((pending) => pending.id === op.id)
             const prefix = current.outbox.slice(0, Math.max(0, closeIndex))
@@ -175,17 +193,20 @@ export async function syncOffline() {
           continue
         }
         if (op.error) throw new Error(op.error)
+        const credential = shared ? getSharedCredential(op.account_key) : null
+        if (shared && !credential) throw new Error('Falta la autorización del cajero original. Los cambios siguen guardados.')
         const path = op.kind === 'product' ? '/api/sync/product-operation' : op.path
         const body = op.kind === 'product' ? { operation_id: op.id, method: op.method, product_id: op.productId, product: cashierEdit(op) ? priceAndStockOnly(op.body) : op.body, expected: op.before } : { ...op.body }
         if (op.kind === 'close' && op.coverageExact) { body.covered_sale_ids = op.saleIds; body.covered_purchase_ids = op.purchaseIds || [] }
-        const res = await request(path, { method: op.kind === 'product' ? 'POST' : op.method, body: JSON.stringify(body) })
+        const res = await request(path, { ...(credential ? { token: credential.token } : {}), method: op.kind === 'product' ? 'POST' : op.method, body: JSON.stringify(body) })
         const result = await res.json().catch(() => ({}))
         if (!res.ok) {
+          if (shared && (res.status === 401 || (res.status === 403 && ['DEVICE_REVOKED', 'MEMBER_REVOKED'].includes(result.code)))) throw new Error(result.error || 'Renueva los accesos de esta caja. Las operaciones siguen guardadas.')
           if (op.kind === 'sale' && [400, 403, 409].includes(res.status)) {
             // El dinero ya se cobró: conservar el recibo y avisar al dueño,
             // como hacía la cola anterior, sin bloquear las ventas posteriores.
-            await update('mypimes_rejected_sales', (list = []) => list.some((sale) => sale.client_sale_id === op.body.client_sale_id) ? list : [...list, { ...op.body, items: op.result.items, account_key: account, queued_at: Date.parse(op.queued_at), error: result.error || 'Venta rechazada al sincronizar', rejected_at: Date.now(), reported: false }])
-            await update(keyFor(account), (state) => {
+            await update('mypimes_rejected_sales', (list = []) => list.some((sale) => sale.client_sale_id === op.body.client_sale_id) ? list : [...list, { ...op.body, items: op.result.items, account_key: op.account_key || account, shared_device_id: shared?.id, queued_at: Date.parse(op.queued_at), error: result.error || 'Venta rechazada al sincronizar', rejected_at: Date.now(), reported: false }])
+            await update(storageKey, (state) => {
               state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
               for (const pending of state.outbox) if (pending.saleIds) pending.saleIds = pending.saleIds.filter((id) => id !== op.result.id)
               return state
@@ -198,7 +219,7 @@ export async function syncOffline() {
           if (op.kind === 'withdrawal_void' && [404, 409].includes(res.status)) {
             // El servidor ya anuló esta extracción desde otro aparato,
             // o entró en cierre: ignorar y seguir. El snapshot al final restaura el estado real.
-            await update(keyFor(account), (state) => {
+            await update(storageKey, (state) => {
               state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
               return state
             })
@@ -208,10 +229,10 @@ export async function syncOffline() {
           if (res.status === 401) throw new Error('La sesión necesita renovarse. Tus cambios siguen guardados; inicia sesión con esta misma cuenta.')
           const error = result.error || `No se pudo sincronizar (${res.status})`
           // Nunca descartar una operación cobrada o sobrepasar una dependencia.
-          if ([400, 403, 404, 409, 422].includes(res.status)) await update(keyFor(account), (s) => { const pending = s.outbox.find((o) => o.id === op.id); if (pending) { pending.error = error; pending.errorStatus = res.status } return s })
+          if ([400, 403, 404, 409, 422].includes(res.status)) await update(storageKey, (s) => { const pending = s.outbox.find((o) => o.id === op.id); if (pending) { pending.error = error; pending.errorStatus = res.status } return s })
           throw new Error(error)
         }
-        await update(keyFor(account), (s) => acknowledgeOperation(s, op.id, { ...result, pending: false }))
+        await update(storageKey, (s) => acknowledgeOperation(s, op.id, { ...result, pending: false }))
         broadcast()
       }
       if (!stillCurrent()) return
@@ -219,15 +240,15 @@ export async function syncOffline() {
       if (!stillCurrent()) return
       // Snapshot consistente del servidor: catálogo, todo el historial con sus
       // líneas y cobertura de cierres. Solo se reemplaza la base, nunca la cola.
-      const res = await request('/api/sync/snapshot')
+      const res = await request('/api/sync/snapshot', shared ? { token: getSharedCredential(accountNow())?.token || token } : {})
       if (!res.ok) throw new Error(res.status === 401 ? 'Renueva tu sesión para sincronizar. Los datos locales siguen disponibles.' : 'No se pudieron descargar los datos de la tienda')
       const snapshot = await res.json()
       if (!stillCurrent()) return
-      await update(keyFor(account), (s = initialState(account)) => ({ ...s, base: { ...emptyData(), ...snapshot }, initialized: true, lastSynced: Date.now(), syncError: '' }))
+      await update(storageKey, (s = initialState(account, shared)) => ({ ...s, base: { ...emptyData(), ...snapshot }, initialized: true, lastSynced: Date.now(), syncError: '' }))
       requestPersistentStorage()
       broadcast()
     } catch (error) {
-      try { await update(keyFor(account), (s = initialState(account)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
+      try { await update(storageKey, (s = initialState(account, shared)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
       broadcast()
     }
   }
@@ -238,10 +259,43 @@ export async function localSyncStatus() {
   const account = accountNow()
   if (!account || isElectron()) return { pending: 0 }
   const state = await readState(account)
-  const otherKeys = (await keys()).filter((key) => typeof key === 'string' && key.startsWith('mypimes_local_v1:') && key !== keyFor(account))
+  const otherKeys = (await keys()).filter((key) => typeof key === 'string' && (key.startsWith('mypimes_local_v1:') || key.startsWith('mypimes_shared_v1:')) && key !== keyFor(account))
   const others = await Promise.all(otherKeys.map((key) => get(key)))
   const otherAccounts = others.reduce((count, state) => count + (state?.outbox?.length || 0), 0)
   return { otherAccounts, pending: state.outbox.length, error: state.syncError, conflicts: state.outbox.filter((o) => o.error).length, problem: state.outbox.find((o) => o.error), initialized: state.initialized, lastSynced: state.lastSynced }
+}
+
+// Administración puede estar abierta con otra cuenta. Comprobar los datos
+// persistidos, no solo la cola de la sesión del administrador.
+export async function canReplaceSharedDevice() {
+  if (isElectron()) return { allowed: false, error: 'Configura la caja compartida en la aplicación web de la tablet o teléfono.' }
+  try {
+    const allKeys = (await keys()).filter((key) => typeof key === 'string' && (key.startsWith('mypimes_local_v1:') || key.startsWith('mypimes_shared_v1:')))
+    const states = await Promise.all(allKeys.map((key) => get(key)))
+    if (states.some((s) => s?.outbox?.length) || ((await get('mypimes_sales_queue')) || []).length
+      || ((await get('mypimes_rejected_sales')) || []).some((s) => !s.reported && !s.report_failed)) {
+      return { allowed: false, error: 'Sincroniza todos los cambios pendientes de este dispositivo antes de configurarlo. Los datos se conservan.' }
+    }
+    const device = getSharedDevice()
+    if (device) {
+      const old = await get(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
+      if (old) {
+        const data = project(old)
+        if ([...(data.sales || []), ...(data.currency_purchases || [])].some((row) => row.cash_close_id == null)) return { allowed: false, error: 'Cierra y sincroniza la caja instalada antes de cambiar su configuración.' }
+      }
+    }
+    return { allowed: true }
+  } catch { return { allowed: false, error: 'No se pudieron comprobar los datos pendientes. Vuelve a intentar sin borrar el almacenamiento.' } }
+}
+
+export async function sharedHandoverStatus(account = getLastSharedAccount()) {
+  const device = getSharedDevice()
+  if (!device || device.continuous || !account) return { hasOpenOperations: false }
+  const state = await get(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
+  if (!state) return { hasOpenOperations: false }
+  const user = getSharedCredential(account)?.user
+  if (!user) throw new Error('No se pudo comprobar la caja del cajero anterior.')
+  return { hasOpenOperations: readLocal(project(state), '/api/cash-closes/current?register_id=web', account, user).has_sales }
 }
 export async function retrySync() {
   const account = accountNow()

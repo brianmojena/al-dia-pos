@@ -19,6 +19,22 @@ marketing-video/out/
 
 # Notas de trabajo (no forman parte del producto)
 ejecucion y eso
+.worktrees/
+.claude/worktrees/
+.presentation-build/
+output/
+
+# Marketing y presentaciones se mantienen fuera del repositorio del POS
+/marketing-video/
+/assets/
+/presentaciones/
+/logodreampoly.png
+
+# Copias de datos y cargas de clientes (se conservan solo en el equipo)
+server/audit-backups/
+/deliciasysabores-mitienda.csv
+/deliciasysabores-mitienda-pendientes.txt
+/montevaldes-mitienda.csv
 
 # macOS
 .DS_Store

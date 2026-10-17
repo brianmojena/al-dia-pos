@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { requireAuth, requireOwner } = require('./middleware/auth');
+const { requireAuth, requireOwner, requireAdmin } = require('./middleware/auth');
 const authRouter      = require('./routes/auth');
 const productsRouter  = require('./routes/products');
 const salesRouter     = require('./routes/sales');
@@ -17,6 +17,11 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/auth', authRouter);
+
+// Confirmación de tiendas desde el panel del administrador (ver routes/admin.js;
+// el correo se comprueba contra ADMIN_EMAILS en config).
+app.use('/api/admin/shared-devices', requireAuth, requireAdmin, require('./routes/sharedDevices'));
+app.use('/api/admin', requireAuth, requireAdmin, require('./routes/admin'));
 
 app.use('/api/products',  requireAuth, productsRouter);
 app.use('/api/warehouse', requireAuth, require('./routes/warehouse'));

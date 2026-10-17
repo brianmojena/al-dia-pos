@@ -210,14 +210,19 @@ Margin is derived, not stored, so historical sales keep the cost that applied at
 
 **Sales history** — grouped by day, expandable to line items.
 
-**Accounts & plans** — registration, login, and two plans: *Premium* ($5 USD/month, simulated —
-there is no payment processor wired up) and *Plan Dev* (free, used for prototyping).
+**Accounts & plans** — registration, login, and two plans: *Basic* ($10 USD/month, paid in person —
+there is no payment processor wired up; up to 5 users) and *Enterprise* ($15 USD/month, also paid
+in person; up to 10 users, a monitoring app for the owner, and up to 2 branches). A new account starts
+with a **7-day full-featured trial**; while it runs, the store shows as *pending confirmation*.
+The admin account (see `ADMIN_EMAILS`) confirms stores from the **/admin** page once the payment
+is collected in person — if the trial ends without a confirmation, the app locks to a waiting
+screen until it happens.
 
 ---
 
 ## Running it locally
 
-Requires Node.js 18+. No database setup needed — it falls back to a local SQLite file.
+Node.js 24 is recommended for development and the complete test suite. No database setup needed — it falls back to a local SQLite file.
 
 ```bash
 git clone https://github.com/brianmojena/al-dia-pos.git
@@ -259,7 +264,8 @@ Both Vercel projects build from this repository:
 The frontend's [`vercel.json`](./client/vercel.json) rewrites `/api/*` to the API project, so the
 browser only ever talks to one origin — no CORS preflight on the critical path — plus an SPA
 fallback for React Router. `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` and `JWT_SECRET` are set as
-environment variables on the API project.
+environment variables on the API project. `ADMIN_EMAILS` (comma-separated, defaults to
+`brianadmin@aldia.cu`) names the account(s) allowed into the confirmation panel.
 
 ---
 
@@ -267,12 +273,16 @@ environment variables on the API project.
 
 This is a working MVP under active development, not a finished commercial product.
 
-- Payments are **simulated** — no processor is integrated, the plan is a flag on the user row.
+- Payments are **simulated** — no processor is integrated, the plan is a flag on the user row;
+  confirmation is manual from the `/admin` page. The expiry lock is enforced in the app shell
+  (login/me + waiting screen); per-request server-side gating is a follow-up.
 - Test coverage is deliberately narrow: it targets the money-critical paths (overselling,
   idempotency, transaction rollback, tenant isolation) rather than chasing a coverage
-  percentage. The React client and the Electron sync worker have no automated tests yet.
+  percentage. CI checks the server, React client, Electron sync worker and shared-register
+  integration, and builds the PWA.
 - The desktop app syncs *up* (local → cloud). Pulling changes made elsewhere back down is
-  designed but not implemented — acceptable while each shop runs a single register.
+  supported for the catalogue while preserving pending local changes. Disconnected registers
+  cannot see each other's new sales until they reconnect.
 - Windows builds are unsigned by design: the app is installed in person from a USB stick, which
   is how software actually reaches shops in Cuba, so code-signing buys nothing here.
 

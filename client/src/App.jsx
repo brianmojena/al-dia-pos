@@ -4,7 +4,10 @@ import RequireAuth from './components/RequireAuth'
 import RequireOwner from './components/RequireOwner'
 import RequireWarehouse from './components/RequireWarehouse'
 import Login from './pages/Login'
+import SharedCashier from './pages/SharedCashier'
 import Register from './pages/Register'
+import Bienvenida from './pages/Bienvenida'
+import Admin from './pages/Admin'
 import Dashboard from './pages/Dashboard'
 import Products from './pages/Products'
 import POS from './pages/POS'
@@ -28,9 +31,14 @@ export default function App() {
     <Router>
       <Routes>
         <Route path="/login"    element={<Login />} />
+        <Route path="/cajero" element={<SharedCashier />} />
         <Route path="/register" element={<Register />} />
 
         <Route element={<RequireAuth />}>
+          {/* Cartel tras registrarse: prueba de 7 días + plan pendiente de
+              confirmación. Sin el Layout (no es una pantalla de trabajo). */}
+          <Route path="/bienvenida" element={<Bienvenida />} />
+
           <Route path="/" element={<Layout />}>
             <Route index element={<Navigate to="/pos" replace />} />
             <Route path="pos"  element={<POS />} />
@@ -59,6 +67,10 @@ export default function App() {
               <Route path="cajeros"    element={<Cajeros />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
+
+            {/* Panel de administración: confirmar tiendas nuevas (el servidor
+                además exige ADMIN_EMAILS; Admin.jsx redirige si no aplica). */}
+            <Route path="admin" element={<Admin />} />
           </Route>
         </Route>
       </Routes>

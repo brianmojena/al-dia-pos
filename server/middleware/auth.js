@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
-const { JWT_SECRET } = require('../config');
+const { JWT_SECRET, isAdminEmail } = require('../config');
+const { getDb } = require('../db/database');
 
 const OWNER = 'dueño';
 const CASHIER = 'cajero';
@@ -17,20 +18,25 @@ const CASHIER = 'cajero';
  * Se interpretan como dueño, que es lo que eran: nadie tiene que volver a
  * iniciar sesión por este cambio.
  */
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'No autenticado' });
 
+  let payload;
+  try { payload = jwt.verify(token, JWT_SECRET); }
+  catch (_) { return res.status(401).json({ error: 'Sesión inválida o expirada' }); }
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.deviceId) {
+      const result = await require('../lib/sharedDevices').validateSharedToken(payload);
+      if (!result.device) return res.status(result.status).json({ error: result.error, code: result.code });
+      req.sharedDevice = result.device;
+    }
     req.userId    = payload.userId;
     req.accountId = payload.accountId ?? payload.userId;
     req.role      = payload.role ?? OWNER;
     next();
-  } catch (_) {
-    res.status(401).json({ error: 'Sesión inválida o expirada' });
-  }
+  } catch (error) { next(error); }
 }
 
 /**
@@ -45,4 +51,24 @@ function requireOwner(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireOwner, OWNER, CASHIER };
+/**
+ * El panel de administración es de una sola persona (ADMIN_EMAILS en config).
+ * Se comprueba el correo de la CUENTA que inició sesión — los tokens llevan
+ * ids, no correo — así que esta comprobación lee la fila de la cuenta.
+ */
+async function requireAdmin(req, res, next) {
+  try {
+    const result = await getDb().execute({
+      sql: 'SELECT email FROM users WHERE id = ?',
+      args: [req.accountId],
+    });
+    if (!isAdminEmail(result.rows[0]?.email)) {
+      return res.status(403).json({ error: 'Solo la cuenta de administración puede hacer esto' });
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { requireAuth, requireOwner, requireAdmin, OWNER, CASHIER };

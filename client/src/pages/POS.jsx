@@ -15,6 +15,12 @@ import RejectedSalesBanner from '../components/RejectedSalesBanner'
 import { newId as newSaleId } from '../lib/newId'
 import { formatQty, lineTotal, priceSuffix, roundQty, hasPack, lineUnits, formatPackStock } from '../lib/units'
 import { cashPaymentBreakdown, isMontevaldesCashEnabled } from '../lib/cashPayment.js'
+import { getSharedContext } from '../lib/sharedDevice.js'
+
+const readSharedDraft = (key) => {
+  try { const draft = key && JSON.parse(sessionStorage.getItem(key) || 'null'); return Array.isArray(draft?.cart) ? draft : { cart: [] } }
+  catch { return { cart: [] } }
+}
 
 // Hasta 2 decimales: 1,3 lb a $55 son $71,50 y el cliente tiene que ver ese importe.
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Math.round((n || 0) * 100) / 100)
@@ -32,11 +38,14 @@ const unitsInCart = (cart, productId) =>
     .reduce((s, i) => s + lineUnits(i), 0)
 
 export default function POS() {
-  const { user } = useAuth()
+  const { user, setSharedGuard } = useAuth()
+  const shared = getSharedContext()
+  const draftKey = shared ? `mypimes_shared_cart:${shared.id}:${user.id}` : null
+  const restored = useRef(readSharedDraft(draftKey))
   const rates = useExchangeRates(user)
   const [products,          setProducts]          = useState([])
   const [search,            setSearch]            = useState('')
-  const [cart,              setCart]              = useState([])
+  const [cart,              setCart]              = useState(restored.current.cart)
   const [loading,           setLoading]           = useState(true)
   const [completing,        setCompleting]        = useState(false)
   const [success,           setSuccess]           = useState(false)
@@ -57,7 +66,14 @@ export default function POS() {
   // Identificador de la venta en curso. Se mantiene entre reintentos para que el
   // servidor reconozca el reintento y no registre la venta dos veces; solo se
   // descarta cuando la venta se cierra con éxito.
-  const saleIdRef = useRef(null)
+  const saleIdRef = useRef(restored.current.saleId || null)
+  useEffect(() => {
+    setSharedGuard?.({ hasCart: cart.length > 0, busy: completing })
+    if (draftKey) {
+      try { sessionStorage.setItem(draftKey, JSON.stringify({ cart, saleId: saleIdRef.current })) } catch { /* El recibo se guarda en IndexedDB al cobrar. */ }
+    }
+  }, [cart, completing, draftKey, setSharedGuard])
+  useEffect(() => () => setSharedGuard?.({ hasCart: false, busy: false }), [setSharedGuard])
 
   const loadProducts = async () => {
     try {
@@ -682,7 +698,7 @@ export default function POS() {
           </button>
           {cart.length > 0 && (
             <button
-              onClick={() => setCart([])}
+              onClick={() => { if (!shared || window.confirm('¿Vaciar el carrito sin cobrar?')) { saleIdRef.current = null; setCart([]) } }}
               className="w-full text-gray-400 py-2 text-sm hover:text-gray-600 transition-colors mt-2"
             >
               Cancelar venta

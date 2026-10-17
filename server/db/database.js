@@ -53,7 +53,9 @@ async function initDb() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       store_name TEXT NOT NULL,
-      plan TEXT NOT NULL DEFAULT 'dev' CHECK (plan IN ('premium', 'dev')),
+      plan TEXT NOT NULL DEFAULT 'basic' CHECK (plan IN ('basic', 'enterprise')),
+      plan_status TEXT NOT NULL DEFAULT 'active',
+      trial_ends_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -453,9 +455,27 @@ async function initDb() {
     // Diferencia original al crear el arqueo. difference cambia al corregirlo;
     // este dato queda inmutable para reconstruir los movimientos del día.
     'ALTER TABLE inventory_count_items ADD COLUMN initial_difference REAL',
+    // Confirmación del administrador: una tienda nueva nace 'pending' con 7
+    // días de prueba (trial_ends_at) y el admin la pasa a 'active' desde /admin.
+    // Las filas anteriores a esto quedan 'active' (ya eran clientes).
+    'ALTER TABLE users ADD COLUMN plan_status TEXT NOT NULL DEFAULT \'active\'',
+    'ALTER TABLE users ADD COLUMN trial_ends_at TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
+  }
+
+  // Las bases anteriores a los planes Basic/Enterprise conservan el CHECK
+  // viejo ('premium'/'dev') grabado en el DDL de users: SQLite no lo puede
+  // alterar sin reconstruir la tabla, y eso vive en db/migrate.js. Hasta que
+  // esa migración corra, registrar tiendas o crear cajeros con el plan nuevo
+  // falla con un error de CHECK opaco. Mejor decirlo aquí, en cada arranque.
+  const usersDdl = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'");
+  if (!(usersDdl.rows[0]?.sql || '').includes("'basic'")) {
+    console.warn(
+      "⚠  La tabla users todavía tiene el CHECK de planes viejo ('premium'/'dev').\n" +
+      '   Registro y creación de cajeros fallarán hasta ejecutar la migración de planes: cd server && npm run migrate'
+    );
   }
 
   // Las migraciones de datos no se pueden repetir al arrancar cada instancia
@@ -531,6 +551,23 @@ async function initDb() {
 
     -- El teléfono reintenta el aviso si se corta la conexión: una sola fila por venta.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_rejected_sales_client ON rejected_sales(user_id, client_sale_id);
+  `);
+
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS shared_devices (
+      id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL,
+      continuous INTEGER NOT NULL DEFAULT 0 CHECK (continuous IN (0, 1)),
+      version INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1,
+      expires_at TEXT NOT NULL, created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS shared_device_cashiers (
+      device_id TEXT NOT NULL, account_id INTEGER NOT NULL, display_name TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (device_id, account_id),
+      FOREIGN KEY (device_id) REFERENCES shared_devices(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_devices_owner ON shared_devices(owner_id);
   `);
 
   console.log('Base de datos lista');

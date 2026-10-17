@@ -9,14 +9,25 @@ function stockLabel(value, product) {
 
 export default function ProductDayStock({ product, dayStock, className = '' }) {
   const values = productDayStockValues(product, dayStock, businessDate())
-  const opening = values.tracked ? stockLabel(values.opening_stock, product) : 'Sin control'
-  const current = values.tracked ? stockLabel(values.current_stock, product) : 'Sin control'
+  const opening = stockLabel(values.opening_stock, product)
+  const current = stockLabel(values.current_stock, product)
+  const entries = values.entries_stock == null ? '—' : stockLabel(values.entries_stock, product)
+
+  if (!values.tracked) {
+    return (
+      <div className={`text-[11px] leading-4 text-gray-400 ${className}`}>
+        <span>Sin control de stock</span>
+      </div>
+    )
+  }
 
   return (
     <div className={`text-[11px] leading-4 text-gray-400 ${className}`}>
-      <span>Inicio del día: <span className="font-medium text-gray-500">{opening}</span></span>
+      <span>Inicial: <span className="font-medium text-gray-500">{opening}</span></span>
       <span className="mx-1.5">·</span>
-      <span>Stock actual: <span className="font-medium text-gray-600">{current}</span></span>
+      <span>Entradas: <span className="font-medium text-green-600">{entries}</span></span>
+      <span className="mx-1.5">·</span>
+      <span>Disponible: <span className="font-medium text-gray-600">{current}</span></span>
     </div>
   )
 }

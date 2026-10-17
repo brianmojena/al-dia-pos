@@ -21,7 +21,7 @@ const sameCashClose = (left, right) => Boolean(
 )
 
 export default function Caja() {
-  const { user } = useAuth()
+  const { user, sharedDevice } = useAuth()
   const isOwner = user?.role !== 'cajero'
   // Se piden los billetes en divisa solo si este aparato puede cobrar en esa
   // moneda (tiene tasa, propia o de la tienda). Mostrar u ocultar el campo no
@@ -144,6 +144,10 @@ export default function Caja() {
         )}
       </div>
 
+      {sharedDevice && user?.role === 'cajero' && <p className="mb-4 rounded-xl bg-blue-50 text-blue-800 p-3 text-sm">{sharedDevice.continuous
+        ? 'Este cierre incluye las operaciones de todos los cajeros de esta caja. Quedará registrado quién hizo el conteo; el descuadre corresponde al período compartido.'
+        : 'Este cierre incluye tus operaciones en este dispositivo. Cierra antes de entregar la caja al siguiente cajero.'}</p>}
+
       {result ? (
         <div>
           {result.offline_notice && <p className="text-xs text-amber-700 bg-amber-50 rounded-xl px-3 py-2 mb-3">{result.offline_notice}</p>}
@@ -257,11 +261,11 @@ export default function Caja() {
       {/* Un cierre suelto con un faltante puede ser un vuelto mal dado. El
           mismo nombre repitiendo faltantes es otra cosa — y eso solo se ve
           agrupado. Con un solo cajero no aporta nada, así que no se muestra. */}
-      {summary.length > 1 && (
+      {summary.length > 0 && (
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-2 px-1">
             <Users size={13} className="text-gray-400" />
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Descuadres por cajero</p>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Descuadres por cajero o caja</p>
           </div>
           <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
             {summary.map((s, idx) => {
@@ -269,14 +273,14 @@ export default function Caja() {
               const falta = Math.round(saldo) < 0
               return (
                 <div
-                  key={`${s.account_id}-${s.account_email}`}
+                  key={s.register_id || `${s.account_id}-${s.account_email}`}
                   className={`flex items-center justify-between px-5 py-4 ${
                     idx < summary.length - 1 ? 'border-b border-gray-50' : ''
                   }`}
                 >
                   <div className="min-w-0">
                     <p className="font-semibold text-gray-900 text-sm truncate">
-                      {accountLabel(s.account_email) || 'Sin identificar'}
+                      {s.attribution === 'register' ? (s.register_name || 'Caja compartida') : (accountLabel(s.account_email) || 'Sin identificar')}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
                       {s.closes} {Number(s.closes) === 1 ? 'cierre' : 'cierres'}

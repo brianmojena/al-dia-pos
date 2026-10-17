@@ -9,6 +9,17 @@ function timestampMs(value) {
   return Number.isFinite(time) ? time : null;
 }
 
+// Mercancía que entró al stock hoy: la recibida a mano ('entrada'), la carga
+// inicial de un producto nuevo ('nuevo') y la importación que SUMA
+// ('importacion'). Las correcciones a mano ('correccion'), las unidades que
+// vuelven al anular una venta ('anulacion') y una importación que REEMPLAZA el
+// stock (también 'correccion') NO son entradas: ajustan o restauran, pero no es
+// mercancía que llegó. Una transferencia almacén → tienda sí lo es y se cuenta
+// aparte, en la consulta de transferencias.
+const ENTRY_KINDS = new Set(['entrada', 'nuevo', 'importacion']);
+
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
 /** Reconstruct today's opening stock from persisted movements, using the caller's transaction. */
 async function dailyStock(tx, userId, date = businessToday()) {
   const { start, end } = boundsForDate(date);
@@ -20,7 +31,7 @@ async function dailyStock(tx, userId, date = businessToday()) {
   })).rows;
   const sales = await tx.execute({ sql: `SELECT i.product_id, i.quantity, i.pack_size, i.stock_delta FROM sales s JOIN sale_items i ON i.sale_id = s.id
     WHERE s.user_id = ? AND datetime(s.created_at) >= datetime(?) AND datetime(s.created_at) < datetime(?) AND i.product_id IS NOT NULL`, args: [userId, start, end] });
-  const entries = await tx.execute({ sql: `SELECT product_id, stock_before, stock_after FROM stock_entries
+  const entries = await tx.execute({ sql: `SELECT product_id, stock_before, stock_after, kind, quantity FROM stock_entries
     WHERE user_id = ? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) AND product_id IS NOT NULL`, args: [userId, start, end] });
   const transfers = await tx.execute({ sql: `SELECT product_id, quantity, direction FROM warehouse_transfers
     WHERE user_id = ? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) AND product_id IS NOT NULL`, args: [userId, start, end] });
@@ -61,6 +72,28 @@ async function dailyStock(tx, userId, date = businessToday()) {
     for (const item of before.items || []) if (item.product_id != null) addSaleLine(item);
   }
   for (const row of entries.rows) add(row.product_id, Number(row.stock_after) - Number(row.stock_before));
+  // Mercancía recibida hoy, aparte del ajuste de apertura: es lo que el dueño
+  // quiere ver sumado a la base del día. Se acumula por producto para soportar
+  // varias entradas (a mano, alta de producto nuevo e importación). Solo cuenta
+  // lo que suma stock: una importación que reemplaza a la baja es un ajuste,
+  // igual que una corrección, no mercancía que llegó.
+  const entriesByProduct = new Map();
+  for (const row of entries.rows) {
+    const kind = row.kind == null || row.kind === '' ? 'entrada' : String(row.kind);
+    if (!ENTRY_KINDS.has(kind)) continue;
+    const quantity = Number(row.quantity);
+    if (!(quantity > 0)) continue;
+    const id = Number(row.product_id);
+    entriesByProduct.set(id, (entriesByProduct.get(id) || 0) + quantity);
+  }
+  // Semántica de tienda: recibir del almacén hoy también es mercancía que
+  // entró a la tienda, así que cuenta como entrada. La tienda → almacén saca
+  // mercancía y no es una entrada. Se cuenta una sola vez (la transferencia).
+  for (const row of transfers.rows) {
+    if (row.direction !== 'to_store') continue;
+    const id = Number(row.product_id);
+    entriesByProduct.set(id, (entriesByProduct.get(id) || 0) + Number(row.quantity));
+  }
   for (const row of transfers.rows) add(row.product_id, (row.direction === 'to_warehouse' ? -1 : 1) * Number(row.quantity));
   for (const row of countsToday.rows) {
     const id = Number(row.product_id);
@@ -87,6 +120,7 @@ async function dailyStock(tx, userId, date = businessToday()) {
       return {
         id: Number(product.id),
         opening_stock: !tracked ? null : createdToday ? 0 : openingReason ? null : rawOpening,
+        entries_stock: tracked ? round3(entriesByProduct.get(Number(product.id)) || 0) : 0,
         current_stock: tracked ? current : 0,
         tracked,
         ...(tracked && openingReason && !createdToday ? { opening_stock_reason: openingReason } : {}),

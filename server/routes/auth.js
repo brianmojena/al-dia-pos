@@ -4,10 +4,11 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { requireAuth, requireOwner, OWNER, CASHIER } = require('../middleware/auth');
-const { JWT_SECRET } = require('../config');
+const { JWT_SECRET, isAdminEmail } = require('../config');
 const { asyncHandler } = require('../lib/asyncHandler');
-
-const PLANS = ['premium', 'dev'];
+const {
+  DEFAULT_PLAN, isPlan, labelOf, maxUsersOf, TRIAL_MS, planStateOf,
+} = require('../lib/plans');
 
 // La identidad y los ajustes del negocio salen de sitios distintos: un cajero
 // tiene su propio email y su propio rol, pero el nombre de la tienda, el plan,
@@ -24,6 +25,10 @@ const publicUser = (account, shop = account) => ({
   usd_rate: shop.usd_rate ?? null,
   eur_rate: shop.eur_rate ?? null,
   warehouse_enabled: Number(shop.warehouse_enabled ?? 1) !== 0,
+  // Confirmación del administrador y prueba gratuita (ver lib/plans.js): el
+  // estado vive en la fila del dueño, así que un cajero lo hereda de su tienda.
+  ...planStateOf(shop),
+  is_admin: isAdminEmail(account.email),
 });
 
 // userId es la TIENDA (para un dueño, él mismo); accountId es quien inicia
@@ -45,6 +50,13 @@ const loadShop = async (db, account) => {
   return result.rows[0] || account;
 };
 
+router.get('/shared-device', requireAuth, asyncHandler(async (req, res) => {
+  if (!req.sharedDevice) return res.status(403).json({ error: 'Esta sesión no pertenece a una caja compartida' });
+  const result = await require('../lib/sharedDevices').renewEnrollment(req.sharedDevice.id);
+  if (!result) return res.status(403).json({ code: 'DEVICE_REVOKED', error: 'El acceso de esta caja fue retirado' });
+  res.json(result);
+}));
+
 router.post('/register', asyncHandler(async (req, res) => {
   const { email, password, store_name, plan } = req.body;
 
@@ -54,7 +66,7 @@ router.post('/register', asyncHandler(async (req, res) => {
   if (password.length < 6) {
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
   }
-  const chosenPlan = PLANS.includes(plan) ? plan : 'dev';
+  const chosenPlan = isPlan(plan) ? plan : DEFAULT_PLAN;
 
   const db = getDb();
   const existingResult = await db.execute({
@@ -64,9 +76,18 @@ router.post('/register', asyncHandler(async (req, res) => {
   if (existingResult.rows[0]) return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
 
   const password_hash = bcrypt.hashSync(password, 10);
+  // Toda tienda nueva nace pendiente de confirmación, con 7 días de prueba
+  // completa mientras el administrador confirma el pago (que es en persona).
   const insertResult = await db.execute({
-    sql: 'INSERT INTO users (email, password_hash, store_name, plan) VALUES (?, ?, ?, ?)',
-    args: [email.toLowerCase(), password_hash, store_name, chosenPlan],
+    sql: `INSERT INTO users (email, password_hash, store_name, plan, plan_status, trial_ends_at)
+          VALUES (?, ?, ?, ?, 'pending', ?)`,
+    args: [
+      email.toLowerCase(),
+      password_hash,
+      store_name,
+      chosenPlan,
+      new Date(Date.now() + TRIAL_MS).toISOString(),
+    ],
   });
 
   const userResult = await db.execute({
@@ -193,9 +214,15 @@ router.post('/cashiers', requireAuth, requireOwner, asyncHandler(async (req, res
   const shop = shopResult.rows[0];
   if (!shop) return res.status(404).json({ error: 'Tienda no encontrada' });
 
+  // El tope del plan cuenta todas las cuentas de la tienda, incluida la
+  // principal. Lo decide la propia escritura (INSERT ... SELECT WHERE count <
+  // tope) y no un COUNT previo en JavaScript: dos altas simultáneas que pasen
+  // el chequeo a la vez se quedarían una plaza de más, y aquí eso es dinero.
+  const maxUsers = maxUsersOf(shop.plan);
   const insert = await db.execute({
     sql: `INSERT INTO users (email, password_hash, store_name, plan, role, owner_id)
-          VALUES (?, ?, ?, ?, ?, ?)`,
+          SELECT ?, ?, ?, ?, ?, ?
+          WHERE (SELECT COUNT(*) FROM users WHERE id = ? OR owner_id = ?) < ?`,
     args: [
       email.toLowerCase(),
       bcrypt.hashSync(password, 10),
@@ -203,8 +230,17 @@ router.post('/cashiers', requireAuth, requireOwner, asyncHandler(async (req, res
       shop.plan,
       CASHIER,
       req.userId,
+      req.userId,
+      req.userId,
+      maxUsers,
     ],
   });
+  if (insert.rowsAffected === 0) {
+    return res.status(409).json({
+      error: `El Plan ${labelOf(shop.plan)} permite hasta ${maxUsers} usuarios por tienda ` +
+        '(la cuenta principal incluida). Para añadir más, amplía tu plan.',
+    });
+  }
 
   const created = await db.execute({
     sql: 'SELECT * FROM users WHERE id = ?',

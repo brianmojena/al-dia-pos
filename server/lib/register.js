@@ -4,6 +4,7 @@
  * completar el prefijo `web:`.
  */
 function resolveRegisterId(req, value) {
+  if (req.sharedDevice) return require('./sharedDevices').registerOf(req.sharedDevice, req.accountId);
   if (value === 'web') return `web:${req.accountId}`;
   if (typeof value === 'string' && /^desk-[A-Za-z0-9-]{1,59}$/.test(value)) return value;
   return null;

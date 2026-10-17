@@ -8,6 +8,7 @@ const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { purchaseFields } = require('../lib/payment');
+const { sharedOperationMatches } = require('../lib/sharedDevices');
 
 /**
  * Compra de dólares o euros. Cualquier cuenta de la tienda puede registrarla
@@ -58,7 +59,10 @@ router.post('/', asyncHandler(async (req, res) => {
   // Idempotencia (camino rápido), igual que en ventas.
   if (client_purchase_id) {
     const existing = await findByClientId(db, req.userId, client_purchase_id);
-    if (existing.rows[0]) return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+    if (existing.rows[0]) {
+      if (!sharedOperationMatches(req, existing.rows[0])) return res.status(409).json({ error: 'Esta compra pertenece a otra caja o cajero' });
+      return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+    }
   }
 
   if (!('shop_rate' in req.body)) {
@@ -88,7 +92,10 @@ router.post('/', asyncHandler(async (req, res) => {
   } catch (err) {
     if (client_purchase_id && isUniqueViolation(err)) {
       const existing = await findByClientId(db, req.userId, client_purchase_id);
-      if (existing.rows[0]) return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+      if (existing.rows[0]) {
+        if (!sharedOperationMatches(req, existing.rows[0])) return res.status(409).json({ error: 'Esta compra pertenece a otra caja o cajero' });
+        return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+      }
     }
     throw err;
   }

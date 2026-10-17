@@ -203,14 +203,26 @@ aplicaba en su momento.
 
 **Historial** — ventas agrupadas por día, desplegables hasta el detalle de cada línea.
 
-**Cuentas y planes** — registro, inicio de sesión y dos planes: *Premium* (5 USD/mes, simulado —
-no hay pasarela de pago conectada) y *Plan Dev* (gratis, para prototipar).
+**Caja compartida** — el administrador prepara el equipo, los cajeros entran con PIN y comparten
+inventario sin conexión. La caja continua es opcional; desactivada, cada cajero cierra antes del
+relevo. [Guía de configuración](./docs/caja-compartida.md).
+
+**Stock del día** — el dueño ve el stock inicial, las entradas de mercancía y el disponible,
+incluidos los movimientos pendientes de sincronizar en web y escritorio.
+
+**Cuentas y planes** — registro, inicio de sesión y dos planes: *Basic* (10 USD/mes, pago físico —
+en persona, sin pasarela conectada; hasta 5 usuarios) y *Enterprise* (15 USD/mes, también con pago
+físico en persona; hasta 10 usuarios, app de monitorización para el jefe y hasta 2 sucursales). Una
+cuenta nueva empieza con **7 días de prueba completa**; mientras dura, la tienda figura como *pendiente de
+confirmación*. La cuenta de administración (ver `ADMIN_EMAILS`) confirma las tiendas desde la
+página **/admin** cuando cobra el pago en persona — si la prueba vence sin confirmar, la app se
+bloquea en una pantalla de espera hasta que ocurra.
 
 ---
 
 ## Cómo ejecutarlo en local
 
-Requiere Node.js 18 o superior. No hace falta configurar base de datos: cae a un archivo SQLite
+Se recomienda Node.js 24 para desarrollo y para todas las pruebas. No hace falta configurar base de datos: cae a un archivo SQLite
 local.
 
 ```bash
@@ -253,7 +265,9 @@ Los dos proyectos de Vercel se construyen desde este repositorio:
 El [`vercel.json`](./client/vercel.json) del frontend reescribe `/api/*` hacia el proyecto de la
 API, de modo que el navegador solo habla con un origen — sin preflight CORS en el camino
 crítico — más un *fallback* SPA para React Router. `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` y
-`JWT_SECRET` están configuradas como variables de entorno en el proyecto de la API.
+`JWT_SECRET` están configuradas como variables de entorno en el proyecto de la API. `ADMIN_EMAILS`
+(lista separada por comas; por defecto `brianadmin@aldia.cu`) nombra la(s) cuenta(s) con acceso al
+panel de confirmación.
 
 ---
 
@@ -262,12 +276,15 @@ crítico — más un *fallback* SPA para React Router. `TURSO_DATABASE_URL`, `TU
 Esto es un MVP funcional en desarrollo activo, no un producto comercial terminado.
 
 - Los pagos están **simulados**: no hay pasarela integrada, el plan es una bandera en la fila del
-  usuario.
-- Todavía no hay suite de pruebas automatizadas; los arreglos de concurrencia e idempotencia se
-  verificaron con carga por script contra la API real, y los resultados están arriba.
-- La app de escritorio sincroniza *hacia arriba* (local → nube). Traer de vuelta los cambios
-  hechos en otro lado está diseñado pero no implementado — aceptable mientras cada negocio use
-  una sola caja.
+  usuario; la confirmación es manual desde la página `/admin`. El bloqueo por vencimiento se
+  aplica en la carcasa de la app (login/me + pantalla de espera); el filtrado por petición en el
+  servidor queda como paso siguiente.
+- La cobertura de pruebas es deliberadamente estrecha: apunta a los caminos críticos del dinero
+  (sobreventa, idempotencia, rollback de transacciones, aislamiento entre tiendas) en vez de
+  perseguir un porcentaje. GitHub ejecuta pruebas del servidor, cliente, sincronización de
+  escritorio y relevo offline, además de compilar la PWA.
+- La sincronización descarga cambios del catálogo y conserva las operaciones locales pendientes;
+  dos equipos desconectados no conocen las ventas del otro hasta recuperar la conexión.
 - Los builds de Windows van sin firmar a propósito: la app se instala en persona desde una
   memoria USB, que es como el software llega realmente a los negocios en Cuba, así que firmar el
   código no aporta nada aquí.

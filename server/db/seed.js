@@ -20,7 +20,7 @@ async function seed() {
 
   const userInsert = await db.execute({
     sql: 'INSERT INTO users (email, password_hash, store_name, plan) VALUES (?, ?, ?, ?)',
-    args: [DEMO_EMAIL, bcrypt.hashSync(DEMO_PASSWORD, 10), 'Mi Tienda Demo', 'dev'],
+    args: [DEMO_EMAIL, bcrypt.hashSync(DEMO_PASSWORD, 10), 'Mi Tienda Demo', 'basic'],
   });
   const userId = Number(userInsert.lastInsertRowid);
 

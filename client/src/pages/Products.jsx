@@ -7,12 +7,20 @@ import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix, hasPack, formatPackStock } from '../lib/units'
+import { productDayStockValues } from '../lib/dailyStock'
+import { businessDate } from '../lib/offlineModel'
 import ProductDayStock from '../components/ProductDayStock.jsx'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const fmt2 = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Number(n) || 0)
 const round4 = (n) => Math.round(Number(n) * 10000) / 10000
 const round2 = (n) => Math.round(Number(n) * 100) / 100
+// Cifra del día (inicial, entradas o disponible) para la tabla: "—" si aún no
+// se conoce, y el formato de paquete/unidad que corresponda.
+const dayStockLabel = (value, product) => {
+  if (value == null || !Number.isFinite(Number(value))) return '—'
+  return hasPack(product) ? formatPackStock(value, product.pack_size) : formatQty(value, product.unit)
+}
 const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '', pack_size: '', pack_price: '', pack_cost: '', pack_on: false, stock_packs: '', stock_loose: '', add_stock_packs: '', add_stock_loose: '' }
 
 // Cada movimiento del registro de stock: mercancía recibida, stock puesto a
@@ -640,12 +648,20 @@ export default function Products() {
                     <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider hidden sm:table-cell">Compra</th>
                   )}
                   <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Venta</th>
-                  <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Stock</th>
+                  {isOwner && (
+                    <>
+                      <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider hidden sm:table-cell">Inicial del día</th>
+                      <th className="text-right px-5 py-3 text-xs font-semibold text-green-500 uppercase tracking-wider hidden sm:table-cell">Entradas de hoy</th>
+                    </>
+                  )}
+                  <th className="text-right px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">{isOwner ? 'Disponible' : 'Stock'}</th>
                   <th className="px-5 py-3 w-24"></th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(p => (
+                {filtered.map(p => {
+                  const day = isOwner ? productDayStockValues(p, dayStock, businessDate()) : null
+                  return (
                   <tr key={p.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors">
                     <td className="px-5 py-4">
                       <span className="font-medium text-gray-900 text-sm">{p.name}</span>
@@ -654,7 +670,9 @@ export default function Products() {
                           agregado por {accountLabel(p.created_by_email)}
                         </span>
                       )}
-                      {isOwner && <ProductDayStock product={p} dayStock={dayStock} className="mt-1" />}
+                      {/* En pantallas chicas las columnas del día se ocultan:
+                          el resumen cabe aquí abajo sin romper la tabla. */}
+                      {isOwner && <ProductDayStock product={p} dayStock={dayStock} className="mt-1 sm:hidden" />}
                     </td>
                     {isOwner && (
                       <td className="px-5 py-4 text-right text-gray-400 text-sm hidden sm:table-cell">{fmt(p.purchase_price)}{priceSuffix(p.unit)}</td>
@@ -665,6 +683,15 @@ export default function Products() {
                         <div className="text-xs text-gray-400 mt-0.5">paquete ×{p.pack_size} {fmt(p.pack_price)}</div>
                       )}
                     </td>
+                    {isOwner && day?.tracked && (
+                      <>
+                        <td className="px-5 py-4 text-right text-sm text-gray-500 font-medium tabular-nums hidden sm:table-cell">{dayStockLabel(day.opening_stock, p)}</td>
+                        <td className="px-5 py-4 text-right text-sm text-green-600 font-semibold tabular-nums hidden sm:table-cell">{dayStockLabel(day.entries_stock, p)}</td>
+                      </>
+                    )}
+                    {isOwner && !day?.tracked && (
+                      <td colSpan={2} className="px-5 py-4 text-right text-xs text-gray-400 hidden sm:table-cell">Sin control de stock</td>
+                    )}
                     <td className="px-5 py-4 text-right">
                       <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
                         p.unit && Number(p.track_stock) !== 1 ? 'bg-gray-100 text-gray-500' :
@@ -694,7 +721,8 @@ export default function Products() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>

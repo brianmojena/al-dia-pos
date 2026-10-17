@@ -24,11 +24,11 @@ test('venta local persiste al reabrir y aparece en stock, historial, detalle e I
 })
 test('inicio del día local es solo para dueño, conserva la apertura y refleja ventas y conteos pendientes', () => {
   const state = fixture()
-  state.base.daily_stock = { date: businessDate(), products: [{ id: 10, opening_stock: 20 }] }
+  state.base.daily_stock = { date: businessDate(), products: [{ id: 10, opening_stock: 20, entries_stock: 6 }] }
   sell(state, 3)
   const count = add(state, 'POST', '/api/inventory-counts', { items: [{ product_id: 10, counted: 15 }] })
   const ownerRows = readLocal(project(state), '/api/products/day-stock', '1:1', user)
-  assert.deepEqual(ownerRows.products[0], { id: 10, opening_stock: 20, current_stock: 15, tracked: true })
+  assert.deepEqual(ownerRows.products[0], { id: 10, opening_stock: 20, entries_stock: 6, current_stock: 15, tracked: true })
   assert.throws(() => readLocal(project(state), '/api/products/day-stock', '1:2', { ...user, id: 2, role: 'cajero' }), /Solo el dueño/)
   assert.equal(count.result.items[0].counted, 15)
 })
@@ -61,6 +61,31 @@ test('un producto creado localmente guarda timestamp y tiene apertura cero ese d
   const date = businessDate(created.result.created_at)
   assert.equal(created.result.created_at, '2026-09-15T14:00:00.000Z')
   assert.equal(dailyStockFor({ products: [created.result] }, date).products[0].opening_stock, 0)
+})
+test('el ejemplo 1 + 24 - 3 se ve al proyectar y la entrada sigue tras confirmarla', () => {
+  const state = fixture()
+  const date = businessDate('2026-09-15T14:00:00.000Z')
+  state.base.products[0].stock = 1
+  state.base.daily_stock = { date, products: [{ id: 10, opening_stock: 1, entries_stock: 0, current_stock: 1 }] }
+  const received = add(state, 'PUT', '/api/products/10', { name: 'Pan', purchase_price: 6, sale_price: 10, add_stock: 24 })
+  sell(state, 3)
+  const dayRow = (data) => dailyStockFor(data, date).products.find((p) => p.id === 10)
+  assert.deepEqual(dayRow(project(state)), { id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true })
+  // Al confirmar la entrada (ACK) la cifra sigue en la base, ya no depende de la cola.
+  acknowledgeOperation(state, received.id, { ...received.result, id: 10, stock: 25, pending: false })
+  assert.equal(state.outbox.some((op) => op.id === received.id), false)
+  assert.equal(dayRow(project(state)).entries_stock, 24)
+})
+test('un alta fusionada por el servidor no cuenta el stock ya existente como entrada', () => {
+  const state = fixture()
+  const date = businessDate('2026-09-15T14:00:00.000Z')
+  state.base.daily_stock = { date, products: [{ id: 10, opening_stock: 20, entries_stock: 0 }] }
+  const created = add(state, 'POST', '/api/products', { name: 'Nuevo', purchase_price: 6, sale_price: 10, stock: 5 })
+  const local = created.result.id
+  assert.equal(dailyStockFor(project(state), date).products.find((p) => p.id === local).entries_stock, 5)
+  acknowledgeOperation(state, created.id, { id: 10, name: 'Pan', purchase_price: 6, sale_price: 10, stock: 20, merged: true })
+  assert.equal(state.base.local_entries?.[date]?.[10] ?? 0, 0)
+  assert.equal(dailyStockFor(project(state), date).products.find((p) => p.id === 10).entries_stock, 0)
 })
 test('cierre cubre exactamente sus ventas y no incluye la siguiente venta offline', () => {
   const state = fixture(), first = sell(state)

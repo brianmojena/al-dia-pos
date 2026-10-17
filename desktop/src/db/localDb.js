@@ -280,6 +280,11 @@ function initLocalDb(dbPath) {
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_transfer REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_usd REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_eur REAL NOT NULL DEFAULT 0',
+    // Cobertura del resumen diario: una operación ya sincronizada se marca al
+    // bajar un snapshot nuevo, que ya incluye su entrada, para no sumarla dos
+    // veces. Sin esta marca, una entrada confirmada cuyo GET del resumen falló
+    // desaparecería de "Entradas de hoy".
+    'ALTER TABLE outbox ADD COLUMN covered_by_snapshot INTEGER NOT NULL DEFAULT 0',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }

@@ -14,6 +14,11 @@ const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300
 router.get('/snapshot', asyncHandler(async (req, res) => {
   const tx = await getDb().transaction('read');
   try {
+    if (req.sharedDevice) {
+      const snapshot = await require('../lib/sharedSnapshot').sharedSnapshot(tx, req);
+      await tx.commit();
+      return res.json(snapshot);
+    }
     const products = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name', args: [req.userId] })).rows;
     const register = resolveRegisterId(req, 'web');
     const cashierScope = req.role === 'cajero'

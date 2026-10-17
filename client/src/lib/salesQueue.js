@@ -20,6 +20,7 @@ import { get, update } from 'idb-keyval'
 import { networkFetch as apiFetch, getToken, isElectron } from './network.js'
 import { accountKeyFromToken, splitByAccount, logoutBlockers } from './queueOwnership.js'
 import { requestPersistentStorage } from './storagePersistence.js'
+import { getSharedContext, getSharedCredential } from './sharedDevice.js'
 
 const QUEUE_KEY = 'mypimes_sales_queue'
 const REJECTED_KEY = 'mypimes_rejected_sales'
@@ -48,6 +49,8 @@ export async function getPendingSales() {
 /** Ventas de la cuenta abierta que el servidor rechazó, con `reported` = ya se le avisó al servidor. */
 export async function getRejected() {
   if (isElectron()) return []
+  const device = getSharedContext()
+  if (device) return (await getAllRejected()).filter((r) => r.shared_device_id === device.id)
   return splitByAccount(await getAllRejected(), currentAccountKey()).mine
 }
 
@@ -58,6 +61,11 @@ export async function getRejected() {
 export async function getLogoutBlockers() {
   if (isElectron()) return { pending: 0, unreported: 0, total: 0 }
   const [queue, rejected] = await Promise.all([getQueue(), getAllRejected()])
+  const device = getSharedContext()
+  if (device) {
+    const unreported = rejected.filter((r) => r.shared_device_id === device.id && !r.reported && !r.report_failed).length
+    return { pending: 0, unreported, total: unreported }
+  }
   return logoutBlockers(queue, rejected, currentAccountKey())
 }
 
@@ -65,6 +73,8 @@ async function snapshot() {
   if (isElectron()) return { pending: 0, rejected: [], otherAccounts: 0 }
   const [queue, rejected] = await Promise.all([getQueue(), getAllRejected()])
   const key = currentAccountKey()
+  const device = getSharedContext()
+  if (device) return { pending: 0, rejected: rejected.filter((r) => r.shared_device_id === device.id), otherAccounts: queue.length + rejected.filter((r) => r.shared_device_id !== device.id && !r.reported).length }
   const ownQueue = splitByAccount(queue, key)
   const ownRejected = splitByAccount(rejected, key)
   return {
@@ -112,13 +122,17 @@ const markRejected = (clientSaleId, changes) =>
  * Avisa al servidor de las ventas rechazadas que todavía no se reportaron.
  * Sin red se detiene y lo reintenta en el próximo intento.
  */
-async function reportRejected(accountKey) {
-  const rejected = splitByAccount(await getAllRejected(), accountKey).mine
+async function reportRejected(accountKey, device = null) {
+  const all = await getAllRejected()
+  const rejected = device ? all.filter((r) => r.shared_device_id === device.id) : splitByAccount(all, accountKey).mine
   for (const sale of rejected.filter((r) => !r.reported)) {
+    const credential = device ? getSharedCredential(sale.account_key) : null
+    if (device && !credential) return
     let res
     try {
       res = await apiFetch('/api/sales/rejected', {
         method: 'POST', preserveSession: true,
+        ...(credential ? { token: credential.token } : {}),
         body: JSON.stringify({
           client_sale_id: sale.client_sale_id,
           items: sale.items,
@@ -143,7 +157,7 @@ async function reportRejected(accountKey) {
       } else {
         await markRejected(sale.client_sale_id, { reported: true, report_failed: false })
       }
-    } else if (res.status === 401 || res.status >= 500) {
+    } else if (res.status === 401 || (device && res.status === 403) || res.status >= 500) {
       return // sesión vencida o servidor caído: se reintenta después
     } else {
       // Otro 4xx: el servidor no acepta el aviso y reintentar no lo arregla.
@@ -165,6 +179,8 @@ export async function flushQueue() {
   flushing = true
   try {
     const accountKey = currentAccountKey()
+    const device = getSharedContext()
+    if (device) { await reportRejected(accountKey, device); return }
     const queue = splitByAccount(await getQueue(), accountKey).mine
     for (const sale of queue) {
       // Si la sesión cambió a mitad de la subida, lo que queda ya no es de esta cuenta.

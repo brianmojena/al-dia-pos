@@ -8,8 +8,8 @@ const { startTestServer, registerUser, createProduct } = require('./helpers');
  * el catálogo a medias.
  */
 
-const importar = (api, token, items) =>
-  api('POST', '/api/products/import', { token, body: { items } });
+const importar = (api, token, items, stockMode) =>
+  api('POST', '/api/products/import', { token, body: { items, ...(stockMode ? { stock_mode: stockMode } : {}) } });
 
 const catalogo = async (api, token) =>
   (await api('GET', '/api/products', { token })).body;
@@ -148,7 +148,7 @@ test('importación masiva de productos', async (t) => {
     assert.equal((await catalogo(ctx.api, token)).length, 500);
   });
 
-  await t.test('POST /api/products/import crea filas en stock_entries con kind "importacion"', async () => {
+  await t.test('la importación distingue reemplazar (corrección) de sumar (recepción)', async () => {
     const token = await registerUser(ctx.api);
     const me = await ctx.api('GET', '/api/auth/me', { token });
     const userId = me.body.user.id;
@@ -166,17 +166,30 @@ test('importación masiva de productos', async (t) => {
 
     assert.deepEqual(res.body, { created: 1, updated: 1, total: 2 });
 
-    // Check stock entries for Arroz (updated)
+    // Reemplazar el stock de Arroz es un ajuste, no mercancía que llegó.
     const arrozEntries = await ctx.db.execute({
       sql: 'SELECT * FROM stock_entries WHERE product_id = ? ORDER BY created_at',
       args: [arrozId],
     });
 
-    const importacionEntry = arrozEntries.rows.find((e) => e.kind === 'importacion');
-    assert.ok(importacionEntry, 'Arroz tiene una entrada de stock (importación)');
-    assert.equal(importacionEntry.stock_before, 50);
-    assert.equal(importacionEntry.stock_after, 70);
-    assert.equal(importacionEntry.quantity, 20);
+    const ajuste = arrozEntries.rows.find((e) => e.kind === 'correccion');
+    assert.ok(ajuste, 'reemplazar el stock de Arroz se registra como corrección');
+    assert.equal(ajuste.reason, 'Importación: reemplazo de stock');
+    assert.equal(ajuste.stock_before, 50);
+    assert.equal(ajuste.stock_after, 70);
+    assert.equal(ajuste.quantity, 20);
+    assert.equal(arrozEntries.rows.filter((e) => e.kind === 'importacion').length, 0, 'un reemplazo no es una entrada');
+
+    // Sumar la misma lista sí es recepción: queda como 'importacion'.
+    const sumado = await importar(ctx.api, token, [{ name: 'Arroz', sale_price: 130, purchase_price: 90, stock: 5 }], 'sumar');
+    assert.deepEqual(sumado.body, { created: 0, updated: 1, total: 1 });
+    const suma = (await ctx.db.execute({
+      sql: "SELECT * FROM stock_entries WHERE product_id = ? AND kind = 'importacion'",
+      args: [arrozId],
+    })).rows;
+    assert.equal(suma.length, 1, 'sumar al stock registra una entrada de mercancía');
+    assert.equal(suma[0].stock_before, 70);
+    assert.equal(suma[0].stock_after, 75);
 
     // Check stock entries for Pan (new product)
     const productos2 = await catalogo(ctx.api, token);

@@ -12,18 +12,43 @@ export const businessDate = (value = new Date()) => {
 }
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
 const round = (n) => Math.round(n * 100) / 100
-export const registerFor = (account) => `web:${account.split(':')[1]}`
+export const registerFor = (account, device = null) => device ? `shared:${device.id}${device.continuous ? '' : `:${account.split(':')[1]}`}` : `web:${account.split(':')[1]}`
 const newest = (rows, field) => [...rows].sort((a, b) => (parseServerDate(b[field])?.getTime() || 0) - (parseServerDate(a[field])?.getTime() || 0))
 const upsert = (rows, row, clientKey) => {
   const index = rows.findIndex((r) => r.id === row.id || (clientKey && row[clientKey] && r[clientKey] === row[clientKey]))
   if (index < 0) rows.push(row)
   else rows[index] = { ...rows[index], ...row }
 }
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000
+/** Mercancía recibida hoy en esta caja (alta con stock o "añadir stock"), por
+ * día y producto. Se guarda en `data.local_entries` para que "Entradas" sea
+ * correcta sin conexión y para que sobreviva al acknowledge; el snapshot del
+ * servidor reemplaza la base y trae la cifra ya confirmada, sin duplicar. */
+function addLocalEntry(data, productId, quantity, at) {
+  const qty = Number(quantity)
+  const id = Number(productId)
+  if (!(qty > 0) || !Number.isFinite(id)) return
+  const date = businessDate(at || new Date().toISOString())
+  if (!date) return
+  data.local_entries ||= {}
+  const day = (data.local_entries[date] ||= {})
+  day[id] = round3((Number(day[id]) || 0) + qty)
+}
 export function applyOperation(data, op, result = op.result) {
   if (op.kind === 'product') {
     if (op.method === 'DELETE') data.products = data.products.filter((p) => p.id !== op.productId)
-    // Copia: las ventas siguientes mutan el stock y no deben alterar el resultado guardado en la operación.
-    else upsert(data.products, structuredClone(result))
+    else {
+      // Copia: las ventas siguientes mutan el stock y no deben alterar el resultado guardado en la operación.
+      const row = structuredClone(result)
+      upsert(data.products, row)
+      const tracked = !row.unit || Number(row.track_stock ?? 1) === 1
+      // Un alta nace con su stock y un "añadir stock" suma mercancía; ambas son
+      // entradas del día. Una corrección (stock a mano) no es mercancía recibida.
+      // Si el servidor la fusionó con un producto existente (merged), su stock
+      // ya estaba allá y no es una entrada nueva.
+      if (tracked && op.method === 'POST' && result.merged !== true) addLocalEntry(data, row.id, row.stock, op.queued_at || row.created_at)
+      else if (tracked && op.method === 'PUT' && op.body?.add_stock != null) addLocalEntry(data, row.id, op.body.add_stock, op.queued_at)
+    }
   } else if (op.kind === 'sale') {
     // A replay of an already downloaded sale must not subtract stock twice.
     if (!data.sales.some((s) => s.client_sale_id === op.body.client_sale_id)) {
@@ -112,16 +137,16 @@ const productById = (data, id) => {
   return p
 }
 export function openSales(data, account, wholeShop = false) {
-  return data.sales.filter((s) => s.cash_close_id == null && (wholeShop || !s.register_id || s.register_id === registerFor(account)))
+  return data.sales.filter((s) => s.cash_close_id == null && (wholeShop || (!data.shared_device && !s.register_id) || s.register_id === registerFor(account, data.shared_device)))
 }
 export function openPurchases(data, account, wholeShop = false) {
-  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (wholeShop || !p.register_id || p.register_id === registerFor(account)))
+  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (wholeShop || (!data.shared_device && !p.register_id) || p.register_id === registerFor(account, data.shared_device)))
 }
 export function prepareOperation(data, method, path, body, ctx) {
   const owner = ctx.user.role !== 'cajero'
   const now = ctx.now || new Date().toISOString()
   const meta = { account_email: ctx.user.email, account_id: Number(ctx.account.split(':')[1]) }
-  const op = { id: ctx.newId(), method, path, body: structuredClone(body), queued_at: now, result: {} }
+  const op = { account_key: ctx.account, id: ctx.newId(), method, path, body: structuredClone(body), queued_at: now, result: {} }
   if (path === '/api/products' || /^\/api\/products\/-?\d+$/.test(path)) {
     assert(owner || method === 'POST' || (method === 'PUT' && Object.keys(body).every((key) => key === 'sale_price' || key === 'add_stock')), 'Solo el dueño puede cambiar otros datos o borrar productos')
     if (method === 'PUT' && 'sale_price' in body) assert(body.sale_price != null && body.sale_price !== '' && number(body.sale_price), 'El precio de venta no es válido')
@@ -224,8 +249,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     const split = paymentSplit({ ...op.body, total })
     assert(ctx.user.transfer_limit == null || split.transfer <= Number(ctx.user.transfer_limit), 'Transferencia por encima del límite')
     op.body.sold_at = now
-    op.body.register_id = 'web'
-    op.result = { ...op.body, ...meta, id: ctx.localId(), items, total, profit: round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price - i.unit_cost), 0)), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+    op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), items, total, profit: round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price - i.unit_cost), 0)), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, pending: true }
   } else if (path === '/api/currency-purchases') {
     op.kind = 'purchase'
     op.body.client_purchase_id ||= ctx.newId()
@@ -240,8 +265,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.shop_rate = body.shop_rate == null ? null : Number(body.shop_rate)
     delete op.body.cup_amount
     op.body.sold_at = now
-    op.body.register_id = 'web'
-    op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+    op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, pending: true }
   } else if (path === '/api/cash-withdrawals') {
     assert(owner, 'Solo el dueño puede extraer dinero')
     op.kind = 'withdrawal'
@@ -253,8 +278,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.amount = fields.amount
     op.body.note = fields.note
     op.body.withdrawn_at = now
-    op.body.register_id = 'web'
-    op.result = { ...op.body, ...meta, id: ctx.localId(), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, voided_at: null, pending: true }
+    op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, voided_at: null, pending: true }
   } else if (/^\/api\/cash-withdrawals\/[\w-]+\/void$/.test(path)) {
     assert(owner, 'Solo el dueño puede anular extracciones')
     op.kind = 'withdrawal_void'
@@ -307,7 +332,7 @@ export function prepareOperation(data, method, path, body, ctx) {
       delete op.body.covered_purchase_ids
     }
     op.body.closed_at = now
-    op.body.register_id = 'web'
+    op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
     const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0) + coveredWithdrawals.reduce((n, w) => n + withdrawalSplit(w)[key], 0))
     const cash = sumOf('cash') + Number(body.opening_float || 0)
     const usd = sumOf('usd'), eur = sumOf('eur'), transfer = sumOf('transfer')
@@ -316,7 +341,7 @@ export function prepareOperation(data, method, path, body, ctx) {
     const withdrawnTransfer = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'transferencia' ? w.amount : 0), 0))
     const withdrawnUsd = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'USD' ? w.amount : 0), 0))
     const withdrawnEur = round(coveredWithdrawals.reduce((n, w) => n + (w.method === 'EUR' ? w.amount : 0), 0))
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || coveredWithdrawals[0]?.created_at || now, expected_cash: cash, expected_transfer: transfer, difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), withdrawn_cash: withdrawnCash, withdrawn_transfer: withdrawnTransfer, withdrawn_usd: withdrawnUsd, withdrawn_eur: withdrawnEur, sales_count: covered.length, pending: true, coverage_incomplete: !op.coverageComplete }
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account, data.shared_device), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || coveredWithdrawals[0]?.created_at || now, expected_cash: cash, expected_transfer: transfer, difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), withdrawn_cash: withdrawnCash, withdrawn_transfer: withdrawnTransfer, withdrawn_usd: withdrawnUsd, withdrawn_eur: withdrawnEur, sales_count: covered.length, pending: true, coverage_incomplete: !op.coverageComplete }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -389,8 +414,10 @@ export function readLocal(data, path, account, user) {
   if (route === '/api/cash-closes/current') {
     const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)]
     const withdrawals = (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)
-    const prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
-    return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || withdrawals[0]?.created_at || null, has_sales: sales.length > 0 || withdrawals.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
+    const prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account, data.shared_device)), 'closed_at')[0]
+    const register = registerFor(account, data.shared_device)
+    const period = data.current_periods?.[register] || (!data.shared_device || data.current_period?.register_id === register ? data.current_period : null)
+    return { opened_at: prior?.closed_at || period?.opened_at || sales[0]?.created_at || withdrawals[0]?.created_at || null, has_sales: sales.length > 0 || withdrawals.length > 0 || (!prior && !!period?.has_sales), is_first_close: !prior && (period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/products/day-stock') return dailyStockFor(data, businessDate())
@@ -408,8 +435,9 @@ export function readLocal(data, path, account, user) {
     const summary = new Map()
     for (const c of data.cash_closes) {
       if (c.pending || c.coverage_incomplete) continue
-      const key = `${c.account_id}:${c.account_email}`
-      if (!summary.has(key)) summary.set(key, { account_id: c.account_id, account_email: c.account_email, closes: 0, total_difference: 0, worst_difference: 0, times_short: 0, total_difference_usd: 0, total_difference_eur: 0 })
+      const shared = /^shared:[^:]+$/.test(c.register_id || '')
+      const key = shared ? c.register_id : `${c.account_id}:${c.account_email}`
+      if (!summary.has(key)) summary.set(key, { account_id: shared ? null : c.account_id, account_email: shared ? null : c.account_email, ...(shared ? { attribution: 'register', register_id: c.register_id, register_name: 'Caja compartida' } : {}), closes: 0, total_difference: 0, worst_difference: 0, times_short: 0, total_difference_usd: 0, total_difference_eur: 0 })
       const s = summary.get(key); s.closes++; s.total_difference += Number(c.difference); s.worst_difference = Math.min(s.worst_difference, c.difference); s.times_short += c.difference < -0.5 ? 1 : 0
       s.total_difference_usd = round(s.total_difference_usd + Number(c.difference_usd || 0)); s.total_difference_eur = round(s.total_difference_eur + Number(c.difference_eur || 0))
     }

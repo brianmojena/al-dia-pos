@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import OfflineStatus from './OfflineStatus'
 import { localSyncStatus, retrySync } from '../lib/offlineClient.js'
 import { isElectron } from '../lib/network.js'
 import SyncStatus from './SyncStatus'
+import { planLabel } from '../lib/plans'
+import { getSharedContext, getSharedMembers } from '../lib/sharedDevice.js'
 
 // ownerOnly no es solo cosmética: el servidor devuelve 403 en esas rutas para
 // un cajero (ver middleware/auth.js). Ocultarlas evita que la caja muestre
@@ -21,15 +23,24 @@ const navItems = [
   { to: '/products',  icon: Package,         label: 'Productos'                    },
   { to: '/almacen',   icon: Warehouse,       label: 'Almacén',   warehouse: true   },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial'                    },
+  // Panel de administración: confirmar tiendas nuevas (ver pages/Admin.jsx).
+  // Solo existe para la cuenta de administración (is_admin del servidor).
+  { to: '/admin',     icon: ShieldCheck,     label: 'Admin',     adminOnly: true   },
 ]
 
 export default function Layout() {
-  const { user, logout } = useAuth()
+  const { user, logout, lockShared, switchCashier } = useAuth()
+  const shared = getSharedContext()
+  const activeName = shared && (getSharedMembers().find((c) => Number(c.id) === Number(user?.id))?.display_name || user?.email)
+  const [handoverError, setHandoverError] = useState('')
+  const sharedAction = async (action) => { setHandoverError(''); try { await action() } catch (e) { setHandoverError(e.message) } }
   const navigate = useNavigate()
   const isOwner = user?.role !== 'cajero'
   // Una tienda puede tener el almacén apagado (users.warehouse_enabled en el servidor).
   const visibleNav = navItems.filter(item =>
-    (isOwner || !item.ownerOnly) && !(item.warehouse && user?.warehouse_enabled === false))
+    (isOwner || !item.ownerOnly)
+    && (!item.adminOnly || user?.is_admin)
+    && !(item.warehouse && user?.warehouse_enabled === false))
 
   // Cerrar sesión con ventas sin subir no las borra, pero las deja esperando
   // hasta que ESTA cuenta vuelva a entrar en este teléfono — y mientras, el
@@ -90,21 +101,34 @@ export default function Layout() {
           // Para un cajero, saber en qué cuenta está abierta la caja importa
           // más que el plan del negocio.
           <span className={`hidden sm:inline text-[11px] font-semibold px-2.5 py-1 rounded-full ${
-            !isOwner              ? 'bg-gray-200 text-gray-600'
-            : user.plan === 'premium' ? 'bg-blue-100 text-blue-700'
-                                      : 'bg-purple-100 text-purple-700'
+            !isOwner                    ? 'bg-gray-200 text-gray-600'
+            : user.plan === 'enterprise' ? 'bg-purple-100 text-purple-700'
+                                         : 'bg-blue-100 text-blue-700'
           }`}>
-            {!isOwner ? 'Cajero' : user.plan === 'premium' ? 'Premium' : 'Plan Dev'}
+            {!isOwner ? 'Cajero' : `Plan ${planLabel(user.plan)}`}
           </span>
         )}
-        <button
+        {user && isOwner && user.plan_status === 'pending' && user.trial_days_left != null && (
+          // Recordatorio de la prueba gratuita mientras administración no confirme.
+          <span className="hidden sm:inline text-[11px] font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-700">
+            Prueba · {user.trial_days_left} {user.trial_days_left === 1 ? 'día' : 'días'}
+          </span>
+        )}
+        {!shared && <button
           onClick={handleLogout}
           title="Cerrar sesión"
           className="p-2 rounded-xl hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
         >
           <LogOut size={18} />
-        </button>
+        </button>}
       </header>
+
+      {shared && <div className="bg-white border-b border-gray-200 px-4 py-3 flex flex-wrap items-center gap-2">
+        <div className="flex-1 min-w-0"><p className="text-sm font-semibold text-gray-900 truncate">Atendiendo: {activeName}</p><p className="text-xs text-gray-500 truncate">{shared.name} · {shared.continuous ? 'Caja continua' : 'Caja por turno'}</p></div>
+        <button onClick={() => sharedAction(switchCashier)} className="text-xs font-semibold bg-blue-50 text-[#007AFF] rounded-xl px-3 py-2.5">Cambiar cajero</button>
+        <button onClick={() => sharedAction(lockShared)} className="text-xs font-semibold bg-gray-100 text-gray-600 rounded-xl px-3 py-2.5">Bloquear</button>
+        {handoverError && <p role="alert" className="basis-full text-xs text-red-700 bg-red-50 rounded-xl p-2">{handoverError}</p>}
+      </div>}
 
       <OfflineStatus />
       <div className="flex flex-1 overflow-hidden">
@@ -130,7 +154,7 @@ export default function Layout() {
 
         {/* Page content */}
         <main className="flex-1 overflow-auto">
-          <Outlet />
+          <Outlet key={user?.id} />
         </main>
       </div>
 

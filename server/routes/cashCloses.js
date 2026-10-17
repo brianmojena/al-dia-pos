@@ -215,17 +215,23 @@ const openWithdrawals = async (executor, userId) => {
 // cualquier caja y cajero. Los cajeros siguen cerrando solo la suya.
 const closesWholeShop = (req) => req.role === OWNER;
 
+const sharedOpenRows = async (executor, table, req) => (await executor.execute({
+  sql: `SELECT * FROM ${table} WHERE user_id = ? AND register_id = ? AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`,
+  args: [req.userId, resolveRegisterId(req, 'web')],
+})).rows;
+
 const modeFor = (req, clientSaleIds, requestedRegisterId) => {
+  if (req.sharedDevice) return 'web';
   if (Array.isArray(clientSaleIds)) return 'desktop';
   return requestedRegisterId != null && resolveRegisterId(req, requestedRegisterId) ? 'web' : 'legacy';
 };
 
 const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const registerId = resolveRegisterId(req, requestedRegisterId);
-  const mode = requestedRegisterId != null && registerId ? 'web' : 'legacy';
+  const mode = req.sharedDevice || (requestedRegisterId != null && registerId) ? 'web' : 'legacy';
   const cashierAccountId = req.role === OWNER ? null : req.accountId;
-  const sales = await openSales(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
-  const purchases = await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
+  const sales = req.sharedDevice ? await sharedOpenRows(executor, 'sales', req) : await openSales(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
+  const purchases = req.sharedDevice ? await sharedOpenRows(executor, 'currency_purchases', req) : await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
   // Las extracciones siempre son de toda la tienda, independiente de la caja.
   const withdrawals = await openWithdrawals(executor, req.userId);
 
@@ -292,11 +298,22 @@ router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
             MAX(closed_at)                  AS last_close_at
           FROM cash_closes
           WHERE user_id = ?
+            AND (register_id IS NULL OR register_id NOT LIKE 'shared:%' OR instr(substr(register_id, 8), ':') > 0)
           GROUP BY account_id, account_email
           ORDER BY total_difference ASC`,
     args: [req.userId],
   });
-  res.json(result.rows);
+  const shared = await getDb().execute({
+    sql: `SELECT NULL AS account_id, NULL AS account_email, c.register_id, d.name AS register_name,
+            'register' AS attribution, COUNT(*) AS closes, COALESCE(SUM(c.difference), 0) AS total_difference,
+            COALESCE(MIN(c.difference), 0) AS worst_difference, SUM(CASE WHEN c.difference < -0.5 THEN 1 ELSE 0 END) AS times_short,
+            COALESCE(SUM(c.difference_usd), 0) AS total_difference_usd, COALESCE(SUM(c.difference_eur), 0) AS total_difference_eur,
+            MAX(c.closed_at) AS last_close_at
+          FROM cash_closes c LEFT JOIN shared_devices d ON c.register_id = 'shared:' || d.id
+          WHERE c.user_id = ? AND c.register_id LIKE 'shared:%' AND instr(substr(c.register_id, 8), ':') = 0 GROUP BY c.register_id`,
+    args: [req.userId],
+  });
+  res.json([...result.rows, ...shared.rows].sort((a, b) => Number(a.total_difference) - Number(b.total_difference)));
 }));
 
 // Describe el período que está por cerrarse — y NADA MÁS que eso.
@@ -389,6 +406,7 @@ router.post('/', asyncHandler(async (req, res) => {
   if (client_close_id) {
     const existing = await findByClientCloseId(db, req.userId, client_close_id);
     if (existing.rows[0]) {
+      if (req.sharedDevice && (existing.rows[0].register_id !== resolveRegisterId(req, 'web') || Number(existing.rows[0].account_id) !== Number(req.accountId))) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cajero' });
       return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
     }
   }
@@ -420,7 +438,7 @@ router.post('/', asyncHandler(async (req, res) => {
       return [...own, ...wholeShopRows.filter((row) => !seen.has(Number(row.id)))]
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || a.id - b.id);
     };
-    let covered = mode === 'desktop'
+    let covered = req.sharedDevice ? await sharedOpenRows(tx, 'sales', req) : mode === 'desktop'
       ? await withWholeShop(await salesByClientIds(tx, req.userId, client_sale_ids, req.role === OWNER ? null : req.accountId), await openSales(tx, req.userId, 'web', null, true))
       : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitIds) {
@@ -438,7 +456,7 @@ router.post('/', asyncHandler(async (req, res) => {
       await tx.rollback();
       return res.status(400).json({ error: 'Compras del cierre inválidas' });
     }
-    let coveredPurchases = mode === 'desktop'
+    let coveredPurchases = req.sharedDevice ? await sharedOpenRows(tx, 'currency_purchases', req) : mode === 'desktop'
       ? await withWholeShop(await purchasesByClientIds(tx, req.userId, client_purchase_ids || [], req.role === OWNER ? null : req.accountId), await openPurchases(tx, req.userId, 'web', null, true))
       : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitPurchaseIds) {
@@ -557,6 +575,7 @@ router.post('/', asyncHandler(async (req, res) => {
     if (client_close_id && isUniqueViolation(err)) {
       const existing = await findByClientCloseId(db, req.userId, client_close_id);
       if (existing.rows[0]) {
+        if (req.sharedDevice && (existing.rows[0].register_id !== resolveRegisterId(req, 'web') || Number(existing.rows[0].account_id) !== Number(req.accountId))) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cajero' });
         return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
       }
     }

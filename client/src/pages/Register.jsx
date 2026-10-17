@@ -1,26 +1,32 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, Lock, Store, AlertCircle, Check, Sparkles, FlaskConical } from 'lucide-react'
+import { Mail, Lock, Store, AlertCircle, Check, Sparkles } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
+// El cobro no tiene pasarela: se paga en persona. El Plan Enterprise incluye
+// la app de monitorización del jefe y hasta 2 sucursales.
 const PLANS = [
   {
-    id: 'premium',
-    icon: Sparkles,
-    title: 'Plan Premium',
-    price: '$5 USD',
+    id: 'basic',
+    icon: Store,
+    title: 'Plan Basic',
+    price: '$10 USD',
     priceNote: '/mes',
-    tag: 'Simulado — sin cobro real',
-    features: ['Acceso completo a la app', 'Soporte prioritario', 'Ideal para tu negocio en marcha'],
+    tag: 'Pago físico (en persona)',
+    features: ['Hasta 5 usuarios simultáneos', 'Todas las funciones de la app'],
   },
   {
-    id: 'dev',
-    icon: FlaskConical,
-    title: 'Plan Dev',
-    price: 'Gratis',
-    priceNote: 'modo prueba',
-    tag: 'Para probar el prototipo',
-    features: ['Acceso completo mientras se desarrolla', 'Sin costo', 'Pensado para testers'],
+    id: 'enterprise',
+    icon: Sparkles,
+    title: 'Plan Enterprise',
+    price: '$15 USD',
+    priceNote: '/mes',
+    tag: 'Pago físico (en persona)',
+    features: [
+      'Hasta 10 usuarios simultáneos',
+      'App de monitorización para el jefe',
+      'Gestión de hasta 2 sucursales',
+    ],
   },
 ]
 
@@ -31,7 +37,7 @@ export default function Register() {
   const [email,      setEmail]      = useState('')
   const [password,   setPassword]   = useState('')
   const [confirm,    setConfirm]    = useState('')
-  const [plan,       setPlan]       = useState('premium')
+  const [plan,       setPlan]       = useState('basic')
   const [error,      setError]      = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -49,7 +55,9 @@ export default function Register() {
     setSubmitting(true)
     try {
       await register({ email, password, store_name: storeName, plan })
-      navigate('/pos')
+      // Al cartel de bienvenida (prueba de 7 días + plan pendiente de
+      // confirmación), no directo a la app.
+      navigate('/bienvenida')
     } catch (err) {
       setError(err.message)
     } finally {
