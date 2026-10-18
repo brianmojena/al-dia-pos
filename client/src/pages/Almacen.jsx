@@ -14,6 +14,24 @@ const EMPTY = { name: '', cost: '', quantity: '', unit: '' }
 const labelCls = 'text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block'
 const inputCls = 'w-full border border-gray-200 rounded-xl px-4 py-3 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors'
 
+// Estos componentes van fuera del componente para que React no los remonte en
+// cada render: si se definen dentro, el modal se desmonta al escribir y el
+// campo pierde el foco tras cada letra.
+const ErrorBox = ({ message }) => message ? (
+  <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium"><AlertTriangle size={16} className="flex-shrink-0 mt-0.5" /><span>{message}</span></div>
+) : null
+const Modal = ({ title, onClose, children }) => (
+  <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
+    <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-auto">
+      <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
+        <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+        <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-xl"><X size={20} className="text-gray-500" /></button>
+      </div>
+      {children}
+    </div>
+  </div>
+)
+
 // Almacén: mercancía guardada aparte de la tienda. Solo tiene costo y cantidad.
 // Todas las cuentas dan de alta, editan, importan, borran y transfieren; el
 // servidor deja quién lo hizo y solo la cuenta principal ve el historial.
@@ -157,20 +175,6 @@ export default function Almacen() {
   if (loading) return <div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" /></div>
 
   const field = (key) => ({ value: form[key], onChange: (e) => setForm((f) => ({ ...f, [key]: e.target.value })), className: inputCls })
-  const ErrorBox = () => formError ? (
-    <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium"><AlertTriangle size={16} className="flex-shrink-0 mt-0.5" /><span>{formError}</span></div>
-  ) : null
-  const Modal = ({ title, onClose, children }) => (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-auto">
-        <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-xl"><X size={20} className="text-gray-500" /></button>
-        </div>
-        {children}
-      </div>
-    </div>
-  )
 
   return (
     <div className="p-4 sm:p-6 max-w-4xl mx-auto">
@@ -245,7 +249,7 @@ export default function Almacen() {
             ) : (
               <div><label className={labelCls}>Cantidad inicial</label><input type="number" min="0" step={form.unit ? 'any' : '1'} placeholder="0" {...field('quantity')} /></div>
             )}
-            <ErrorBox />
+            <ErrorBox message={formError} />
             <button type="submit" disabled={saving} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Guardando...' : 'Guardar'}</button>
           </form>
         </Modal>
@@ -266,7 +270,7 @@ export default function Almacen() {
                   <input required type="number" min="0" step="0.01" placeholder="Este producto aún no está en la tienda" className={inputCls} value={transfer.sale_price} onChange={(e) => setTransfer((t) => ({ ...t, sale_price: e.target.value }))} />
                   <p className="text-xs text-gray-400 mt-1.5"><PackagePlus size={12} className="inline mr-1" />Se creará en la tienda con costo {fmt(transfer.item.cost)}.</p></div>
               )}
-              <ErrorBox />
+              <ErrorBox message={formError} />
               <button type="submit" disabled={saving} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Transfiriendo...' : 'Transferir'}</button>
             </form>
           </Modal>
@@ -316,7 +320,7 @@ export default function Almacen() {
                   ) : (
                     <p className="text-xs text-gray-500">Se creará en el almacén con costo {fmt(selected.purchase_price)}.</p>
                   )}
-                  <ErrorBox />
+                  <ErrorBox message={formError} />
                   <button type="submit" disabled={saving || (existingWh && existingWh.unit !== selected.unit)} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Pasando...' : 'Pasar'}</button>
                 </>
               )}
@@ -334,7 +338,7 @@ export default function Almacen() {
                 <input autoFocus required type="number" min="0" step={addQty.item.unit ? 'any' : '1'} placeholder="0" className={inputCls} value={addQty.quantity} onChange={(e) => setAddQty((aq) => ({ ...aq, quantity: e.target.value }))} /></div>
               <div><label className={labelCls}>Costo{addQty.item.unit ? ` por ${addQty.item.unit}` : ''}</label>
                 <input type="number" min="0" step="0.01" placeholder="0.00" className={inputCls} value={addQty.cost} onChange={(e) => setAddQty((aq) => ({ ...aq, cost: e.target.value }))} /></div>
-              <ErrorBox />
+              <ErrorBox message={formError} />
               <button type="submit" disabled={saving} className="w-full bg-[#007AFF] text-white py-3.5 rounded-xl font-semibold disabled:opacity-50">{saving ? 'Añadiendo...' : 'Añadir'}</button>
             </form>
           </Modal>
