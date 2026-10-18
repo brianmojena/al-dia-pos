@@ -17,6 +17,9 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/auth', authRouter);
+// Activación remota de una caja compartida: el código de un solo uso es la
+// credencial (lo dicta el administrador), por eso va sin requireAuth.
+app.use('/api/shared', require('./routes/sharedEnroll'));
 
 // Confirmación de tiendas desde el panel del administrador (ver routes/admin.js;
 // el correo se comprueba contra ADMIN_EMAILS en config).

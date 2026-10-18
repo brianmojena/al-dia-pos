@@ -281,4 +281,62 @@ test('caja compartida (shared device) — servidor', async (t) => {
     assert.equal(normal.status, 201);
     assert.equal(normal.body.register_id, `web:${Number(shop.owner.id)}`);
   });
+
+  // PIN ya cifrado por el navegador del administrador (PBKDF2): 16 bytes de sal
+  // y 32 de hash en hex. El servidor nunca ve el PIN en claro.
+  const encryptedPin = () => ({ salt: 'ab'.repeat(16), hash: 'cd'.repeat(32), iterations: 210000 });
+
+  await t.test('activación remota: el código de un solo uso entrega el PIN ya cifrado', async () => {
+    const shop = await makeShop();
+    const pin = encryptedPin();
+    const created = await ctx.api('POST', '/api/admin/shared-devices', {
+      token: await admin(),
+      body: { owner_id: shop.ownerId, name: 'Remota', continuous: true, enroll: true, cashiers: [{ id: Number(shop.owner.id), display_name: 'Ana', pin }] },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.match(created.body.code, /^[0-9A-Z]{12}$/);
+    assert.ok(Date.parse(created.body.code_expires_at) - Date.now() > 25 * 60 * 1000, 'el código dura unos 30 minutos');
+    assert.ok(!('cashiers' in created.body), 'el código no devuelve los accesos directamente');
+
+    // El aparato destino no tiene sesión: el código es la única credencial.
+    const redeemed = await ctx.api('POST', '/api/shared', { body: { code: created.body.code } });
+    assert.equal(redeemed.status, 200, JSON.stringify(redeemed.body));
+    assert.equal(redeemed.body.device.id, created.body.device.id);
+    assert.equal(redeemed.body.cashiers.length, 1);
+    assert.deepEqual(redeemed.body.cashiers[0].pin, pin, 'devuelve el PIN cifrado para instalar sin teclearlo');
+    assert.equal((await sell(redeemed.body.cashiers[0].token, { client_sale_id: `remote-${suffix()}`, items: item(shop.productId) })).status, 201);
+
+    // El mismo código no vuelve a servir.
+    assert.equal((await ctx.api('POST', '/api/shared', { body: { code: created.body.code } })).status, 404);
+    assert.equal((await ctx.api('POST', '/api/shared', { body: { code: 'ZZZZZZZZZZZZ' } })).status, 404);
+    assert.equal((await ctx.api('POST', '/api/shared', { body: {} })).status, 400);
+
+    // Activar una caja nueva retira la anterior de la misma tienda.
+    const again = await ctx.api('POST', '/api/admin/shared-devices', {
+      token: await admin(),
+      body: { owner_id: shop.ownerId, name: 'Remota 2', continuous: true, enroll: true, cashiers: [{ id: Number(shop.owner.id), display_name: 'Ana', pin }] },
+    });
+    assert.equal(again.status, 201);
+    assert.equal((await ctx.api('GET', '/api/auth/shared-device', { token: redeemed.body.cashiers[0].token })).status, 403);
+    assert.equal((await ctx.api('POST', '/api/shared', { body: { code: again.body.code } })).status, 200);
+  });
+
+  await t.test('el código de activación caduca', async () => {
+    const shop = await makeShop();
+    const created = await ctx.api('POST', '/api/admin/shared-devices', {
+      token: await admin(),
+      body: { owner_id: shop.ownerId, name: 'Vencida', enroll: true, cashiers: [{ id: Number(shop.owner.id), display_name: 'Ana', pin: encryptedPin() }] },
+    });
+    await ctx.db.execute({ sql: 'UPDATE shared_devices SET enroll_expires_at = ? WHERE id = ?', args: [new Date(Date.now() - 1000).toISOString(), created.body.device.id] });
+    assert.equal((await ctx.api('POST', '/api/shared', { body: { code: created.body.code } })).status, 404);
+  });
+
+  await t.test('sin PIN cifrado válido no se genera código', async () => {
+    const shop = await makeShop();
+    const base = { owner_id: shop.ownerId, name: 'X', cashiers: [{ id: Number(shop.owner.id), display_name: 'Ana' }] };
+    assert.equal((await ctx.api('POST', '/api/admin/shared-devices', { token: await admin(), body: { ...base, enroll: true } })).status, 400);
+    assert.equal((await ctx.api('POST', '/api/admin/shared-devices', { token: await admin(), body: { ...base, enroll: 'sí' } })).status, 400);
+    const bad = { ...base, enroll: true, cashiers: [{ id: Number(shop.owner.id), display_name: 'Ana', pin: { salt: 'x', hash: 'y', iterations: 1 } }] };
+    assert.equal((await ctx.api('POST', '/api/admin/shared-devices', { token: await admin(), body: bad })).status, 400);
+  });
 });

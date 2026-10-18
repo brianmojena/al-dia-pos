@@ -5,6 +5,7 @@ import RequireOwner from './components/RequireOwner'
 import RequireWarehouse from './components/RequireWarehouse'
 import Login from './pages/Login'
 import SharedCashier from './pages/SharedCashier'
+import ActivateDevice from './pages/ActivateDevice'
 import Register from './pages/Register'
 import Bienvenida from './pages/Bienvenida'
 import Admin from './pages/Admin'
@@ -32,6 +33,7 @@ export default function App() {
       <Routes>
         <Route path="/login"    element={<Login />} />
         <Route path="/cajero" element={<SharedCashier />} />
+        <Route path="/activar" element={<ActivateDevice />} />
         <Route path="/register" element={<Register />} />
 
         <Route element={<RequireAuth />}>

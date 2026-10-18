@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, CheckCircle2, MonitorSmartphone, RefreshCw, ShieldCheck, Users } from 'lucide-react'
+import { AlertTriangle, Check, CheckCircle2, Copy, KeyRound, MonitorSmartphone, RefreshCw, ShieldCheck, Users } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
-import { installSharedDevice, getSharedDevice, refreshSharedEnrollment } from '../lib/sharedDevice.js'
+import { installSharedDevice, getSharedDevice, refreshSharedEnrollment, hashPin } from '../lib/sharedDevice.js'
 import { canReplaceSharedDevice } from '../lib/offlineClient.js'
 import { formatDateTime } from '../lib/dates'
 
 // Estado inicial de cada cajero candidato en el formulario.
 const blankMember = () => ({ selected: false, display_name: '', pin: '', confirm: '' })
 const isSixDigits = (value) => /^\d{6}$/.test(value)
+const prettyCode = (value) => (value.match(/.{1,4}/g) || []).join('-')
 
 /**
  * Configuración de una caja compartida para una tienda (solo administración).
@@ -38,6 +39,10 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
   const [notice,      setNotice]      = useState('')
   const [submitting,  setSubmitting]  = useState(false)
   const [renewing,    setRenewing]    = useState(false)
+  const [code,        setCode]        = useState('')
+  const [codeExpiry,  setCodeExpiry]  = useState('')
+  const [generating,  setGenerating]  = useState(false)
+  const [copied,      setCopied]      = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -120,6 +125,40 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // Activación remota: el administrador está en otro lugar y no puede instalar
+  // la caja en el aparato del negocio. En vez de eso cifra aquí los PIN, el
+  // servidor guarda un código de un solo uso y el aparato lo canjea en /activar
+  // sin que nadie teclee un PIN.
+  const generateCode = async () => {
+    setError('')
+    setNotice('')
+    setCode('')
+    setCopied(false)
+    const problem = validate()
+    if (problem) { setError(problem); return }
+    setGenerating(true)
+    try {
+      const cashiers = []
+      for (const c of selected) cashiers.push({ id: c.id, display_name: rows[c.id].display_name.trim(), pin: await hashPin(rows[c.id].pin) })
+      const res = await apiFetch('/api/admin/shared-devices', {
+        method: 'POST',
+        body: JSON.stringify({ owner_id: shop.id, name: name.trim(), continuous, cashiers, enroll: true }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'No se pudo generar el código de activación')
+      setCode(data.code)
+      setCodeExpiry(data.code_expires_at)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const copyCode = async () => {
+    try { await navigator.clipboard.writeText(code); setCopied(true) } catch { setCopied(false) }
   }
 
   const renew = async () => {
@@ -308,7 +347,8 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
                             />
                           </div>
                           <p className="text-[11px] text-gray-400">
-                            El PIN se guarda solo en este aparato; nunca se envía al servidor.
+                            El PIN nunca se envía en claro: se cifra aquí. Al instalar en este aparato se queda
+                            local; al generar un código solo viaja su cifrado.
                           </p>
                         </div>
                       )}
@@ -338,6 +378,42 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
               </button>
             )}
           </div>
+
+          <div className="rounded-2xl border border-blue-100 bg-white p-3">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">En otro aparato (a distancia)</p>
+            <button
+              onClick={generateCode}
+              disabled={generating || submitting || loading || cashiers.length === 0}
+              className="w-full flex items-center justify-center gap-1.5 bg-white border border-[#007AFF] text-[#007AFF] px-4 py-3 rounded-2xl font-bold hover:bg-blue-50 active:scale-95 transition-all disabled:opacity-50"
+            >
+              {generating ? <RefreshCw size={16} className="animate-spin" /> : <KeyRound size={16} />}
+              {generating ? 'Generando…' : 'Generar código para otro aparato'}
+            </button>
+            <p className="text-[11px] text-gray-400 mt-2">
+              Cifra los PIN aquí y devuelve un código de un solo uso. En el aparato del negocio abre
+              <span className="font-semibold text-gray-500"> /activar</span> e introduce ese código; ahí no hay que teclear ningún PIN.
+            </p>
+          </div>
+
+          {code && (
+            <div className="bg-white rounded-2xl border border-blue-200 p-4">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Código de activación</p>
+              <div className="flex items-center gap-2 mt-2">
+                <code className="flex-1 text-center text-xl sm:text-2xl font-bold tracking-widest text-gray-900 break-all">{prettyCode(code)}</code>
+                <button
+                  onClick={copyCode}
+                  aria-label="Copiar el código"
+                  className="flex items-center gap-1 bg-gray-100 text-gray-700 px-3 py-2 rounded-xl text-sm font-semibold hover:bg-gray-200 active:scale-95 transition-all"
+                >
+                  {copied ? <Check size={15} /> : <Copy size={15} />}
+                  {copied ? 'Copiado' : 'Copiar'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Válido hasta las {formatDateTime(codeExpiry)}. Solo se puede usar una vez: dicta el código al negocio antes de que venza.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

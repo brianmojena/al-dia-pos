@@ -15,7 +15,7 @@ globalThis.BroadcastChannel = undefined
 Object.defineProperty(globalThis, 'navigator', { value: { onLine: true }, configurable: true })
 const require = createRequire(import.meta.url)
 const { startTestServer, registerUser, createCashier, createProduct } = require('../../server/test/helpers.js')
-const { installSharedDevice, unlockSharedCashier, lockSharedDevice } = await import('../src/lib/sharedDevice.js')
+const { installSharedDevice, unlockSharedCashier, lockSharedDevice, hashPin } = await import('../src/lib/sharedDevice.js')
 const { apiFetch } = await import('../src/lib/api.js')
 const { syncOffline, localSyncStatus, sharedHandoverStatus, canReplaceSharedDevice } = await import('../src/lib/offlineClient.js')
 const read = async (path) => {
@@ -161,6 +161,36 @@ test('caja compartida: relevo offline, SQLite real y respuesta perdida', async (
     assert.notEqual(aSale.register_id, bSale.register_id)
     assert.equal((await read('/api/products'))[0].stock, 3)
     assert.equal((await canReplaceSharedDevice()).allowed, true)
+  })
+
+  await t.test('activar con un código remoto instala el PIN ya cifrado sin teclearlo', async () => {
+    navigator.onLine = true
+    assert.equal((await canReplaceSharedDevice()).allowed, true)
+    // El administrador cifra el PIN en su navegador y pide un código de un solo uso.
+    const created = await ctx.api('POST', '/api/admin/shared-devices', {
+      token: admin,
+      body: {
+        owner_id: ownerId, name: 'Tablet remota', continuous: true, enroll: true,
+        cashiers: [{ id: a.id, display_name: 'Ana', pin: await hashPin('123456') }],
+      },
+    })
+    assert.equal(created.status, 201, JSON.stringify(created.body))
+    assert.match(created.body.code, /^[0-9A-Z]{12}$/)
+
+    // El aparato destino canjea el código (sin sesión) e instala con el PIN cifrado.
+    const redeemed = await ctx.api('POST', '/api/shared', { body: { code: created.body.code } })
+    assert.equal(redeemed.status, 200, JSON.stringify(redeemed.body))
+    assert.ok(redeemed.body.cashiers[0].pin?.hash, 'el bundle trae el PIN cifrado')
+    await installSharedDevice(redeemed.body)
+    await unlockSharedCashier(a.id, '123456')
+    await syncOffline()
+    assert.equal((await localSyncStatus()).initialized, true)
+    const before = (await read('/api/products'))[0].stock
+    await write('/api/sales', sale('remote-1', 1))
+    assert.equal((await read('/api/products'))[0].stock, before - 1)
+    await syncOffline()
+    assert.equal((await localSyncStatus()).pending, 0, 'la venta remota se sube antes de seguir')
+    assert.equal((await ctx.api('POST', '/api/shared', { body: { code: created.body.code } })).status, 404, 'el código no se reutiliza')
   })
 
   await t.test('revocar el dispositivo conserva los recibos offline y bloquea nuevos cobros', async () => {

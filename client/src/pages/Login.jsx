@@ -83,6 +83,12 @@ export default function Login() {
             Regístrate
           </Link>
         </p>}
+
+        {!sharedDevice && (
+          <Link to="/activar" className="block text-center text-sm text-gray-500 mt-3 underline">
+            ¿Te dieron un código? Activar esta caja
+          </Link>
+        )}
       </div>
     </div>
   )

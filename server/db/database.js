@@ -559,16 +559,38 @@ async function initDb() {
       continuous INTEGER NOT NULL DEFAULT 0 CHECK (continuous IN (0, 1)),
       version INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1,
       expires_at TEXT NOT NULL, created_by INTEGER,
+      -- Activación remota: el administrador genera un código de un solo uso y
+      -- lo dicta por teléfono; el aparato lo canjea desde /activar. Solo se
+      -- guarda el SHA-256 del código, nunca el código en claro.
+      enroll_code_hash TEXT, enroll_expires_at TEXT, enroll_used INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (owner_id) REFERENCES users(id)
     );
     CREATE TABLE IF NOT EXISTS shared_device_cashiers (
       device_id TEXT NOT NULL, account_id INTEGER NOT NULL, display_name TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (device_id, account_id),
+      active INTEGER NOT NULL DEFAULT 1,
+      -- PIN ya cifrado por el navegador del administrador (PBKDF2). El servidor
+      -- lo custodia solo para la activación remota; jamás ve el PIN en claro.
+      pin_salt TEXT, pin_hash TEXT, pin_iterations INTEGER,
+      PRIMARY KEY (device_id, account_id),
       FOREIGN KEY (device_id) REFERENCES shared_devices(id)
     );
     CREATE INDEX IF NOT EXISTS idx_shared_devices_owner ON shared_devices(owner_id);
   `);
+
+  // Bases ya existentes: las columnas de activación remota llegan de forma
+  // aditiva (las nuevas ya vienen en el CREATE TABLE de arriba).
+  const sharedAddColumns = [
+    'ALTER TABLE shared_devices ADD COLUMN enroll_code_hash TEXT',
+    'ALTER TABLE shared_devices ADD COLUMN enroll_expires_at TEXT',
+    'ALTER TABLE shared_devices ADD COLUMN enroll_used INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE shared_device_cashiers ADD COLUMN pin_salt TEXT',
+    'ALTER TABLE shared_device_cashiers ADD COLUMN pin_hash TEXT',
+    'ALTER TABLE shared_device_cashiers ADD COLUMN pin_iterations INTEGER',
+  ];
+  for (const sql of sharedAddColumns) {
+    try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
+  }
 
   console.log('Base de datos lista');
 }

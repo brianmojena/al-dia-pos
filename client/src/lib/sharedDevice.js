@@ -36,6 +36,19 @@ async function derivePin(pin, salt, iterations = ITERATIONS) {
   const result = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: hexToBytes(salt), iterations }, key, 256)
   return bytesToHex(new Uint8Array(result))
 }
+// Cifra un PIN en este navegador. Lo usa la activación remota: el administrador
+// cifra los PIN aquí y solo viaja el hash, para que el aparato destino instale
+// la caja sin que nadie teclee un PIN.
+export async function hashPin(pin) {
+  if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) throw new Error('Cada cajero necesita un PIN de 6 dígitos.')
+  if (!globalThis.crypto?.subtle) throw new Error('Abre la aplicación mediante una conexión segura para configurar los PIN.')
+  const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
+  return { salt, hash: await derivePin(pin, salt), iterations: ITERATIONS }
+}
+const validStoredPin = (pin) => !!pin
+  && typeof pin.salt === 'string' && /^(?:[a-f0-9]{2})+$/.test(pin.salt)
+  && typeof pin.hash === 'string' && /^[a-f0-9]{64}$/.test(pin.hash)
+  && Number.isInteger(pin.iterations) && pin.iterations > 0
 const equalHash = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false
   let difference = 0
@@ -118,10 +131,20 @@ export async function installSharedDevice(bundle, pins) {
   validateBundle(bundle)
   const cashiers = []
   for (const member of bundle.cashiers) {
-    const pin = pins?.[member.id]
-    if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) throw new Error('Cada cajero necesita un PIN de 6 dígitos.')
-    const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
-    cashiers.push({ ...member, pin: { salt, hash: await derivePin(pin, salt), iterations: ITERATIONS }, failures: 0, blockedUntil: 0 })
+    // Prioridad al PIN ya cifrado que trae el bundle (activación remota): si
+    // viene, se adopta tal cual y no se pide ninguno. Si no, se deriva del PIN
+    // que tecleó el administrador en este navegador.
+    let pin = validStoredPin(member.pin)
+      ? { salt: member.pin.salt, hash: member.pin.hash, iterations: member.pin.iterations }
+      : null
+    if (!pin) {
+      const raw = pins?.[member.id]
+      if (typeof raw !== 'string' || !/^\d{6}$/.test(raw)) throw new Error('Cada cajero necesita un PIN de 6 dígitos.')
+      const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
+      pin = { salt, hash: await derivePin(raw, salt), iterations: ITERATIONS }
+    }
+    const { pin: _bundlePin, ...rest } = member
+    cashiers.push({ ...rest, pin, failures: 0, blockedUntil: 0 })
   }
   writeEnrollment({ version: 1, device: { ...bundle.device }, cashiers })
   // Se termina la sesión administrativa, sin eliminar datos de negocio.

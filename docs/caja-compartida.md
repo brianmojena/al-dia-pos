@@ -10,6 +10,19 @@ Esta modalidad es para la aplicación web instalada en una tablet o teléfono. L
 4. Asignar a cada persona un nombre visible y un PIN de seis dígitos. Confirmar el PIN y entregar a cada cajero únicamente el suyo.
 5. Elegir la modalidad y activar la caja **en ese mismo navegador**. La sesión administrativa termina y queda la pantalla de selección de cajero. Cada cajero debe entrar una primera vez con conexión para comprobar que el catálogo está preparado.
 
+## Activación a distancia (sin estar presente)
+
+Cuando el administrador no puede tocar el aparato del negocio, la caja se activa con un **código de un solo uso**:
+
+1. Desde **Administración**, en la ficha de la tienda, elegir **Caja compartida**, poner el nombre, la modalidad y asignar a cada cajero su nombre visible y PIN de seis dígitos (como en la preparación presencial).
+2. Elegir **Generar código para otro aparato**. Los PIN se cifran en el navegador del administrador (nunca viajan en claro) y el servidor devuelve un código de 12 caracteres, válido **30 minutos** y de **un solo uso**.
+3. Dictar o enviar el código al negocio. Nadie teclea PIN allí.
+4. En el aparato del negocio, abrir la aplicación, entrar en **Activar esta caja** (o la dirección `…/activar`) e introducir el código. El aparato descarga la caja con los PIN ya cifrados y queda en la pantalla de selección de cajero.
+
+A partir de ahí, el uso es idéntico al de una caja preparada en persona. Un código ya usado o vencido se rechaza: si hay que reinstalar (por ejemplo, porque el aparato no guardó la caja), generar uno nuevo desde el panel. Activar una caja nueva para la misma tienda retira automáticamente la anterior.
+
+La activación necesita conexión en el aparato del negocio la primera vez, igual que la preparación presencial; después funciona sin conexión.
+
 ## Modalidad de caja
 
 | Opción | Relevo | Cierre |
