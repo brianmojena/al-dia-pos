@@ -4,32 +4,17 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { requireAuth, requireOwner, OWNER, CASHIER } = require('../middleware/auth');
-const { JWT_SECRET, isAdminEmail } = require('../config');
+const { JWT_SECRET } = require('../config');
 const { asyncHandler } = require('../lib/asyncHandler');
-const {
-  DEFAULT_PLAN, isPlan, labelOf, maxUsersOf, TRIAL_MS, planStateOf,
-} = require('../lib/plans');
-
 // La identidad y los ajustes del negocio salen de sitios distintos: un cajero
 // tiene su propio email y su propio rol, pero el nombre de la tienda, el plan,
-// el límite de transferencia y las tasas del dólar y del euro son de la TIENDA. Sin esto,
-// la caja de un cajero abriría sin límite ni tasa configurados.
-const publicUser = (account, shop = account) => ({
-  id: account.id,
-  email: account.email,
-  role: account.role || OWNER,
-  created_at: account.created_at,
-  store_name: shop.store_name,
-  plan: shop.plan,
-  transfer_limit: shop.transfer_limit ?? null,
-  usd_rate: shop.usd_rate ?? null,
-  eur_rate: shop.eur_rate ?? null,
-  warehouse_enabled: Number(shop.warehouse_enabled ?? 1) !== 0,
-  // Confirmación del administrador y prueba gratuita (ver lib/plans.js): el
-  // estado vive en la fila del dueño, así que un cajero lo hereda de su tienda.
-  ...planStateOf(shop),
-  is_admin: isAdminEmail(account.email),
-});
+// el límite de transferencia y las tasas del dólar y del euro son de la TIENDA.
+// Esa mezcla (y las banderas por tienda) vive en lib/userProfile.js, que es la
+// única definición: antes había una copia aquí y se desincronizaban.
+const { publicUser } = require('../lib/userProfile');
+const {
+  DEFAULT_PLAN, isPlan, labelOf, maxUsersOf, TRIAL_MS,
+} = require('../lib/plans');
 
 // userId es la TIENDA (para un dueño, él mismo); accountId es quien inicia
 // sesión. Ver la nota en middleware/auth.js.

@@ -10,4 +10,15 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'brianadmin@aldia.cu')
 
 const isAdminEmail = (email) => ADMIN_EMAILS.includes(String(email || '').trim().toLowerCase());
 
-module.exports = { JWT_SECRET, ADMIN_EMAILS, isAdminEmail };
+// Tiendas cuyo cajero ve, en "Mis ventas", cómo se repartió lo cobrado del día
+// entre efectivo, transferencia, dólares y euros. Vive en config, no en la
+// base: es un pedido puntual de una tienda y no cambia con los datos. Se lee al
+// arrancar (env CASHIER_BREAKDOWN_EMAILS, separada por comas).
+const CASHIER_BREAKDOWN_EMAILS = (process.env.CASHIER_BREAKDOWN_EMAILS || 'deliciasysabores@aldia.cu')
+  .split(',')
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
+
+const showsCashierBreakdown = (email) => CASHIER_BREAKDOWN_EMAILS.includes(String(email || '').trim().toLowerCase());
+
+module.exports = { JWT_SECRET, ADMIN_EMAILS, isAdminEmail, CASHIER_BREAKDOWN_EMAILS, showsCashierBreakdown };

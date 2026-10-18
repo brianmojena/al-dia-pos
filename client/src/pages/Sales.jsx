@@ -15,7 +15,7 @@ import { accountLabel } from '../lib/accountLabel'
 import { useAuth } from '../context/AuthContext'
 import RejectedSalesPanel from '../components/RejectedSalesPanel'
 import SaleCorrection, { VoidedSales } from '../components/SaleCorrection'
-import { summarizeCashierSales } from '../lib/cashierSalesSummary'
+import { summarizeCashierSales, summarizeCashierPayments } from '../lib/cashierSalesSummary'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const fmtCashierTotal = (n) => '$ ' + new Intl.NumberFormat('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n) || 0)
@@ -32,6 +32,7 @@ export default function Sales() {
 }
 
 function CashierSalesHistory() {
+  const { user } = useAuth()
   const [sales, setSales] = useState([])
   const [details, setDetails] = useState({})
   const [expandedId, setExpandedId] = useState(null)
@@ -71,6 +72,7 @@ function CashierSalesHistory() {
       </div>
       <p className="text-xs text-gray-500 mb-4">Solo aparecen las ventas de tu cuenta, incluidas las del período abierto.</p>
       {!loading && !error && <CashierSalesSummary sales={sales} />}
+      {!loading && !error && user?.cashier_day_breakdown && <CashierDayPayments sales={sales} />}
       {loading ? (
         <div className="flex items-center justify-center py-16"><div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" /></div>
       ) : error ? (
@@ -131,6 +133,35 @@ export function CashierSalesSummary({ sales = [], now = new Date() }) {
           Incluye {pendingCount} venta{pendingCount === 1 ? '' : 's'} pendiente{pendingCount === 1 ? '' : 's'} de sincronizar.
         </p>
       )}
+    </div>
+  )
+}
+
+// Lo cobrado hoy por forma de pago, con las mismas tarjetas de la pantalla de
+// Inicio. Solo lo ven los cajeros de las tiendas marcadas en el servidor
+// (user.cashier_day_breakdown). Los dólares y los euros van en billetes, sin
+// convertir: es lo que de verdad entró a la gaveta.
+export function CashierDayPayments({ sales = [], now = new Date() }) {
+  const payments = summarizeCashierPayments(sales, now)
+  return (
+    <div className="mb-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Lo cobrado hoy</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: 'Efectivo', value: fmt(payments.cash), icon: Banknote, tone: 'bg-green-50 text-green-600' },
+          { label: 'Transferencia', value: fmt(payments.transfer), icon: Smartphone, tone: 'bg-blue-50 text-[#007AFF]' },
+          { label: 'Dólares', value: `$ ${fmtForeign(payments.usd)}`, icon: DollarSign, tone: 'bg-emerald-50 text-emerald-600' },
+          { label: 'Euros', value: `€ ${fmtForeign(payments.eur)}`, icon: DollarSign, tone: 'bg-indigo-50 text-indigo-500' },
+        ].map(({ label, value, icon: Icon, tone }) => (
+          <div key={label} className="bg-white rounded-2xl p-4 shadow-sm flex flex-col">
+            <div className="flex items-center gap-2 mb-3">
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${tone}`}><Icon size={16} /></div>
+              <span className="text-xs text-gray-500 font-medium">{label}</span>
+            </div>
+            <p className="text-lg font-bold text-gray-900">{value}</p>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
