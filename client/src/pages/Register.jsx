@@ -1,34 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, Lock, Store, AlertCircle, Check, Sparkles, Eye, EyeOff, Gift } from 'lucide-react'
+import { Mail, Lock, Store, AlertCircle, Eye, EyeOff, Gift } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-
-// El cobro no tiene pasarela: se paga en persona. El Plan Enterprise incluye
-// la app de monitorización del jefe y hasta 2 sucursales.
-const PLANS = [
-  {
-    id: 'basic',
-    icon: Store,
-    title: 'Plan Basic',
-    price: '$10 USD',
-    priceNote: '/mes',
-    tag: 'Pago físico (en persona)',
-    features: ['Hasta 5 usuarios simultáneos', 'Todas las funciones de la app'],
-  },
-  {
-    id: 'enterprise',
-    icon: Sparkles,
-    title: 'Plan Enterprise',
-    price: '$15 USD',
-    priceNote: '/mes',
-    tag: 'Pago físico (en persona)',
-    features: [
-      'Hasta 10 usuarios simultáneos',
-      'App de monitorización para el jefe',
-      'Gestión de hasta 2 sucursales',
-    ],
-  },
-]
 
 export default function Register() {
   const { register } = useAuth()
@@ -37,7 +10,6 @@ export default function Register() {
   const [email,         setEmail]         = useState('')
   const [password,      setPassword]      = useState('')
   const [confirm,       setConfirm]       = useState('')
-  const [plan,          setPlan]          = useState('basic')
   const [error,         setError]         = useState('')
   const [submitting,    setSubmitting]    = useState(false)
   const [showPassword,  setShowPassword]  = useState(false)
@@ -56,7 +28,7 @@ export default function Register() {
     setSubmitting(true)
     try {
       // Trim del email para doble seguridad
-      await register({ email: email.trim(), password, store_name: storeName, plan })
+      await register({ email: email.trim(), password, store_name: storeName })
       // Al cartel de bienvenida (prueba de 7 días + plan pendiente de
       // confirmación), no directo a la app.
       navigate('/bienvenida')
@@ -81,7 +53,7 @@ export default function Register() {
           <Gift size={20} className="flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-semibold">7 días gratis con todas las funciones.</p>
-            <p className="text-xs mt-1">Sin tarjeta; el pago es en persona y solo si decides quedarte.</p>
+            <p className="text-xs mt-1">Al terminar la prueba te mostraremos los planes; el pago es en persona y solo si decides quedarte.</p>
           </div>
         </div>
 
@@ -163,47 +135,6 @@ export default function Register() {
             >
               {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
             </button>
-          </div>
-
-          {/* Plan selector */}
-          <div>
-            <p className="text-sm font-semibold text-gray-700 mb-2">Elige un plan</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {PLANS.map(p => {
-                const Icon = p.icon
-                const selected = plan === p.id
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => setPlan(p.id)}
-                    className={`relative text-left rounded-2xl p-4 border-2 transition-all ${
-                      selected ? 'border-[#007AFF] bg-blue-50/40' : 'border-gray-200 bg-white hover:border-gray-300'
-                    }`}
-                  >
-                    {selected && (
-                      <div className="absolute top-3 right-3 w-5 h-5 bg-[#007AFF] rounded-full flex items-center justify-center">
-                        <Check size={12} className="text-white" strokeWidth={3} />
-                      </div>
-                    )}
-                    <Icon size={20} className={selected ? 'text-[#007AFF]' : 'text-gray-400'} />
-                    <p className="font-bold text-gray-900 mt-2">{p.title}</p>
-                    <p className="text-lg font-bold text-gray-900 mt-0.5">
-                      {p.price} <span className="text-xs font-medium text-gray-400">{p.priceNote}</span>
-                    </p>
-                    <p className="text-[11px] text-gray-400 mt-1">{p.tag}</p>
-                    <ul className="mt-2.5 space-y-1">
-                      {p.features.map(f => (
-                        <li key={f} className="text-xs text-gray-500 flex items-start gap-1.5">
-                          <Check size={11} className="mt-0.5 flex-shrink-0 text-green-500" />
-                          {f}
-                        </li>
-                      ))}
-                    </ul>
-                  </button>
-                )
-              })}
-            </div>
           </div>
 
           <button
