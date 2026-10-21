@@ -121,6 +121,25 @@ function buildRequest(db, row) {
       };
     }
 
+    case 'currency_purchase.create':
+      return {
+        method: 'POST',
+        path: '/api/currency-purchases',
+        body: {
+          client_purchase_id: payload.client_purchase_id,
+          foreign_currency: payload.foreign_currency,
+          foreign_amount: payload.foreign_amount,
+          exchange_rate: payload.exchange_rate,
+          shop_rate: payload.shop_rate ?? null,
+          sold_at: payload.sold_at,
+          register_id: registerId,
+        },
+        onSuccess: (data) => {
+          db.prepare('UPDATE currency_purchases SET server_id = ? WHERE client_purchase_id = ?')
+            .run(data.id, payload.client_purchase_id);
+        },
+      };
+
     case 'cash_close.create': {
       // El cierre viaja con los client_sale_id que cubrió, NO con fechas: el
       // servidor le pone a cada venta sincronizada su propia hora de llegada,
@@ -137,7 +156,13 @@ function buildRequest(db, row) {
         const sale = db.prepare('SELECT server_id FROM sales WHERE client_sale_id = ?').get(clientSaleId);
         return !sale || sale.server_id == null;
       });
-      if (pendientes.length > 0) return { skip: true };
+      // Igual con las compras de divisa: sin ellas arriba el servidor
+      // calcularía el esperado de pesos y billetes sin contarlas.
+      const pendientesCompras = (payload.client_purchase_ids || []).filter((clientPurchaseId) => {
+        const purchase = db.prepare('SELECT server_id FROM currency_purchases WHERE client_purchase_id = ?').get(clientPurchaseId);
+        return !purchase || purchase.server_id == null;
+      });
+      if (pendientes.length > 0 || pendientesCompras.length > 0) return { skip: true };
 
       return {
         method: 'POST',
@@ -150,6 +175,7 @@ function buildRequest(db, row) {
           counted_eur: payload.counted_eur ?? 0,
           note: payload.note,
           client_sale_ids: ids,
+          client_purchase_ids: payload.client_purchase_ids || [],
           register_id: registerId,
         },
         onSuccess: (data) => {
@@ -209,12 +235,12 @@ async function pullDelta(session, summary) {
   let pages = 0;
   let more = false;
   let error = null;
-  const totals = { sales: 0, closes: 0, counts: 0 };
+  const totals = { sales: 0, closes: 0, counts: 0, purchases: 0 };
   try {
     do {
       const query = new URLSearchParams({
         after_sale: String(cursors.sale), after_close: String(cursors.close),
-        after_count: String(cursors.count), since: sinceLast60Days(), limit: '500',
+        after_count: String(cursors.count), after_purchase: String(cursors.purchase), since: sinceLast60Days(), limit: '500',
       });
       const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
       if (!res.ok) {
@@ -225,6 +251,7 @@ async function pullDelta(session, summary) {
       totals.sales += stats.sales;
       totals.closes += stats.closes;
       totals.counts += stats.counts;
+      totals.purchases += stats.purchases;
       cursors = prepareDeltaSession(session.user_id);
       more = res.data.has_more === true;
       pages++;

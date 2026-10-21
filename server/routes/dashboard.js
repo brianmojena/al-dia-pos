@@ -3,7 +3,7 @@ const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { todayBounds, shopLocalLabel } = require('../lib/businessDay');
-const { paymentSplit, round2 } = require('../lib/payment');
+const { paymentSplit, purchaseSplit, round2 } = require('../lib/payment');
 
 router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
@@ -82,6 +82,15 @@ router.get('/', asyncHandler(async (req, res) => {
   const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 };
   for (const sale of openSalesResult.rows) {
     const split = paymentSplit(sale);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
+  // Las compras de divisa sin arqueo: pesos que salieron, billetes que entraron.
+  const openPurchasesResult = await db.execute({
+    sql: 'SELECT foreign_currency, foreign_amount, cup_amount FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL',
+    args: [req.userId],
+  });
+  for (const purchase of openPurchasesResult.rows) {
+    const split = purchaseSplit(purchase);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);

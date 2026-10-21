@@ -1,7 +1,7 @@
-import { paymentSplit, offShopRate, CURRENCIES } from './payment.js'
+import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES } from './payment.js'
 import { parseServerDate } from './dates.js'
 
-export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], rejected_sales: [], cashiers: [], current_period: null })
+export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], rejected_sales: [], cashiers: [], current_period: null })
 export const businessDate = (value = new Date()) => {
   const date = value instanceof Date ? value : parseServerDate(value)
   if (!date) return ''
@@ -37,8 +37,11 @@ export function applyOperation(data, op, result = op.result) {
       }
     }
     upsert(data.inventory_counts, result, 'client_count_id')
+  } else if (op.kind === 'purchase') {
+    upsert(data.currency_purchases ||= [], { ...op.result, ...result }, 'client_purchase_id')
   } else if (op.kind === 'close') {
     for (const sale of data.sales) if (op.saleIds.includes(sale.id)) sale.cash_close_id = result.id
+    for (const purchase of data.currency_purchases || []) if (op.purchaseIds?.includes(purchase.id)) purchase.cash_close_id = result.id
     upsert(data.cash_closes, result, 'client_close_id')
   } else if (op.kind === 'review') {
     const sale = data.rejected_sales.find((s) => s.id === op.productId)
@@ -77,6 +80,11 @@ export function acknowledgeOperation(state, opId, result) {
       if (pending.saleIds) pending.saleIds = pending.saleIds.map((id) => id === op.result.id ? Number(result.id) : id)
     }
   }
+  if (op.kind === 'purchase') {
+    for (const pending of state.outbox) {
+      if (pending.purchaseIds) pending.purchaseIds = pending.purchaseIds.map((id) => id === op.result.id ? Number(result.id) : id)
+    }
+  }
   applyOperation(state.base, op, result)
   state.outbox = state.outbox.filter((o) => o.id !== opId)
   return state
@@ -90,6 +98,9 @@ const productById = (data, id) => {
 }
 export function openSales(data, account) {
   return data.sales.filter((s) => s.cash_close_id == null && (!s.register_id || s.register_id === registerFor(account)))
+}
+export function openPurchases(data, account) {
+  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (!p.register_id || p.register_id === registerFor(account)))
 }
 export function prepareOperation(data, method, path, body, ctx) {
   const owner = ctx.user.role !== 'cajero'
@@ -154,6 +165,22 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.sold_at = now
     op.body.register_id = 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), items, total, profit: round(items.reduce((n, i) => n + i.quantity * (i.unit_price - i.unit_cost), 0)), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
+  } else if (path === '/api/currency-purchases') {
+    op.kind = 'purchase'
+    op.body.client_purchase_id ||= ctx.newId()
+    const existing = (data.currency_purchases || []).find((p) => p.client_purchase_id === op.body.client_purchase_id)
+    if (existing) return { ...op, kind: 'noop', result: existing }
+    // Mismas reglas que el servidor (server/lib/payment.js, purchaseFields).
+    assert(CURRENCIES.includes(body.foreign_currency), 'Moneda inválida: solo USD o EUR')
+    assert(number(body.foreign_amount) && round(Number(body.foreign_amount)) > 0, 'Falta cuántos dólares o euros se compran')
+    assert(number(body.exchange_rate) && Number(body.exchange_rate) > 0, 'Falta la tasa de la compra')
+    op.body.foreign_amount = round(Number(body.foreign_amount))
+    op.body.exchange_rate = Number(body.exchange_rate)
+    op.body.shop_rate = body.shop_rate == null ? null : Number(body.shop_rate)
+    delete op.body.cup_amount
+    op.body.sold_at = now
+    op.body.register_id = 'web'
+    op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account), cash_close_id: null, pending: true }
   } else if (path === '/api/inventory-counts') {
     assert(owner, 'Solo el dueño puede contar inventario')
     op.kind = 'count'
@@ -177,16 +204,18 @@ export function prepareOperation(data, method, path, body, ctx) {
     assert(number(body.counted_cash) && number(body.opening_float ?? 0), 'El efectivo debe ser mayor o igual a 0')
     assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
     const covered = openSales(data, ctx.account)
+    const coveredPurchases = openPurchases(data, ctx.account)
     op.saleIds = covered.map((s) => s.id)
+    op.purchaseIds = coveredPurchases.map((p) => p.id)
     op.coverageExact = owner
-    if (owner) op.body.covered_sale_ids = op.saleIds
+    if (owner) { op.body.covered_sale_ids = op.saleIds; op.body.covered_purchase_ids = op.purchaseIds }
     op.body.closed_at = now
     op.body.register_id = 'web'
-    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0))
+    const sumOf = (key) => round(covered.reduce((n, s) => n + paymentSplit(s)[key], 0) + coveredPurchases.reduce((n, p) => n + purchaseSplit(p)[key], 0))
     const cash = sumOf('cash') + Number(body.opening_float || 0)
     const usd = sumOf('usd'), eur = sumOf('eur')
     const countedUsd = round(Number(body.counted_usd || 0)), countedEur = round(Number(body.counted_eur || 0))
-    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
+    op.result = { ...body, ...meta, id: ctx.localId(), client_close_id: op.body.client_close_id, register_id: registerFor(ctx.account), closed_at: now, opened_at: covered[0]?.created_at || coveredPurchases[0]?.created_at || now, expected_cash: cash, expected_transfer: sumOf('transfer'), difference: round(Number(body.counted_cash) - cash), expected_usd: usd, counted_usd: countedUsd, difference_usd: round(countedUsd - usd), expected_eur: eur, counted_eur: countedEur, difference_eur: round(countedEur - eur), sales_count: covered.length, pending: true }
   } else if (/^\/api\/sales\/rejected\/\d+\/review$/.test(path)) {
     assert(owner, 'Solo el dueño puede revisar ventas')
     op.kind = 'review'
@@ -230,11 +259,12 @@ export function readLocal(data, path, account, user) {
   const owner = user.role !== 'cajero'
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
-    const sales = openSales(data, account), prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
+    const sales = [...openSales(data, account), ...openPurchases(data, account)], prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account)), 'closed_at')[0]
     return { opened_at: prior?.closed_at || data.current_period?.opened_at || sales[0]?.created_at || null, has_sales: sales.length > 0 || (!prior && !!data.current_period?.has_sales), is_first_close: !prior && (data.current_period?.is_first_close ?? true) }
   }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
+  if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales') return newest(data.sales.filter((s) => !url.searchParams.has('date') || businessDate(s.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales/rejected') return data.rejected_sales.filter((s) => !s.reviewed_at)
   if (/^\/api\/sales\/-?\d+$/.test(route)) return data.sales.find((s) => s.id === Number(route.split('/').pop()))
@@ -257,6 +287,10 @@ export function readLocal(data, path, account, user) {
     const holdings = { cash: 0, transfer: 0, usd: 0, eur: 0 }
     for (const sale of data.sales.filter((s) => s.cash_close_id == null)) {
       const split = paymentSplit(sale)
+      for (const key of Object.keys(holdings)) holdings[key] += split[key]
+    }
+    for (const purchase of (data.currency_purchases || []).filter((p) => p.cash_close_id == null)) {
+      const split = purchaseSplit(purchase)
       for (const key of Object.keys(holdings)) holdings[key] += split[key]
     }
     for (const key of Object.keys(holdings)) holdings[key] = round(holdings[key])

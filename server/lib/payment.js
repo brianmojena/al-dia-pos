@@ -97,6 +97,48 @@ function foreignFields(body) {
   };
 }
 
+/**
+ * Compra de divisa: la tienda le compra dólares o euros en billetes a alguien
+ * y le paga en pesos de la gaveta. Es el movimiento contrario a cobrar una
+ * venta en divisa: la gaveta pierde `foreign_amount * exchange_rate` pesos
+ * (`cup_amount`, que se guarda ya redondeado para que el arqueo y el Excel
+ * sumen lo mismo) y gana los billetes. Como la venta en divisa, queda cubierta
+ * por el arqueo de la caja que la hizo.
+ */
+function purchaseSplit(purchase) {
+  const amount = round2(purchase.foreign_amount);
+  return {
+    cash: -round2(purchase.cup_amount),
+    transfer: 0,
+    usd: purchase.foreign_currency === 'USD' ? amount : 0,
+    eur: purchase.foreign_currency === 'EUR' ? amount : 0,
+  };
+}
+
+// Valida y normaliza el cuerpo de una compra de divisa, o lanza con un mensaje
+// para el cajero. `cup_amount` lo calcula el servidor: no se acepta el del cliente.
+function purchaseFields(body) {
+  const currency = body.foreign_currency;
+  if (!CURRENCIES.includes(currency)) throw new Error('Moneda inválida: solo USD o EUR');
+  const amount = Number(body.foreign_amount);
+  if (body.foreign_amount == null || !Number.isFinite(amount) || round2(amount) <= 0) {
+    throw new Error('Falta cuántos dólares o euros se compran');
+  }
+  const rate = Number(body.exchange_rate);
+  if (body.exchange_rate == null || !Number.isFinite(rate) || rate <= 0) {
+    throw new Error('Falta la tasa de la compra');
+  }
+  const shopRate = body.shop_rate == null ? null : Number(body.shop_rate);
+  return {
+    foreign_currency: currency,
+    foreign_amount: round2(amount),
+    exchange_rate: rate,
+    shop_rate: Number.isFinite(shopRate) && shopRate > 0 ? shopRate : null,
+    cup_amount: round2(round2(amount) * rate),
+  };
+}
+
 module.exports = {
   PAYMENT_METHODS, CURRENCIES, paymentSplit, paymentLabel, offShopRate, foreignFields, round2,
+  purchaseSplit, purchaseFields,
 };

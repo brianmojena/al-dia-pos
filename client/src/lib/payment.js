@@ -85,3 +85,25 @@ export function mixedPayload(total, transfer) {
   if (transfer >= total) return { payment_method: 'transferencia' }
   return { payment_method: 'mixto', transfer_amount: transfer }
 }
+
+// Compra de divisa (la tienda compra billetes y paga en pesos de la gaveta):
+// la gaveta pierde los pesos y gana los billetes. Misma cuenta que
+// purchaseSplit de server/lib/payment.js.
+export function purchaseSplit(purchase) {
+  const amount = round2(purchase.foreign_amount)
+  return {
+    cash: -round2(purchase.cup_amount),
+    transfer: 0,
+    usd: purchase.foreign_currency === 'USD' ? amount : 0,
+    eur: purchase.foreign_currency === 'EUR' ? amount : 0,
+  }
+}
+
+// Pesos que se pagan por esos billetes a esa tasa.
+export const purchaseCup = (amount, rate) => round2(round2(amount) * (Number(rate) || 0))
+
+// La tasa de la compra no fue la de la tienda.
+export function offShopPurchase(purchase) {
+  if (purchase.shop_rate == null) return false
+  return Math.abs(Number(purchase.exchange_rate) - Number(purchase.shop_rate)) > 0.005
+}

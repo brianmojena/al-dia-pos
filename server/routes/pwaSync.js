@@ -14,14 +14,16 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
     const products = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? ORDER BY name', args: [req.userId] })).rows;
     const register = resolveRegisterId(req, 'web');
     const open = (await tx.execute({ sql: 'SELECT created_at FROM sales WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL) ORDER BY created_at LIMIT 1', args: [req.userId, register] })).rows[0];
+    const openPurchase = (await tx.execute({ sql: 'SELECT created_at FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL) ORDER BY created_at LIMIT 1', args: [req.userId, register] })).rows[0];
     const last = (await tx.execute({ sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1', args: [req.userId, register] })).rows[0];
-    const snapshot = { products, current_period: { opened_at: last?.closed_at || open?.created_at || null, has_sales: !!open, is_first_close: !last } };
+    const snapshot = { products, current_period: { opened_at: last?.closed_at || open?.created_at || openPurchase?.created_at || null, has_sales: !!(open || openPurchase), is_first_close: !last } };
     if (req.role === 'dueño') {
       snapshot.sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? ORDER BY i.id', args: [req.userId] })).rows;
       const bySale = new Map();
       for (const item of items) { if (!bySale.has(item.sale_id)) bySale.set(item.sale_id, []); bySale.get(item.sale_id).push(item); }
       snapshot.sales = snapshot.sales.map((s) => ({ ...s, items: bySale.get(s.id) || [] }));
+      snapshot.currency_purchases = (await tx.execute({ sql: 'SELECT * FROM currency_purchases WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       snapshot.cash_closes = (await tx.execute({ sql: 'SELECT * FROM cash_closes WHERE user_id = ?', args: [req.userId] })).rows;
       const counts = (await tx.execute({ sql: 'SELECT * FROM inventory_counts WHERE user_id = ?', args: [req.userId] })).rows;
       const countItems = (await tx.execute({ sql: 'SELECT i.* FROM inventory_count_items i JOIN inventory_counts c ON c.id = i.count_id WHERE c.user_id = ?', args: [req.userId] })).rows;

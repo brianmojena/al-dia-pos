@@ -32,6 +32,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const afterSale = numberParam(req.query.after_sale);
   const afterClose = numberParam(req.query.after_close);
   const afterCount = numberParam(req.query.after_count);
+  const afterPurchase = numberParam(req.query.after_purchase);
   const rawLimit = numberParam(req.query.limit, 500);
   const limit = Math.min(rawLimit || 500, 500);
   const since = typeof req.query.since === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
@@ -59,6 +60,13 @@ router.get('/delta', asyncHandler(async (req, res) => {
     args: since ? [req.userId, afterCount, since, limit] : [req.userId, afterCount, limit],
   });
 
+  const purchases = await db.execute({
+    sql: `SELECT * FROM currency_purchases WHERE user_id = ? AND id > ?
+            ${since ? 'AND created_at >= ?' : ''}
+          ORDER BY id ASC LIMIT ?`,
+    args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
+  });
+
   const saleItems = await loadItems(db, 'sale_items', 'sale_id', sales.rows.map((row) => row.id));
   const countItems = await loadItems(db, 'inventory_count_items', 'count_id', counts.rows.map((row) => row.id));
   const saleRows = attachItems(sales.rows, saleItems, 'id', 'sale_id');
@@ -69,12 +77,14 @@ router.get('/delta', asyncHandler(async (req, res) => {
     sales: saleRows,
     cash_closes: closes.rows,
     inventory_counts: countRows,
+    currency_purchases: purchases.rows,
     cursors: {
+      purchase: last(purchases.rows, afterPurchase),
       sale: last(sales.rows, afterSale),
       close: last(closes.rows, afterClose),
       count: last(counts.rows, afterCount),
     },
-    has_more: sales.rows.length === limit || closes.rows.length === limit || counts.rows.length === limit,
+    has_more: sales.rows.length === limit || closes.rows.length === limit || counts.rows.length === limit || purchases.rows.length === limit,
   });
 }));
 

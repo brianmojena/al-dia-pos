@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { getLocalDb } = require('./localDb');
 const { todayBounds, boundsForDate } = require('../lib/businessDay');
-const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
+const { PAYMENT_METHODS, paymentSplit, foreignFields, round2, purchaseSplit, purchaseFields } = require('../lib/payment');
 
 // ---------------------------------------------------------------------------
 // Sesión
@@ -68,6 +68,7 @@ function prepareDeltaSession(userId) {
     const reset = db.transaction(() => {
       setSyncState('delta_user_id', userId);
       setSyncState('delta_after_sale', 0);
+      setSyncState('delta_after_purchase', 0);
       setSyncState('delta_after_close', 0);
       setSyncState('delta_after_count', 0);
     });
@@ -75,6 +76,7 @@ function prepareDeltaSession(userId) {
   }
   return {
     sale: Number(getSyncState('delta_after_sale') || 0),
+    purchase: Number(getSyncState('delta_after_purchase') || 0),
     close: Number(getSyncState('delta_after_close') || 0),
     count: Number(getSyncState('delta_after_count') || 0),
   };
@@ -374,6 +376,72 @@ function getSale(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Compra de divisa
+// ---------------------------------------------------------------------------
+
+/**
+ * Registra sin red una compra de dólares o euros: los pesos que salen de la
+ * gaveta (monto × tasa) los calcula esta función, no el cliente. Fila y outbox
+ * se guardan en una sola transacción, igual que una venta.
+ */
+function createCurrencyPurchaseLocal(body = {}) {
+  let fields;
+  try { fields = purchaseFields(body); }
+  catch (error) { throw Object.assign(error, { code: 'BAD_PURCHASE' }); }
+
+  const db = getLocalDb();
+  const clientPurchaseId = crypto.randomUUID();
+  const registerId = getRegisterId();
+  const session = getSession();
+  const accountEmail = session?.email ?? null;
+  // Sin shop_rate del cliente se compara contra la tasa de la tienda que
+  // tiene guardada esta caja, igual que en los cobros en divisa.
+  if (fields.shop_rate == null && !('shop_rate' in body)) {
+    fields.shop_rate = session?.[fields.foreign_currency === 'USD' ? 'usd_rate' : 'eur_rate'] ?? null;
+  }
+
+  const create = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO currency_purchases
+        (client_purchase_id, origin, register_id, account_email, foreign_currency, foreign_amount,
+         exchange_rate, shop_rate, cup_amount)
+      VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?)
+    `).run(clientPurchaseId, registerId, accountEmail, fields.foreign_currency, fields.foreign_amount,
+      fields.exchange_rate, fields.shop_rate, fields.cup_amount);
+    const purchaseId = result.lastInsertRowid;
+    const row = db.prepare('SELECT * FROM currency_purchases WHERE id = ?').get(purchaseId);
+
+    enqueueOutbox(db, {
+      op_type: 'currency_purchase.create',
+      client_op_id: clientPurchaseId,
+      local_ref_id: purchaseId,
+      payload: {
+        client_purchase_id: clientPurchaseId,
+        foreign_currency: fields.foreign_currency,
+        foreign_amount: fields.foreign_amount,
+        exchange_rate: fields.exchange_rate,
+        shop_rate: fields.shop_rate,
+        register_id: registerId,
+        // Hora real de la operación (UTC, ISO) para que el servidor la ponga en
+        // el día correcto aunque suba horas después.
+        sold_at: `${row.created_at.replace(' ', 'T')}Z`,
+      },
+    });
+    return row;
+  });
+  return create();
+}
+
+function listCurrencyPurchases({ date } = {}) {
+  const db = getLocalDb();
+  if (!date) return db.prepare('SELECT * FROM currency_purchases ORDER BY created_at DESC, id DESC LIMIT 200').all();
+  const { start, end } = boundsForDate(date);
+  return db.prepare(
+    'SELECT * FROM currency_purchases WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC, id DESC'
+  ).all(start, end);
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
@@ -411,6 +479,10 @@ function getDashboard() {
     const split = paymentSplit(sale);
     for (const key of Object.keys(holdings)) holdings[key] += split[key];
   }
+  for (const purchase of periodPurchases(db)) {
+    const split = purchaseSplit(purchase);
+    for (const key of Object.keys(holdings)) holdings[key] += split[key];
+  }
   for (const key of Object.keys(holdings)) holdings[key] = round2(holdings[key]);
 
   const inv = db.prepare(`
@@ -446,6 +518,13 @@ const periodSales = (db, periodStart) =>
      FROM sales WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
   ).all();
 
+// Compras de divisa de esta caja que ningún arqueo ha cubierto todavía.
+const periodPurchases = (db) =>
+  db.prepare(
+    `SELECT id, client_purchase_id, foreign_currency, foreign_amount, cup_amount, created_at
+     FROM currency_purchases WHERE origin = 'local' AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all();
+
 /**
  * Describe el período abierto SIN revelar cuánto debería haber.
  *
@@ -458,12 +537,14 @@ function getCurrentCashPeriod() {
   const db = getLocalDb();
   const periodStart = getPeriodStart(db);
   const sales = periodSales(db, periodStart);
+  const purchases = periodPurchases(db);
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
+  const firstAt = [sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? null;
 
   return {
-    opened_at: isFirstClose ? (sales[0]?.created_at ?? null) : periodStart,
+    opened_at: isFirstClose ? firstAt : periodStart,
     is_first_close: isFirstClose,
-    has_sales: sales.length > 0,
+    has_sales: sales.length > 0 || purchases.length > 0,
   };
 }
 
@@ -507,10 +588,14 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
   const create = db.transaction(() => {
     const periodStart = getPeriodStart(db);
     const sales = periodSales(db, periodStart);
+    const purchases = periodPurchases(db);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
     // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
-    const sumOf = (key) => round2(sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0));
+    const sumOf = (key) => round2(
+      sales.reduce((sum, s) => sum + paymentSplit(s)[key], 0)
+      + purchases.reduce((sum, p) => sum + purchaseSplit(p)[key], 0)
+    );
     const cash = sumOf('cash');
     const transfer = sumOf('transfer');
     const usd = sumOf('usd');
@@ -518,7 +603,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
 
     const expectedCash = float + cash;
     const openedAt = periodStart === BEGINNING_OF_TIME
-      ? (sales[0]?.created_at ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
+      ? ([sales[0]?.created_at, purchases[0]?.created_at].filter(Boolean).sort()[0] ?? new Date().toISOString().replace('T', ' ').slice(0, 19))
       : periodStart;
 
     const result = db.prepare(`
@@ -542,6 +627,12 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         .run(closeId, ...sales.map((sale) => sale.client_sale_id));
     }
 
+    if (purchases.length > 0) {
+      const placeholders = purchases.map(() => '?').join(',');
+      db.prepare(`UPDATE currency_purchases SET cash_close_id = ? WHERE client_purchase_id IN (${placeholders}) AND cash_close_id IS NULL`)
+        .run(closeId, ...purchases.map((p) => p.client_purchase_id));
+    }
+
     enqueueOutbox(db, {
       op_type: 'cash_close.create',
       client_op_id: clientCloseId,
@@ -555,6 +646,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         note,
         closed_at: db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at,
         client_sale_ids: sales.map(s => s.client_sale_id),
+        client_purchase_ids: purchases.map(p => p.client_purchase_id),
       },
     });
 
@@ -731,7 +823,7 @@ function applyServerDelta(page) {
     throw new Error('Delta del servidor inválido');
   }
   const db = getLocalDb();
-  const stats = { sales: 0, closes: 0, counts: 0 };
+  const stats = { sales: 0, closes: 0, counts: 0, purchases: 0 };
   const apply = db.transaction(() => {
     const insertSale = db.prepare(`
       INSERT INTO sales
@@ -765,6 +857,29 @@ function applyServerDelta(page) {
         );
       }
       stats.sales++;
+    }
+
+    // Compras de divisa de otras cajas: solo historial; sin vínculo de cierre
+    // local ni outbox (el arqueo local solo cubre origin = 'local').
+    const insertPurchase = db.prepare(`
+      INSERT INTO currency_purchases
+        (server_id, client_purchase_id, origin, register_id, account_email, foreign_currency,
+         foreign_amount, exchange_rate, shop_rate, cup_amount, created_at)
+      VALUES (?, ?, 'server', ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const purchase of page.currency_purchases || []) {
+      const clientPurchaseId = purchase.client_purchase_id || `srv-${purchase.id}`;
+      const existing = db.prepare('SELECT id, server_id FROM currency_purchases WHERE client_purchase_id = ?').get(clientPurchaseId);
+      if (existing) {
+        if (existing.server_id == null) db.prepare('UPDATE currency_purchases SET server_id = ? WHERE id = ?').run(Number(purchase.id), existing.id);
+        continue;
+      }
+      insertPurchase.run(
+        Number(purchase.id), clientPurchaseId, purchase.register_id ?? null, purchase.account_email ?? null,
+        purchase.foreign_currency, Number(purchase.foreign_amount) || 0, Number(purchase.exchange_rate) || 0,
+        purchase.shop_rate ?? null, Number(purchase.cup_amount) || 0, purchase.created_at,
+      );
+      stats.purchases++;
     }
 
     const insertClose = db.prepare(`
@@ -830,6 +945,8 @@ function applyServerDelta(page) {
     }
 
     setSyncState('delta_after_sale', page.cursors.sale);
+    // Un servidor anterior a esta función no manda el cursor de compras.
+    if (page.cursors.purchase != null) setSyncState('delta_after_purchase', page.cursors.purchase);
     setSyncState('delta_after_close', page.cursors.close);
     setSyncState('delta_after_count', page.cursors.count);
   });
@@ -974,6 +1091,7 @@ module.exports = {
   getPendingOutbox, countPendingOutbox, enqueueOutbox, resetStuckSyncing,
   listProducts, createProduct, updateProduct, deleteProduct, applyServerCatalog,
   createSaleLocal, listSales, getSale,
+  createCurrencyPurchaseLocal, listCurrencyPurchases,
   getDashboard,
   getCurrentCashPeriod, createCashCloseLocal, listCashCloses, cashCloseSummary,
   createInventoryCountLocal, listInventoryCounts, getInventoryCount,

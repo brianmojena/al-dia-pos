@@ -140,6 +140,22 @@ async function routeRequest(method, fullPath, body) {
       }
     }
 
+    // --- compra de divisa ---
+    // Cualquier cuenta compra; el historial es del dueño (como el servidor).
+    if (parts[0] === 'api' && parts[1] === 'currency-purchases' && parts.length === 2) {
+      if (method === 'GET') {
+        if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+        return ok(200, queries.listCurrencyPurchases({ date: query.date }));
+      }
+      if (method === 'POST') {
+        try {
+          return ok(201, queries.createCurrencyPurchaseLocal(body || {}));
+        } catch (err) {
+          return fail(400, err.message);
+        }
+      }
+    }
+
     // --- dashboard ---
     if (parts[0] === 'api' && parts[1] === 'dashboard' && parts.length === 2 && method === 'GET') {
       if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
