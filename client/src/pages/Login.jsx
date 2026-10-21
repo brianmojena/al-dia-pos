@@ -1,16 +1,17 @@
 import { useState } from 'react'
 import { Link, useNavigate, Navigate, useSearchParams } from 'react-router-dom'
-import { Mail, Lock, AlertCircle } from 'lucide-react'
+import { Mail, Lock, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
   const { login, sharedDevice } = useAuth()
   const [params] = useSearchParams()
   const navigate = useNavigate()
-  const [email,       setEmail]       = useState('')
-  const [password,    setPassword]    = useState('')
-  const [error,       setError]       = useState('')
-  const [submitting,  setSubmitting]  = useState(false)
+  const [email,        setEmail]        = useState('')
+  const [password,     setPassword]     = useState('')
+  const [error,        setError]        = useState('')
+  const [submitting,   setSubmitting]   = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   if (sharedDevice && params.get('admin') !== '1') return <Navigate to="/cajero" replace />
 
   const handleSubmit = async (e) => {
@@ -18,7 +19,8 @@ export default function Login() {
     setError('')
     setSubmitting(true)
     try {
-      const next = await login(email, password)
+      // Trim del email para doble seguridad
+      const next = await login(email.trim(), password)
       navigate(sharedDevice && next.is_admin ? '/admin' : '/pos')
     } catch (err) {
       setError(err.message)
@@ -52,6 +54,11 @@ export default function Login() {
               value={email}
               onChange={e => setEmail(e.target.value)}
               placeholder="Correo electrónico"
+              autoComplete="email"
+              inputMode="email"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
           </div>
@@ -59,13 +66,22 @@ export default function Login() {
           <div className="relative">
             <Lock size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               required
               value={password}
               onChange={e => setPassword(e.target.value)}
               placeholder="Contraseña"
-              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+              autoComplete="current-password"
+              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-12 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+            </button>
           </div>
 
           <button
@@ -85,9 +101,14 @@ export default function Login() {
         </p>}
 
         {!sharedDevice && (
-          <Link to="/activar" className="block text-center text-sm text-gray-500 mt-3 underline">
-            ¿Te dieron un código? Activar esta caja
-          </Link>
+          <>
+            <Link to="/recuperar" className="block text-center text-sm text-gray-500 mt-3 underline">
+              ¿Olvidaste tu contraseña?
+            </Link>
+            <Link to="/activar" className="block text-center text-sm text-gray-500 mt-3 underline">
+              ¿Te dieron un código? Activar esta caja
+            </Link>
+          </>
         )}
       </div>
     </div>

@@ -4,6 +4,7 @@ const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { ADMIN_EMAILS } = require('../config');
 const { labelOf, planStateOf } = require('../lib/plans');
+const { issueResetCode } = require('../lib/passwordReset');
 
 /**
  * Panel de administración: confirmar tiendas nuevas después de cobrar el pago
@@ -62,6 +63,28 @@ router.post('/shops/:id/confirm', asyncHandler(async (req, res) => {
     args: [id],
   })).rows[0];
   res.json({ shop: shapeShop(row) });
+}));
+
+// Generación de código de recuperación de contraseña.
+// Solo para cuentas principales (dueños de tienda), no para cajeros ni admin.
+router.post('/shops/:id/reset-code', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Tienda inválida' });
+
+  const db = getDb();
+  // Buscar la tienda: debe ser una cuenta principal, no de administración
+  const shop = (await db.execute({
+    sql: 'SELECT id, email FROM users WHERE id = ? AND owner_id IS NULL',
+    args: [id],
+  })).rows[0];
+
+  if (!shop) return res.status(404).json({ error: 'Tienda no encontrada' });
+  if (ADMIN_EMAILS.includes(shop.email.toLowerCase())) {
+    return res.status(404).json({ error: 'Tienda no encontrada' });
+  }
+
+  const { code, expires_at } = await issueResetCode(db, id);
+  res.json({ code, expires_at });
 }));
 
 module.exports = router;

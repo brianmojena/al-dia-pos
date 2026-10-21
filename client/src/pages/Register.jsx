@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, Lock, Store, AlertCircle, Check, Sparkles } from 'lucide-react'
+import { Mail, Lock, Store, AlertCircle, Check, Sparkles, Eye, EyeOff, Gift } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 // El cobro no tiene pasarela: se paga en persona. El Plan Enterprise incluye
@@ -33,13 +33,14 @@ const PLANS = [
 export default function Register() {
   const { register } = useAuth()
   const navigate = useNavigate()
-  const [storeName,  setStoreName]  = useState('')
-  const [email,      setEmail]      = useState('')
-  const [password,   setPassword]   = useState('')
-  const [confirm,    setConfirm]    = useState('')
-  const [plan,       setPlan]       = useState('basic')
-  const [error,      setError]      = useState('')
-  const [submitting, setSubmitting] = useState(false)
+  const [storeName,     setStoreName]     = useState('')
+  const [email,         setEmail]         = useState('')
+  const [password,      setPassword]      = useState('')
+  const [confirm,       setConfirm]       = useState('')
+  const [plan,          setPlan]          = useState('basic')
+  const [error,         setError]         = useState('')
+  const [submitting,    setSubmitting]    = useState(false)
+  const [showPassword,  setShowPassword]  = useState(false)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -54,7 +55,8 @@ export default function Register() {
     }
     setSubmitting(true)
     try {
-      await register({ email, password, store_name: storeName, plan })
+      // Trim del email para doble seguridad
+      await register({ email: email.trim(), password, store_name: storeName, plan })
       // Al cartel de bienvenida (prueba de 7 días + plan pendiente de
       // confirmación), no directo a la app.
       navigate('/bienvenida')
@@ -74,6 +76,15 @@ export default function Register() {
           <p className="text-sm text-gray-500 mt-1">Empieza a gestionar tu negocio</p>
         </div>
 
+        {/* Mensaje de prueba gratis */}
+        <div className="mb-5 bg-green-50 text-green-700 rounded-2xl px-4 py-3.5 flex gap-3 items-start">
+          <Gift size={20} className="flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold">7 días gratis con todas las funciones.</p>
+            <p className="text-xs mt-1">Sin tarjeta; el pago es en persona y solo si decides quedarte.</p>
+          </div>
+        </div>
+
         <form onSubmit={handleSubmit} className="bg-white rounded-3xl p-6 shadow-sm space-y-4">
           {error && (
             <div className="flex items-center gap-2 bg-red-50 text-red-600 text-sm px-4 py-3 rounded-xl">
@@ -86,9 +97,11 @@ export default function Register() {
             <Store size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               required
+              type="text"
               value={storeName}
               onChange={e => setStoreName(e.target.value)}
               placeholder="Nombre de tu tienda"
+              autoComplete="organization"
               className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
           </div>
@@ -101,6 +114,11 @@ export default function Register() {
               value={email}
               onChange={e => setEmail(e.target.value)}
               placeholder="Correo electrónico"
+              autoComplete="email"
+              inputMode="email"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
           </div>
@@ -108,25 +126,43 @@ export default function Register() {
           <div className="relative">
             <Lock size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               required
               value={password}
               onChange={e => setPassword(e.target.value)}
               placeholder="Contraseña (mínimo 6 caracteres)"
-              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+              autoComplete="new-password"
+              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-12 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+            </button>
           </div>
 
           <div className="relative">
             <Lock size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               required
               value={confirm}
               onChange={e => setConfirm(e.target.value)}
               placeholder="Confirmar contraseña"
-              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-4 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+              autoComplete="new-password"
+              className="w-full bg-gray-50 border border-gray-200 rounded-2xl pl-11 pr-12 py-3.5 text-base focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
             />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+            </button>
           </div>
 
           {/* Plan selector */}

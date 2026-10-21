@@ -7,6 +7,7 @@ import Login from './pages/Login'
 import SharedCashier from './pages/SharedCashier'
 import ActivateDevice from './pages/ActivateDevice'
 import Register from './pages/Register'
+import RecuperarContrasena from './pages/RecuperarContrasena'
 import Bienvenida from './pages/Bienvenida'
 import Admin from './pages/Admin'
 import Dashboard from './pages/Dashboard'
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/cajero" element={<SharedCashier />} />
         <Route path="/activar" element={<ActivateDevice />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/recuperar" element={<RecuperarContrasena />} />
 
         <Route element={<RequireAuth />}>
           {/* Cartel tras registrarse: prueba de 7 días + plan pendiente de

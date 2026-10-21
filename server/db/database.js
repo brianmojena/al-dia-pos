@@ -460,6 +460,10 @@ async function initDb() {
     // Las filas anteriores a esto quedan 'active' (ya eran clientes).
     'ALTER TABLE users ADD COLUMN plan_status TEXT NOT NULL DEFAULT \'active\'',
     'ALTER TABLE users ADD COLUMN trial_ends_at TEXT',
+    // Recuperación de contraseña por código de un solo uso
+    'ALTER TABLE users ADD COLUMN reset_code_hash TEXT',
+    'ALTER TABLE users ADD COLUMN reset_code_expires_at TEXT',
+    'ALTER TABLE users ADD COLUMN reset_attempts INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

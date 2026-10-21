@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { CheckCircle2, MonitorSmartphone, RefreshCw, ShieldCheck } from 'lucide-react'
+import { CheckCircle2, MonitorSmartphone, RefreshCw, ShieldCheck, KeyRound, Copy, Check, X } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { formatDateTime } from '../lib/dates'
@@ -27,6 +27,13 @@ export default function Admin() {
   const [confirming, setConfirming] = useState(null)
   // Tienda cuya ficha de caja compartida está abierta (una a la vez).
   const [setupShop, setSetupShop] = useState(null)
+  // Tienda que está solicitando código de recuperación
+  const [requestingCode, setRequestingCode] = useState(null)
+  // Tienda cuyo código de recuperación está visible
+  const [resetCodeShop, setResetCodeShop] = useState(null)
+  const [resetCode, setResetCode] = useState('')
+  const [resetCodeExpires, setResetCodeExpires] = useState('')
+  const [copiedCode, setCopiedCode] = useState(false)
 
   const load = async () => {
     setError('')
@@ -57,6 +64,34 @@ export default function Admin() {
       setError(err.message)
     } finally {
       setConfirming(null)
+    }
+  }
+
+  const requestResetCode = async (id) => {
+    setRequestingCode(id)
+    setError('')
+    try {
+      const res = await apiFetch(`/api/admin/shops/${id}/reset-code`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo generar el código')
+      setResetCodeShop(id)
+      setResetCode(data.code)
+      setResetCodeExpires(data.expires_at)
+      setCopiedCode(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRequestingCode(null)
+    }
+  }
+
+  const copyResetCode = async () => {
+    try {
+      await navigator.clipboard.writeText(resetCode)
+      setCopiedCode(true)
+      setTimeout(() => setCopiedCode(false), 2000)
+    } catch (err) {
+      // Silencioso, el usuario puede copiar manualmente
     }
   }
 
@@ -126,10 +161,62 @@ export default function Admin() {
                       <MonitorSmartphone size={14} />
                       {setupOpen ? 'Ocultar' : 'Caja compartida'}
                     </button>
+                    <button
+                      onClick={() => requestResetCode(shop.id)}
+                      disabled={requestingCode === shop.id}
+                      className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-2 rounded-xl text-sm font-semibold hover:bg-gray-50 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                      {requestingCode === shop.id
+                        ? <RefreshCw size={14} className="animate-spin" />
+                        : <KeyRound size={14} />}
+                      Código de recuperación
+                    </button>
                   </div>
                 </div>
                 {setupOpen && (
                   <SharedDeviceSetup shop={shop} onInstalled={() => setSetupShop(null)} />
+                )}
+                {resetCodeShop === shop.id && (
+                  <div className="mt-3 bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-gray-700 mb-2">
+                          Código de recuperación
+                        </p>
+                        <p className="font-mono text-2xl font-bold text-[#007AFF] mb-3 tracking-wider break-all">
+                          {resetCode}
+                        </p>
+                        <p className="text-xs text-gray-600 mb-3">
+                          Válido por 15 minutos. Dícteselo a <span className="font-semibold">{shop.store_name}</span> por WhatsApp.
+                        </p>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={copyResetCode}
+                            className="flex items-center gap-1.5 bg-[#007AFF] text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-blue-600 active:scale-95 transition-all"
+                          >
+                            {copiedCode ? (
+                              <>
+                                <Check size={14} />
+                                Copiado
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={14} />
+                                Copiar
+                              </>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => setResetCodeShop(null)}
+                            className="flex items-center gap-1.5 bg-gray-100 text-gray-700 px-3 py-2 rounded-xl text-sm font-semibold hover:bg-gray-200 active:scale-95 transition-all"
+                          >
+                            <X size={14} />
+                            Cerrar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             )
