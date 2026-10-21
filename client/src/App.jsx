@@ -2,6 +2,9 @@ import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router
 import Layout from './components/Layout'
 import RequireAuth from './components/RequireAuth'
 import RequireOwner from './components/RequireOwner'
+import RequireAdmin from './components/RequireAdmin'
+import Admin from './pages/Admin'
+import AdminLayout from './components/AdminLayout'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
@@ -28,6 +31,13 @@ export default function App() {
         <Route path="/register" element={<Register />} />
 
         <Route element={<RequireAuth />}>
+          <Route element={<RequireAdmin />}>
+            <Route path="admin" element={<AdminLayout />}>
+              <Route index element={<Admin />} />
+              <Route path="accounts" element={<Admin view="accounts" />} />
+              <Route path="devices" element={<Admin view="devices" />} />
+            </Route>
+          </Route>
           <Route path="/" element={<Layout />}>
             <Route index element={<Navigate to="/pos" replace />} />
             <Route path="pos"  element={<POS />} />

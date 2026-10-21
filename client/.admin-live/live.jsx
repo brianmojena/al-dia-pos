@@ -1,0 +1,10 @@
+import React from 'react'
+import {createRoot} from 'react-dom/client'
+import {BrowserRouter,Routes,Route,Navigate} from 'react-router-dom'
+import {AuthProvider} from '../src/context/AuthContext.jsx'
+import RequireAuth from '../src/components/RequireAuth.jsx'
+import RequireAdmin from '../src/components/RequireAdmin.jsx'
+import AdminLayout from '../src/components/AdminLayout.jsx'
+import Admin from '../src/pages/Admin.jsx'
+import Login from '../src/pages/Login.jsx'
+createRoot(document.getElementById('root')).render(<AuthProvider><BrowserRouter><Routes><Route path="/login" element={<Login/>}/><Route element={<RequireAuth/>}><Route element={<RequireAdmin/>}><Route path="/admin" element={<AdminLayout/>}><Route index element={<Admin/>}/><Route path="accounts" element={<Admin view="accounts"/>}/><Route path="devices" element={<Admin view="devices"/>}/></Route></Route></Route><Route path="/pos" element={<div style={{padding:40,fontFamily:'system-ui'}}><h1>Acceso administrativo requerido</h1><p>Esta cuenta no tiene permiso para consultar la administración global.</p><a href="/login">Iniciar sesión con tu cuenta administrativa</a></div>}/><Route path="*" element={<Navigate to="/admin" replace/>}/></Routes></BrowserRouter></AuthProvider>)

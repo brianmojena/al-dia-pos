@@ -1,3 +1,5 @@
+import { deviceHeaders } from './deviceIdentity.js'
+
 const TOKEN_KEY = 'mypimes_token'
 export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
@@ -9,7 +11,7 @@ export const isElectron = () => typeof window !== 'undefined' && !!window.electr
 export async function networkFetch(path, options = {}) {
   const token = options.token ?? getToken()
   const { token: _token, preserveSession, ...request } = options
-  const headers = { ...(request.headers || {}) }
+  const headers = { ...(request.headers || {}), ...deviceHeaders() }
   if (token) headers.Authorization = `Bearer ${token}`
   if (request.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json'
   const controller = new AbortController()

@@ -6,6 +6,8 @@ const { getDb } = require('../db/database');
 const { requireAuth, requireOwner, OWNER, CASHIER } = require('../middleware/auth');
 const { JWT_SECRET } = require('../config');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { isAdminEmail } = require('../lib/admin');
+const { observeDevice } = require('../lib/devices');
 
 const PLANS = ['premium', 'dev'];
 
@@ -15,6 +17,7 @@ const PLANS = ['premium', 'dev'];
 // la caja de un cajero abriría sin límite ni tasa configurados.
 const publicUser = (account, shop = account) => ({
   id: account.id,
+  is_admin: isAdminEmail(account.email),
   email: account.email,
   role: account.role || OWNER,
   created_at: account.created_at,
@@ -61,6 +64,9 @@ router.post('/register', asyncHandler(async (req, res) => {
     args: [email.toLowerCase()],
   });
   if (existingResult.rows[0]) return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
+  // No permitir que el registro público reclame un email reservado al admin.
+  // La cuenta debe existir antes de habilitar ADMIN_EMAILS.
+  if (isAdminEmail(email)) return res.status(403).json({ error: 'Esta cuenta está reservada para administración' });
 
   const password_hash = bcrypt.hashSync(password, 10);
   const insertResult = await db.execute({
@@ -73,6 +79,7 @@ router.post('/register', asyncHandler(async (req, res) => {
     args: [Number(insertResult.lastInsertRowid)],
   });
   const user = userResult.rows[0];
+  await observeDevice(req, user.id);
   res.status(201).json({ token: sign(user), user: publicUser(user) });
 }));
 
@@ -92,6 +99,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Email o contraseña incorrectos' });
   }
 
+  await observeDevice(req, user.id);
   res.json({ token: sign(user), user: publicUser(user, await loadShop(db, user)) });
 }));
 

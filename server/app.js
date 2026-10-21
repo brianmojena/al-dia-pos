@@ -16,6 +16,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/auth', authRouter);
+app.use('/api/admin', requireAuth, require('./middleware/admin').requireAdmin, require('./routes/admin'));
 
 app.use('/api/products',  requireAuth, productsRouter);
 app.use('/api/sales',     requireAuth, salesRouter);

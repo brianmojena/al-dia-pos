@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut, CloudOff } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, LogOut, CloudOff, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import OfflineStatus from './OfflineStatus'
@@ -82,6 +82,10 @@ export default function Layout() {
           </h1>
         </div>
         <SyncStatus />
+        {user?.is_admin && <NavLink to="/admin" aria-label="Administración privada" title="Administración privada"
+          className={({ isActive }) => `p-2 rounded-xl hover:bg-blue-50 ${isActive ? 'text-[#007AFF] bg-blue-50' : 'text-gray-500'}`}>
+          <ShieldCheck size={20} />
+        </NavLink>}
         {user && (
           // Para un cajero, saber en qué cuenta está abierta la caja importa
           // más que el plan del negocio.

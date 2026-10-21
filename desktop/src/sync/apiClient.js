@@ -4,6 +4,16 @@ const API_BASE = process.env.MYPIMES_API_URL || 'https://server-three-orcin-11.v
 
 async function apiRequest(method, path, { token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
+  // El proceso principal usa la identidad persistida en SQLite, también en sync.
+  // No depender del localStorage del renderer evita contar dos veces la caja.
+  try {
+    const id = require('../db/queries').getRegisterId();
+    if (id) {
+      headers['X-Device-Id'] = id;
+      headers['X-Device-Platform'] = 'desktop';
+      headers['User-Agent'] = `MiTienda-Desktop (${process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux'})`;
+    }
+  } catch (_) { /* No hay base local todavía: continuar sin telemetría. */ }
   if (token) headers.Authorization = `Bearer ${token}`;
 
   let res;

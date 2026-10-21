@@ -14,19 +14,19 @@ function getSession() {
 
 function setSession({
   user_id, email, store_name, plan, token,
-  transfer_limit = null, usd_rate = null, eur_rate = null, role = null,
+  transfer_limit = null, usd_rate = null, eur_rate = null, role = null, is_admin = false,
 }) {
   const db = getLocalDb();
   db.prepare(`
-    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, updated_at)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO session (id, user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, is_admin, updated_at)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       user_id = excluded.user_id, email = excluded.email, store_name = excluded.store_name,
       plan = excluded.plan, token = excluded.token,
       transfer_limit = excluded.transfer_limit, usd_rate = excluded.usd_rate,
-      eur_rate = excluded.eur_rate, role = excluded.role,
+      eur_rate = excluded.eur_rate, role = excluded.role, is_admin = excluded.is_admin,
       updated_at = datetime('now')
-  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role);
+  `).run(user_id, email, store_name, plan, token, transfer_limit, usd_rate, eur_rate, role, is_admin ? 1 : 0);
 }
 
 /**

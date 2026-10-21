@@ -193,6 +193,18 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Registro interno para soporte/administración, separado de los tokens push.
+    -- Cuenta la instalación del cliente, no las sesiones ni las pestañas.
+    CREATE TABLE IF NOT EXISTS account_devices (
+      account_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK (platform IN ('web', 'desktop')),
+      label TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (account_id, device_id)
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))

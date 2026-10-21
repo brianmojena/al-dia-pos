@@ -35,6 +35,7 @@ async function routeRequest(method, fullPath, body) {
             store_name: res.data.user.store_name, plan: res.data.user.plan, token: res.data.token,
             transfer_limit: res.data.user.transfer_limit, usd_rate: res.data.user.usd_rate,
             eur_rate: res.data.user.eur_rate ?? null, role: res.data.user.role,
+            is_admin: res.data.user.is_admin,
           });
           await auth.pullCatalog(res.data.token).catch(() => {});
         }
@@ -46,6 +47,7 @@ async function routeRequest(method, fullPath, body) {
         return ok(200, {
           user: {
             id: session.user_id, email: session.email,
+            is_admin: Boolean(session.is_admin),
             store_name: session.store_name, plan: session.plan,
             transfer_limit: session.transfer_limit, usd_rate: session.usd_rate,
             eur_rate: session.eur_rate ?? null,
@@ -60,6 +62,17 @@ async function routeRequest(method, fullPath, body) {
     // Todo lo demás requiere sesión local (igual que requireAuth en el servidor).
     const session = auth.getLocalSession();
     if (!session) return fail(401, 'No autenticado');
+
+    // El panel administrativo consulta la nube: sus datos y permisos no se
+    // deducen de la tienda local. Una sesión cloud vencida no invalida el POS.
+    if (pathname === '/api/admin/devices' && method === 'GET') {
+      const { apiRequest } = require('./sync/apiClient');
+      try {
+        const res = await apiRequest(method, fullPath, { token: session.token });
+        if (res.status === 401) return fail(403, 'Tu sesión con la nube venció. Vuelve a iniciar sesión para consultar el panel.');
+        return res;
+      } catch (_) { return fail(503, 'Conéctate a internet para consultar el panel.'); }
+    }
 
     // Las tasas y el techo son de la tienda entera: cambiarlos necesita red,
     // como el alta de cuenta. Si el servidor acepta, la caja se queda con los

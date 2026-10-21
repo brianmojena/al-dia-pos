@@ -89,6 +89,11 @@ Copy `.env.example` to `.env`:
 | `TURSO_DATABASE_URL` | yes | libSQL URL; unset locally = local SQLite file |
 | `TURSO_AUTH_TOKEN` | yes | Turso auth |
 | `JWT_SECRET` | yes | Session signing; falls back to a dev-only constant |
+| `ADMIN_EMAILS` | only for admin access | Existing account emails allowed to open the private `/admin` panel; comma-separated, empty disables access |
+
+The private system administration panel shows device counts per account across
+all shops. See [setup and counting rules](../docs/admin-panel.md). Shop ownership
+does not grant administrative access.
 
 ### Scripts
 

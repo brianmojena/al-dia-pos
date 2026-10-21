@@ -62,6 +62,7 @@ async function login(email, password) {
     usd_rate: res.data.user.usd_rate,
     eur_rate: res.data.user.eur_rate ?? null,
     role: res.data.user.role,
+    is_admin: res.data.user.is_admin,
   });
 
   const pull = await pullCatalog(res.data.token).catch((err) => ({ pulled: false, error: err.message }));

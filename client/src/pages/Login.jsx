@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { Mail, Lock, AlertCircle } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
   const { login } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
   const [email,       setEmail]       = useState('')
   const [password,    setPassword]    = useState('')
   const [error,       setError]       = useState('')
@@ -16,8 +17,8 @@ export default function Login() {
     setError('')
     setSubmitting(true)
     try {
-      await login(email, password)
-      navigate('/pos')
+      const account = await login(email, password)
+      navigate(location.state?.from || (account.is_admin ? '/admin' : '/pos'), { replace: true })
     } catch (err) {
       setError(err.message)
     } finally {

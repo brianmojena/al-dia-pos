@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config');
+const { observeDevice } = require('../lib/devices');
 
 const OWNER = 'dueño';
 const CASHIER = 'cajero';
@@ -17,20 +18,22 @@ const CASHIER = 'cajero';
  * Se interpretan como dueño, que es lo que eran: nadie tiene que volver a
  * iniciar sesión por este cambio.
  */
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'No autenticado' });
 
+  let payload;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.userId    = payload.userId;
-    req.accountId = payload.accountId ?? payload.userId;
-    req.role      = payload.role ?? OWNER;
-    next();
+    payload = jwt.verify(token, JWT_SECRET);
   } catch (_) {
-    res.status(401).json({ error: 'Sesión inválida o expirada' });
+    return res.status(401).json({ error: 'Sesión inválida o expirada' });
   }
+  req.userId    = payload.userId;
+  req.accountId = payload.accountId ?? payload.userId;
+  req.role      = payload.role ?? OWNER;
+  await observeDevice(req, req.accountId);
+  next();
 }
 
 /**
