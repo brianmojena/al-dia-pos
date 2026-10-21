@@ -21,6 +21,16 @@ async function routeRequest(method, fullPath, body) {
   try {
     // --- auth ---
     if (parts[0] === 'api' && parts[1] === 'auth') {
+      if (parts.length === 3 && parts[2] === 'reset-password' && method === 'POST') {
+        const { apiRequest } = require('./sync/apiClient');
+        try {
+          const res = await apiRequest(method, '/api/auth/reset-password', { body });
+          // Una respuesta cloud no invalida la sesión ni la cola local.
+          return res.status === 401 ? fail(400, 'El código no es válido o venció. Pide uno nuevo.') : res;
+        } catch (_) {
+          return fail(503, 'Conéctate a internet para recuperar tu contraseña.');
+        }
+      }
       if (parts[2] === 'login' && method === 'POST') {
         const { user, initialPull } = await auth.login(body.email, body.password);
         const session = auth.getLocalSession();
@@ -64,6 +74,18 @@ async function routeRequest(method, fullPath, body) {
     // Todo lo demás requiere sesión local (igual que requireAuth en el servidor).
     const session = auth.getLocalSession();
     if (!session) return fail(401, 'No autenticado');
+
+    // Los informes se consultan en la nube; cobrar sigue usando SQLite local.
+    if (method === 'GET' && /^\/api\/audit\/reports(?:\/\d+)?$/.test(pathname)) {
+      if (session.role === 'cajero') return fail(403, 'Solo el dueño puede ver esto');
+      const { apiRequest } = require('./sync/apiClient');
+      try {
+        const res = await apiRequest(method, fullPath, { token: session.token });
+        return res.status === 401 ? fail(403, 'Renueva tu sesión con la nube para consultar los informes.') : res;
+      } catch (_) {
+        return fail(503, 'Conéctate a internet para consultar los informes.');
+      }
+    }
 
     // Las tasas y el techo son de la tienda entera: cambiarlos necesita red,
     // como el alta de cuenta. Si el servidor acepta, la caja se queda con los

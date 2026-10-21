@@ -281,101 +281,159 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.put('/:id', asyncHandler(async (req, res) => {
-  if (req.role !== 'dueño' && Object.keys(req.body).some((key) => key !== 'sale_price' && key !== 'add_stock')) {
+  if (req.role !== 'dueño' && Object.keys(req.body).some((key) => !['sale_price', 'add_stock', 'operation_id'].includes(key))) {
     return res.status(403).json({ error: 'El cajero solo puede cambiar el precio de venta y añadir stock' });
+  }
+  const operationId = req.body.operation_id;
+  if (operationId !== undefined
+      && (typeof operationId !== 'string' || operationId.length === 0 || operationId.length > 100)) {
+    return res.status(400).json({ error: 'Identificador de operación inválido' });
   }
   if ('sale_price' in req.body && (req.body.sale_price === null || req.body.sale_price === ''
       || !Number.isFinite(Number(req.body.sale_price)) || Number(req.body.sale_price) < 0)) {
     return res.status(400).json({ error: 'El precio de venta no es válido' });
   }
-  const db = getDb();
-  const existingResult = await db.execute({
-    sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
-    args: [req.params.id, req.userId],
-  });
-  const existing = existingResult.rows[0];
-  if (!existing) return res.status(404).json({ error: 'Producto no encontrado' });
-
-  const { name, purchase_price, sale_price } = req.body;
-  let { stock } = req.body;
   const parsedUnit = parseUnit(req.body.unit);
   if (parsedUnit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
-  const unit = parsedUnit === undefined ? (existing.unit ?? null) : parsedUnit;
-  // Si no viene, el paquete se conserva (la app de escritorio no lo conoce);
-  // un producto que pasa a venderse por peso deja de tener paquete.
-  const pack = parsePack(req.body, unit)
-    ?? (unit ? { pack_size: null, pack_price: null } : { pack_size: existing.pack_size ?? null, pack_price: existing.pack_price ?? null });
-  if (pack.error) return res.status(400).json({ error: pack.error });
-  if (stock !== undefined && !validQuantity(stock, unit)) {
-    return res.status(400).json({
-      error: unit
-        ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)'
-        : 'El stock debe ser un número entero mayor o igual a 0',
-    });
-  }
-  // Mercancía recibida: se suma al stock actual. Va como cantidad (no como
-  // total) para que dos personas añadiendo a la vez no se pisen.
-  const addStock = req.body.add_stock;
-  if (addStock !== undefined && addStock !== null && addStock !== '') {
-    if (!validQuantity(addStock, unit)) {
+
+  const db = getDb();
+  const account = await describeAccount(db, req);
+  const tx = await db.transaction('write');
+  try {
+    // Recibo y cambio en la misma transacción: si la respuesta se pierde, el
+    // reintento devuelve lo que ya se aplicó en vez de sumar el stock dos veces.
+    if (operationId) {
+      const receipt = (await tx.execute({
+        sql: 'SELECT response FROM pwa_product_operations WHERE user_id = ? AND account_id = ? AND operation_id = ?',
+        args: [req.userId, req.accountId, operationId],
+      })).rows[0];
+      if (receipt) {
+        await tx.commit();
+        return res.json(JSON.parse(receipt.response));
+      }
+    }
+
+    const existing = (await tx.execute({
+      sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
+      args: [req.params.id, req.userId],
+    })).rows[0];
+    if (!existing) {
+      await tx.rollback();
+      return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    const { name, purchase_price, sale_price } = req.body;
+    const stock = req.body.stock;
+    const unit = parsedUnit === undefined ? (existing.unit ?? null) : parsedUnit;
+    // Si no viene, el paquete se conserva (la app de escritorio no lo conoce);
+    // un producto que pasa a venderse por peso deja de tener paquete.
+    const parsedPack = parsePack(req.body, unit);
+    if (parsedPack?.error) {
+      await tx.rollback();
+      return res.status(400).json({ error: parsedPack.error });
+    }
+    const pack = parsedPack ?? ((parsedUnit !== undefined && unit)
+      ? { pack_size: null, pack_price: null } : null);
+    if (stock !== undefined && !validQuantity(stock, unit)) {
+      await tx.rollback();
+      return res.status(400).json({
+        error: unit
+          ? 'El stock debe ser un número mayor o igual a 0 (hasta 3 decimales)'
+          : 'El stock debe ser un número entero mayor o igual a 0',
+      });
+    }
+    // Mercancía recibida: se suma al stock actual. Va como cantidad (no como
+    // total) para que dos personas añadiendo a la vez no se pisen.
+    const addStock = req.body.add_stock;
+    const hasAdd = addStock !== undefined && addStock !== null && addStock !== '';
+    if (hasAdd && !validQuantity(addStock, unit)) {
+      await tx.rollback();
       return res.status(400).json({
         error: unit
           ? 'La cantidad a añadir debe ser un número mayor o igual a 0 (hasta 3 decimales)'
           : 'La cantidad a añadir debe ser un número entero mayor o igual a 0',
       });
     }
-    stock = Math.round((Number(existing.stock) + Number(addStock)) * 1000) / 1000;
+    const addedQty = hasAdd ? Number(addStock) : 0;
+    const trackStock = trackStockFor(unit, req.body.track_stock, Number(existing.track_stock ?? 1));
+    if (addedQty > 0 && !trackStock) {
+      await tx.rollback();
+      return res.status(400).json({ error: 'Este producto no lleva control de stock' });
+    }
+    // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
+    if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {
+      await tx.rollback();
+      return res.status(400).json({ error: 'Al quitar la unidad de medida hay que poner el stock en piezas enteras' });
+    }
+
+    // Solo se escribe lo que vino en la petición. Antes el UPDATE reescribía
+    // el stock con el valor leído fuera de la transacción: una venta cobrada
+    // entre la lectura y la escritura se perdía (el stock "resucitaba").
+    const sets = [];
+    const args = [];
+    const set = (column, value) => { sets.push(`${column} = ?`); args.push(value); };
+
+    if ('name' in req.body) set('name', name ?? existing.name);
+    if ('purchase_price' in req.body) set('purchase_price', purchase_price ?? existing.purchase_price);
+    if ('sale_price' in req.body) set('sale_price', sale_price ?? existing.sale_price);
+    if (hasAdd && addedQty > 0) {
+      sets.push('stock = ROUND(stock + ?, 3)');
+      args.push(addedQty);
+    } else if (stock !== undefined) {
+      set('stock', trackStock ? Number(stock) : 0);
+    } else if (!trackStock && Number(existing.track_stock ?? 1) === 1) {
+      // Dejar de llevar stock lo pone a 0, pero solo cuando se pidió el cambio.
+      set('stock', 0);
+    }
+    if (parsedUnit !== undefined || 'track_stock' in req.body) set('track_stock', trackStock);
+    if (parsedUnit !== undefined) set('unit', unit);
+    if (pack) { set('pack_size', pack.pack_size); set('pack_price', pack.pack_price); }
+
+    let after = Number(existing.stock);
+    if (sets.length > 0) {
+      await tx.execute({
+        sql: `UPDATE products SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
+        args: [...args, req.params.id, req.userId],
+      });
+      after = Number((await tx.execute({
+        sql: 'SELECT stock FROM products WHERE id = ?',
+        args: [req.params.id],
+      })).rows[0]?.stock ?? after);
+    }
+
+    // La cuenta principal pone el stock a mano: queda anotado de cuánto a cuánto.
+    if (!hasAdd && stock !== undefined && trackStock && after !== Number(existing.stock)) {
+      const correction = stockChangeStatement({
+        userId: req.userId, product: { id: existing.id, name: name ?? existing.name },
+        before: existing.stock, after, account, kind: 'correccion', reason: req.body.stock_reason,
+      });
+      if (correction) await tx.execute(correction);
+    }
+    if (addedQty > 0) {
+      await tx.execute({
+        sql: `INSERT INTO stock_entries
+                (user_id, product_id, product_name, quantity, stock_before, stock_after, account_id, account_email)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [req.userId, existing.id, name ?? existing.name, addedQty, Number(existing.stock), after, account.id, account.email],
+      });
+    }
+
+    const product = (await tx.execute({
+      sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
+      args: [req.params.id, req.userId],
+    })).rows[0];
+    if (operationId) {
+      await tx.execute({
+        sql: 'INSERT INTO pwa_product_operations (user_id, account_id, operation_id, response) VALUES (?, ?, ?, ?)',
+        args: [req.userId, req.accountId, operationId, JSON.stringify(product)],
+      });
+    }
+    await tx.commit();
+    res.json(product);
+  } catch (error) {
+    await tx.rollback().catch(() => {});
+    throw error;
   }
-  const addedQty = addStock !== undefined && addStock !== null && addStock !== '' ? Number(addStock) : 0;
-  const trackStock = trackStockFor(unit, req.body.track_stock, Number(existing.track_stock ?? 1));
-  if (addedQty > 0 && !trackStock) {
-    return res.status(400).json({ error: 'Este producto no lleva control de stock' });
-  }
-  // Pasar un producto a "por pieza" con stock decimal lo dejaría inconsistente.
-  if (!unit && stock === undefined && !Number.isInteger(Number(existing.stock))) {
-    return res.status(400).json({ error: 'Al quitar la unidad de medida hay que poner el stock en piezas enteras' });
-  }
-  const statements = [{
-    // Con add_stock la suma la hace la base de datos, no el valor leído arriba:
-    // dos entradas simultáneas no se pisan.
-    sql: `UPDATE products SET name = ?, purchase_price = ?, sale_price = ?,
-            stock = ${addedQty > 0 ? 'ROUND(stock + ?, 3)' : '?'}, unit = ?, track_stock = ?,
-            pack_size = ?, pack_price = ? WHERE id = ?`,
-    args: [
-      name           ?? existing.name,
-      purchase_price ?? existing.purchase_price,
-      sale_price     ?? existing.sale_price,
-      addedQty > 0 ? addedQty : (trackStock ? (stock ?? existing.stock) : 0),
-      unit,
-      trackStock,
-      pack.pack_size,
-      pack.pack_price,
-      req.params.id,
-    ],
-  }];
-  // La cuenta principal pone el stock a mano: queda anotado de cuánto a cuánto
-  // y, si lo escribió, por qué.
-  const finalStock = trackStock ? Number(stock ?? existing.stock) : 0;
-  if (addedQty === 0 && stock !== undefined && trackStock && finalStock !== Number(existing.stock)) {
-    const account = await describeAccount(db, req);
-    const correction = stockChangeStatement({
-      userId: req.userId, product: { id: existing.id, name: name ?? existing.name },
-      before: existing.stock, after: finalStock, account, kind: 'correccion', reason: req.body.stock_reason,
-    });
-    if (correction) statements.push(correction);
-  }
-  if (addedQty > 0) {
-    const account = await describeAccount(db, req);
-    statements.push({
-      sql: `INSERT INTO stock_entries
-              (user_id, product_id, product_name, quantity, stock_before, stock_after, account_id, account_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [req.userId, existing.id, name ?? existing.name, addedQty, Number(existing.stock), stock, account.id, account.email],
-    });
-  }
-  await db.batch(statements, 'write');
-  const result = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
-  res.json(result.rows[0]);
 }));
 
 router.delete('/:id', requireOwner, asyncHandler(async (req, res) => {

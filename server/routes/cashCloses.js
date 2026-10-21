@@ -8,6 +8,7 @@ const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
 const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('../lib/payment');
 const { CashCloseCorrectionError, closeDetails, correctCashClose } = require('../lib/cashCloseCorrections');
+const { enqueueAuditJob } = require('../lib/auditJobs');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -362,6 +363,15 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
     const result = await correctCashClose(getDb(), {
       userId: req.userId, closeId, body: req.body, account,
     });
+    // Una corrección cambia la historia del cierre: se analiza como una
+    // revisión nueva, conservando el informe anterior para auditoría.
+    if (result.correction) {
+      await enqueueAuditJob(getDb(), {
+        userId: req.userId,
+        cashCloseId: closeId,
+        revision: Number(result.cash_close.correction_revision || 0),
+      });
+    }
     res.json(result);
   } catch (error) {
     if (error instanceof CashCloseCorrectionError) return res.status(error.status).json({ error: error.message });
@@ -565,6 +575,13 @@ router.post('/', asyncHandler(async (req, res) => {
     const final = await db.execute({
       sql: 'SELECT * FROM cash_closes WHERE id = ?',
       args: [closeId],
+    });
+    // El cierre ya está confirmado. El análisis es asíncrono y no puede
+    // retrasar ni tumbar la respuesta al cajero.
+    await enqueueAuditJob(db, {
+      userId: req.userId,
+      cashCloseId: closeId,
+      revision: Number(final.rows[0]?.correction_revision || 0),
     });
     return res.status(201).json(final.rows[0]);
   } catch (err) {

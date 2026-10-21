@@ -33,6 +33,10 @@ function setSession({
 // true/false del servidor → 1/0; sin dato → NULL (se muestra el almacén).
 const toFlag = (value) => (value == null ? null : value ? 1 : 0);
 
+// datetime('now') de SQLite es UTC pero sin zona; el servidor espera ISO Z
+// para respetar la hora real de una operación que sube horas después.
+const isoUtc = (value) => (value ? `${String(value).replace(' ', 'T')}Z` : null);
+
 /**
  * Actualiza SOLO transfer_limit y las tasas de la sesión ya guardada, sin tocar
  * el resto — la usa el sync worker para reflejar en la caja lo que el dueño
@@ -105,7 +109,10 @@ function enqueueOutbox(db, { op_type, client_op_id, local_ref_id, payload }) {
 
 function getPendingOutbox(limit = 50) {
   return getLocalDb()
-    .prepare(`SELECT * FROM outbox WHERE status IN ('pending', 'conflict') ORDER BY id ASC LIMIT ?`)
+    .prepare(`SELECT * FROM outbox
+              WHERE status = 'pending'
+                AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))
+              ORDER BY id ASC LIMIT ?`)
     .all(limit);
 }
 
@@ -522,7 +529,21 @@ function deleteProduct(id) {
  * arreglamos en el servidor) y todo ocurre en una sola transacción con el
  * encolado del outbox — o se guarda todo, o no se guarda nada.
  */
-function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount = null, ...rest }) {
+function createSaleLocal({
+  items, payment_method = 'efectivo', transfer_amount = null, client_sale_id = null, ...rest
+}) {
+  // El IPC puede reintentar el mismo cobro si se perdió la respuesta. Si el
+  // cliente ya mandó su id, la segunda llamada devuelve la venta original en
+  // vez de cobrar dos veces.
+  let replayId = null;
+  if (client_sale_id != null) {
+    if (typeof client_sale_id !== 'string' || client_sale_id.length === 0 || client_sale_id.length > 100) {
+      throw Object.assign(new Error('Identificador de venta inválido'), { code: 'BAD_CLIENT_ID' });
+    }
+    replayId = client_sale_id;
+    const existing = getLocalDb().prepare('SELECT * FROM sales WHERE client_sale_id = ?').get(replayId);
+    if (existing) return existing;
+  }
   if (!Array.isArray(items) || items.length === 0) {
     throw Object.assign(new Error('La venta debe tener al menos un producto'), { code: 'EMPTY_SALE' });
   }
@@ -542,7 +563,7 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
   catch (error) { throw Object.assign(error, { code: 'BAD_PAYMENT' }); }
 
   const db = getLocalDb();
-  const clientSaleId = crypto.randomUUID();
+  const clientSaleId = replayId || crypto.randomUUID();
   const registerId = getRegisterId();
   const session = getSession();
   const accountEmail = session?.email ?? null;
@@ -633,12 +654,15 @@ function createSaleLocal({ items, payment_method = 'efectivo', transfer_amount =
       `).run(saleId, line.product_id, line.product_name, line.quantity, line.unit_price, line.unit_cost);
     }
 
+    const soldAt = db.prepare('SELECT created_at FROM sales WHERE id = ?').get(saleId).created_at;
+
     enqueueOutbox(db, {
       op_type: 'sale.create',
       client_op_id: clientSaleId,   // mismo id: es EL identificador de idempotencia de esta venta
       local_ref_id: saleId,
       payload: {
         client_sale_id: clientSaleId,
+        sold_at: isoUtc(soldAt),
         payment_method,
         transfer_amount: transferAmount,
         ...foreign,
@@ -1144,7 +1168,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
         counted_usd: countedUsd,
         counted_eur: countedEur,
         note,
-        closed_at: db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at,
+        closed_at: isoUtc(db.prepare('SELECT closed_at FROM cash_closes WHERE id = ?').get(closeId).closed_at),
         client_sale_ids: sales.map(s => s.client_sale_id),
         client_purchase_ids: purchases.map(p => p.client_purchase_id),
         client_withdrawal_ids: withdrawals.filter(w => !w.voided_at).map(w => w.client_withdrawal_id),
@@ -1296,12 +1320,15 @@ function createInventoryCountLocal({ items, note = null }) {
              line.counted, line.difference, line.unit_cost, line.unit_price);
     }
 
+    const countedAt = db.prepare('SELECT counted_at FROM inventory_counts WHERE id = ?').get(countId).counted_at;
+
     enqueueOutbox(db, {
       op_type: 'inventory_count.create',
       client_op_id: clientCountId,
       local_ref_id: countId,
       payload: {
         client_count_id: clientCountId,
+        counted_at: isoUtc(countedAt),
         note,
         // Ids LOCALES: el sync worker los traduce a server_id al armar el POST,
         // igual que hace con las líneas de una venta.
@@ -1356,12 +1383,18 @@ function markClosedOnServer(db, table, rowId, serverCloseId) {
     .run(close ? close.id : -Number(serverCloseId), rowId);
 }
 
-// Pasa a cerradas, con el id local de este cierre, las ventas y compras que el
-// servidor dice que cubrió (incluidas las que ya estaban bajadas y abiertas).
+// Pasa a cerradas, con el id local de este cierre, las ventas, compras y
+// extracciones que el servidor dice que cubrió (incluidas las que ya estaban
+// bajadas y abiertas).
 function applyCloseCoverage(db, localCloseId, close) {
-  db.prepare('UPDATE sales SET cash_close_id = ? WHERE cash_close_id = ?').run(localCloseId, -Number(close.id));
-  db.prepare('UPDATE currency_purchases SET cash_close_id = ? WHERE cash_close_id = ?').run(localCloseId, -Number(close.id));
-  for (const [table, ids] of [['sales', close.covered_sale_ids], ['currency_purchases', close.covered_purchase_ids]]) {
+  for (const table of ['sales', 'currency_purchases', 'cash_withdrawals']) {
+    db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE cash_close_id = ?`).run(localCloseId, -Number(close.id));
+  }
+  for (const [table, ids] of [
+    ['sales', close.covered_sale_ids],
+    ['currency_purchases', close.covered_purchase_ids],
+    ['cash_withdrawals', close.covered_withdrawal_ids],
+  ]) {
     for (const id of Array.isArray(ids) ? ids : []) {
       db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE server_id = ? AND (cash_close_id IS NULL OR cash_close_id < 0)`)
         .run(localCloseId, Number(id));
@@ -1447,6 +1480,12 @@ function applyServerDelta(page) {
       const existing = db.prepare('SELECT id, server_id FROM cash_withdrawals WHERE client_withdrawal_id = ?').get(clientWithdrawalId);
       if (existing) {
         if (existing.server_id == null) db.prepare('UPDATE cash_withdrawals SET server_id = ? WHERE id = ?').run(Number(withdrawal.id), existing.id);
+        // Una extracción abierta se reenvía como recordatorio para que una
+        // anulación hecha en otro aparato llegue también aquí.
+        if (withdrawal.voided_at) {
+          db.prepare('UPDATE cash_withdrawals SET voided_at = ? WHERE id = ?')
+            .run(withdrawal.voided_at, existing.id);
+        }
         // Marcar como cubierta si el servidor dice que lo está
         if (withdrawal.cash_close_id) {
           markClosedOnServer(db, 'cash_withdrawals', existing.id, withdrawal.cash_close_id);
@@ -1839,17 +1878,23 @@ function applyServerCatalog(serverProducts) {
 /**
  * Devuelve a 'pending' las operaciones que quedaron en 'syncing'.
  *
- * Una pasada del sync worker nunca empieza con otra en curso (el loop espera a
- * que termine para programar la siguiente), así que cualquier 'syncing' al
- * empezar es de una pasada que se cortó: la app se cerró o se colgó a mitad de
- * una petición. Antes quedaban así para siempre, porque getPendingOutbox solo
- * lee 'pending' y 'conflict'.
- *
- * Reintentarlas es seguro: ventas, cierres y arqueos llevan su id de
- * idempotencia, y un alta de producto repetida la une el servidor por nombre.
+ * `staleOnly` es la regla normal: solo rescata filas cuya última petición
+ * empezó hace más de 5 minutos, para no arrebatarle una operación a otra
+ * pasada todavía activa. Al arrancar el proceso se llama sin esa opción: en
+ * ese momento cualquier 'syncing' es de una pasada que se cortó.
  */
-function resetStuckSyncing() {
-  return getLocalDb().prepare(`UPDATE outbox SET status = 'pending' WHERE status = 'syncing'`).run().changes;
+function resetStuckSyncing({ staleOnly = true } = {}) {
+  const db = getLocalDb();
+  if (staleOnly) {
+    return db.prepare(`
+      UPDATE outbox SET status = 'pending', next_attempt_at = NULL
+      WHERE status = 'syncing'
+        AND (last_attempt_at IS NULL OR last_attempt_at <= datetime('now', '-5 minutes'))
+    `).run().changes;
+  }
+  return db.prepare(`
+    UPDATE outbox SET status = 'pending', next_attempt_at = NULL WHERE status = 'syncing'
+  `).run().changes;
 }
 
 /**

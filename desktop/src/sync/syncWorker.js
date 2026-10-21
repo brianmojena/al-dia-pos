@@ -11,20 +11,41 @@ const { businessToday } = require('../lib/businessDay');
 // ---------------------------------------------------------------------------
 
 const markSyncing = (db, id) =>
-  db.prepare(`UPDATE outbox SET status = 'syncing', last_attempt_at = datetime('now') WHERE id = ?`).run(id);
+  db.prepare(`
+    UPDATE outbox SET status = 'syncing', last_attempt_at = datetime('now'), next_attempt_at = NULL WHERE id = ?
+  `).run(id);
 
 const markSynced = (db, id) =>
-  db.prepare(`UPDATE outbox SET status = 'synced', last_error = NULL WHERE id = ?`).run(id);
+  db.prepare(`
+    UPDATE outbox SET status = 'synced', last_error = NULL, next_attempt_at = NULL WHERE id = ?
+  `).run(id);
 
 const markConflict = (db, id, error) =>
-  db.prepare(`UPDATE outbox SET status = 'conflict', last_error = ? WHERE id = ?`).run(error, id);
-
-// Vuelve a 'pending' (no 'failed' — sigue reintentándose solo) con el contador
-// de intentos incrementado, para poder aplicar backoff más adelante si hace falta.
-const markRetry = (db, id, error) =>
   db.prepare(`
-    UPDATE outbox SET status = 'pending', attempts = attempts + 1, last_error = ? WHERE id = ?
+    UPDATE outbox SET status = 'conflict', last_error = ?, next_attempt_at = NULL WHERE id = ?
   `).run(error, id);
+
+// Sin red no es un fallo de la operación: se reintenta en la próxima pasada,
+// sin gastar el contador de intentos.
+const markPending = (db, id, error) =>
+  db.prepare(`UPDATE outbox SET status = 'pending', last_error = ? WHERE id = ?`).run(error, id);
+
+// Error transitorio del servidor: espera creciente con variación aleatoria para
+// que varias cajas no vuelvan a golpear a la vez. El techo es 15 minutos.
+const retryDelaySeconds = (attempts) => {
+  const base = Math.min(15 * 60, 5 * 2 ** Math.min(attempts, 8));
+  return Math.round(base * (0.8 + Math.random() * 0.4));
+};
+
+const markRetry = (db, id, error) => {
+  const previous = Number(db.prepare('SELECT attempts FROM outbox WHERE id = ?').get(id)?.attempts || 0);
+  const next = new Date(Date.now() + retryDelaySeconds(previous) * 1000)
+    .toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare(`
+    UPDATE outbox SET status = 'pending', attempts = attempts + 1, last_error = ?, next_attempt_at = ?
+    WHERE id = ?
+  `).run(error, next, id);
+};
 
 const getProductServerId = (db, localId) => {
   const row = db.prepare('SELECT server_id FROM products WHERE id = ?').get(localId);
@@ -89,6 +110,9 @@ function buildRequest(db, row) {
           add_stock: payload.add_stock,
           unit: payload.unit,
           track_stock: payload.track_stock,
+          // Si la respuesta se perdió, el reintento no vuelve a sumar stock:
+          // el servidor guarda el recibo por esta clave.
+          operation_id: row.client_op_id,
         },
       };
     }
@@ -126,6 +150,9 @@ function buildRequest(db, row) {
         path: '/api/sales',
         body: {
           items, payment_method: payload.payment_method, client_sale_id: payload.client_sale_id,
+          // Hora real del cobro: el servidor la usa para el día del negocio y
+          // para los cierres, aunque la venta suba horas después.
+          ...(payload.sold_at ? { sold_at: payload.sold_at } : {}),
           transfer_amount: payload.transfer_amount ?? null,
           // Solo un cobro en divisa los trae; las ventas encoladas antes de
           // esta versión no tienen ninguno y se suben como siempre.
@@ -228,6 +255,8 @@ function buildRequest(db, row) {
           counted_usd: payload.counted_usd ?? 0,
           counted_eur: payload.counted_eur ?? 0,
           note: payload.note,
+          // Hora real del cierre, no la de llegada al servidor.
+          ...(payload.closed_at ? { closed_at: payload.closed_at } : {}),
           client_sale_ids: ids,
           client_purchase_ids: payload.client_purchase_ids || [],
           client_withdrawal_ids: payload.client_withdrawal_ids || [],
@@ -264,6 +293,7 @@ function buildRequest(db, row) {
         body: {
           client_count_id: payload.client_count_id,
           note: payload.note,
+          ...(payload.counted_at ? { counted_at: payload.counted_at } : {}),
           items,
         },
         onSuccess: (data) => {
@@ -367,7 +397,7 @@ async function pullDelta(session, summary) {
 // Una pasada completa de sincronización
 // ---------------------------------------------------------------------------
 
-async function syncOnce() {
+async function runSyncOnce({ fullRecovery = false } = {}) {
   const db = getLocalDb();
   const session = getSession();
   const summary = { processed: 0, synced: 0, conflicts: 0, skipped: 0, authExpired: false };
@@ -375,8 +405,10 @@ async function syncOnce() {
   if (!session?.token) return summary; // sin sesión, nada que sincronizar
 
   // Operaciones que una pasada anterior dejó a medio subir (la app se cerró
-  // en plena petición). Sin esto no se reintentaban nunca.
-  summary.recovered = resetStuckSyncing();
+  // en plena petición). Al arrancar el proceso se recuperan todas; después,
+  // solo las que llevan más de 5 minutos, para no quitarle una petición en
+  // vuelo a otra pasada.
+  summary.recovered = resetStuckSyncing({ staleOnly: !fullRecovery });
 
   const pending = getPendingOutbox();
 
@@ -402,7 +434,7 @@ async function syncOnce() {
       res = await apiRequest(step.method, step.path, { token: session.token, body: step.body });
     } catch (err) {
       // Sin red: la dejamos 'pending' para el próximo intento, sin gastar reintentos raros.
-      markRetry(db, row.id, err.message);
+      markPending(db, row.id, err.message);
       continue;
     }
 
@@ -508,6 +540,20 @@ async function syncOnce() {
   } catch (_) { /* sin red — se reintenta en la próxima pasada */ }
 
   return summary;
+}
+
+// Una sola pasada a la vez: el loop, las rutas que piden un sync tras una
+// operación y la primera pasada del arranque comparten la misma promesa. Así
+// ninguna petición se solapa con otra ni dos pasadas tocan la misma fila.
+let activePass = null;
+let hasRun = false;
+
+function syncOnce() {
+  if (activePass) return activePass;
+  const fullRecovery = !hasRun;
+  hasRun = true;
+  activePass = runSyncOnce({ fullRecovery }).finally(() => { activePass = null; });
+  return activePass;
 }
 
 /**

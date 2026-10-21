@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { ADMIN_EMAILS } = require('../config');
 const { labelOf, planStateOf } = require('../lib/plans');
+const { issueResetCode } = require('../lib/passwordReset');
 
 /**
  * Panel de administración: confirmar tiendas nuevas después de cobrar el pago
@@ -32,13 +32,11 @@ const SHOP_COLUMNS = `
 // Todas las tiendas, pendientes primero. La cuenta (o cuentas) de
 // administración se excluyen: no se confirman a sí mismas.
 router.get('/shops', asyncHandler(async (req, res) => {
-  const marks = ADMIN_EMAILS.map(() => '?').join(', ');
   const result = await getDb().execute({
     sql: `SELECT ${SHOP_COLUMNS}
           FROM users u
-          WHERE u.owner_id IS NULL AND u.email NOT IN (${marks})
+          WHERE u.owner_id IS NULL AND u.is_admin = 0
           ORDER BY (u.plan_status = 'pending') DESC, u.created_at DESC, u.id DESC`,
-    args: ADMIN_EMAILS,
   });
   res.json({ shops: result.rows.map(shapeShop) });
 }));
@@ -62,6 +60,25 @@ router.post('/shops/:id/confirm', asyncHandler(async (req, res) => {
     args: [id],
   })).rows[0];
   res.json({ shop: shapeShop(row) });
+}));
+
+// Generación de código de recuperación de contraseña.
+// Solo para cuentas principales (dueños de tienda), no para cajeros ni admin.
+router.post('/shops/:id/reset-code', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Tienda inválida' });
+
+  const db = getDb();
+  // Buscar la tienda: debe ser una cuenta principal, no de administración
+  const shop = (await db.execute({
+    sql: 'SELECT id FROM users WHERE id = ? AND owner_id IS NULL AND is_admin = 0',
+    args: [id],
+  })).rows[0];
+
+  if (!shop) return res.status(404).json({ error: 'Tienda no encontrada' });
+  const { code, expires_at } = await issueResetCode(db, id);
+  res.set('Cache-Control', 'no-store');
+  res.json({ code, expires_at });
 }));
 
 module.exports = router;

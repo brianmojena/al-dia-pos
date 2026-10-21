@@ -1,5 +1,6 @@
 const { createClient } = require('@libsql/client');
 const path = require('path');
+const { ADMIN_EMAILS } = require('../config');
 
 let client;
 
@@ -56,6 +57,7 @@ async function initDb() {
       plan TEXT NOT NULL DEFAULT 'basic' CHECK (plan IN ('basic', 'enterprise')),
       plan_status TEXT NOT NULL DEFAULT 'active',
       trial_ends_at TEXT,
+      is_admin INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -327,6 +329,55 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    -- Auditoría asistida por IA: el cierre solo encola un trabajo; el cron
+    -- externo (o el script local) lo reclama, calcula las señales y, si hay
+    -- anomalías, pide la redacción al modelo. El cierre nunca depende de que
+    -- este trabajo se procese.
+    CREATE TABLE IF NOT EXISTS audit_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      cash_close_id INTEGER NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'cash_close',
+      source_revision INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+      lease_until TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, cash_close_id, kind, source_revision)
+    );
+
+    -- Un informe por cierre y revisión. metrics_json es la foto exacta que se
+    -- usó para redactar: permite auditar el resultado y reproducirlo sin
+    -- volver a consultar las ventas.
+    CREATE TABLE IF NOT EXISTS audit_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      cash_close_id INTEGER NOT NULL,
+      job_id INTEGER,
+      source_revision INTEGER NOT NULL DEFAULT 0,
+      scope TEXT NOT NULL DEFAULT 'cash_close',
+      severity TEXT NOT NULL,
+      headline TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      findings_json TEXT NOT NULL DEFAULT '[]',
+      metrics_json TEXT NOT NULL DEFAULT '{}',
+      signals_json TEXT NOT NULL DEFAULT '[]',
+      questions_json TEXT NOT NULL DEFAULT '[]',
+      next_step TEXT,
+      model TEXT,
+      prompt_version TEXT,
+      tokens_in INTEGER,
+      tokens_out INTEGER,
+      duration_ms INTEGER,
+      status TEXT NOT NULL DEFAULT 'ready',
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, cash_close_id, source_revision)
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       key TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -460,9 +511,43 @@ async function initDb() {
     // Las filas anteriores a esto quedan 'active' (ya eran clientes).
     'ALTER TABLE users ADD COLUMN plan_status TEXT NOT NULL DEFAULT \'active\'',
     'ALTER TABLE users ADD COLUMN trial_ends_at TEXT',
+    // Recuperación por código; columnas aditivas para las cuentas existentes.
+    'ALTER TABLE users ADD COLUMN reset_code_hash TEXT',
+    'ALTER TABLE users ADD COLUMN reset_code_expires_at TEXT',
+    'ALTER TABLE users ADD COLUMN reset_attempts INTEGER NOT NULL DEFAULT 0',
+    // Privilegio de administración controlado por el servidor. Antes se
+    // deducía del correo (ADMIN_EMAILS) y el registro público podía reclamar
+    // ese correo libre. Ahora el registro lo reserva y este flag manda.
+    'ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0',
+    // El informe guarda también las preguntas para confirmar y el siguiente
+    // paso sugerido. Son parte de la redacción (IA o respaldo), no del cálculo.
+    "ALTER TABLE audit_reports ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE audit_reports ADD COLUMN next_step TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
+  }
+
+  // Una sola vez: las cuentas que ya eran administradoras por figurar en
+  // ADMIN_EMAILS conservan el acceso al pasar al flag is_admin. A partir de
+  // aquí el privilegio se aprovisiona con `npm run admin:grant` y no depende
+  // de una lista de correos que el registro público pudiera reclamar.
+  const adminKey = 'admin_flag_v1';
+  const adminMigrated = await db.execute({
+    sql: 'SELECT key FROM schema_migrations WHERE key = ?',
+    args: [adminKey],
+  });
+  if (adminMigrated.rows.length === 0) {
+    for (const email of ADMIN_EMAILS) {
+      await db.execute({
+        sql: 'UPDATE users SET is_admin = 1 WHERE lower(email) = ?',
+        args: [email],
+      });
+    }
+    await db.execute({
+      sql: 'INSERT OR IGNORE INTO schema_migrations (key) VALUES (?)',
+      args: [adminKey],
+    });
   }
 
   // Las bases anteriores a los planes Basic/Enterprise conservan el CHECK
@@ -551,6 +636,13 @@ async function initDb() {
 
     -- El teléfono reintenta el aviso si se corta la conexión: una sola fila por venta.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_rejected_sales_client ON rejected_sales(user_id, client_sale_id);
+
+    -- El worker busca trabajos pendientes por fecha; el índice evita escanear
+    -- toda la tabla cuando ya hay historial de miles de cierres.
+    CREATE INDEX IF NOT EXISTS idx_audit_jobs_pending ON audit_jobs(status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_jobs_user ON audit_jobs(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_reports_user ON audit_reports(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_reports_severity ON audit_reports(severity, created_at);
   `);
 
   await db.executeMultiple(`

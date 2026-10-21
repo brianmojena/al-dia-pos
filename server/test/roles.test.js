@@ -216,6 +216,30 @@ test('roles: dueño y cajero', async (t) => {
     assert.equal(sigueVivo.body.length, 1);
   });
 
+  await t.test('borrar un cajero revoca su token al instante', async () => {
+    const dueño = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, dueño, { stock: 5 });
+    const cajero = await crearCajero(ctx.api, dueño, `caja8${Date.now()}@test.local`);
+
+    const antes = await ctx.api('POST', '/api/sales', {
+      token: cajero.token,
+      body: { items: [{ product_id: productId, quantity: 1, unit_price: 100 }] },
+    });
+    assert.equal(antes.status, 201);
+
+    const borrado = await ctx.api('DELETE', `/api/auth/cashiers/${cajero.id}`, { token: dueño });
+    assert.equal(borrado.status, 200);
+
+    const despues = await ctx.api('POST', '/api/sales', {
+      token: cajero.token,
+      body: { items: [{ product_id: productId, quantity: 1, unit_price: 100 }] },
+    });
+    assert.equal(despues.status, 401, 'un token de 30 días no puede sobrevivir a la cuenta');
+    assert.equal(despues.body.code, 'ACCOUNT_REVOKED');
+    assert.equal((await ctx.api('GET', '/api/auth/me', { token: cajero.token })).status, 401);
+    assert.equal((await ctx.api('GET', '/api/products', { token: cajero.token })).status, 401);
+  });
+
   await t.test('los tokens emitidos antes de que existieran los roles siguen valiendo como dueño', async () => {
     const jwt = require('jsonwebtoken');
     const dueño = await registerUser(ctx.api);

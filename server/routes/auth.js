@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { requireAuth, requireOwner, OWNER, CASHIER } = require('../middleware/auth');
-const { JWT_SECRET } = require('../config');
+const { JWT_SECRET, isAdminEmail } = require('../config');
 const { asyncHandler } = require('../lib/asyncHandler');
 // La identidad y los ajustes del negocio salen de sitios distintos: un cajero
 // tiene su propio email y su propio rol, pero el nombre de la tienda, el plan,
@@ -15,6 +15,7 @@ const { publicUser } = require('../lib/userProfile');
 const {
   DEFAULT_PLAN, isPlan, labelOf, maxUsersOf, TRIAL_MS,
 } = require('../lib/plans');
+const { redeemResetCode } = require('../lib/passwordReset');
 
 // userId es la TIENDA (para un dueño, él mismo); accountId es quien inicia
 // sesión. Ver la nota en middleware/auth.js.
@@ -43,20 +44,36 @@ router.get('/shared-device', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/register', asyncHandler(async (req, res) => {
-  const { email, password, store_name, plan } = req.body;
+  let { email, password, store_name, plan } = req.body;
+
+  // Normalizar email y store_name: trim + lowercase para email
+  if (email) email = String(email).trim().toLowerCase();
+  if (store_name) store_name = String(store_name).trim();
 
   if (!email || !password || !store_name) {
     return res.status(400).json({ error: 'Email, contraseña y nombre de la tienda son requeridos' });
   }
+
+  // Validar formato de email
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: 'Escribe un correo válido, por ejemplo nombre@gmail.com' });
+  }
+
   if (password.length < 6) {
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+  }
+  // Los correos de ADMIN_EMAILS están reservados: el privilegio de
+  // administración no se obtiene registrándose, sino con `npm run admin:grant`.
+  if (isAdminEmail(email)) {
+    return res.status(403).json({ error: 'Ese correo está reservado para la administración' });
   }
   const chosenPlan = isPlan(plan) ? plan : DEFAULT_PLAN;
 
   const db = getDb();
   const existingResult = await db.execute({
     sql: 'SELECT id FROM users WHERE email = ?',
-    args: [email.toLowerCase()],
+    args: [email],
   });
   if (existingResult.rows[0]) return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
 
@@ -67,7 +84,7 @@ router.post('/register', asyncHandler(async (req, res) => {
     sql: `INSERT INTO users (email, password_hash, store_name, plan, plan_status, trial_ends_at)
           VALUES (?, ?, ?, ?, 'pending', ?)`,
     args: [
-      email.toLowerCase(),
+      email,
       password_hash,
       store_name,
       chosenPlan,
@@ -84,7 +101,9 @@ router.post('/register', asyncHandler(async (req, res) => {
 }));
 
 router.post('/login', asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  let { email, password } = req.body;
+  if (email) email = String(email).trim().toLowerCase();
+
   if (!email || !password) {
     return res.status(400).json({ error: 'Email y contraseña son requeridos' });
   }
@@ -92,7 +111,7 @@ router.post('/login', asyncHandler(async (req, res) => {
   const db = getDb();
   const result = await db.execute({
     sql: 'SELECT * FROM users WHERE email = ?',
-    args: [email.toLowerCase()],
+    args: [email],
   });
   const user = result.rows[0];
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
@@ -187,6 +206,9 @@ router.post('/cashiers', requireAuth, requireOwner, asyncHandler(async (req, res
   if (password.length < 6) {
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
   }
+  if (isAdminEmail(email)) {
+    return res.status(403).json({ error: 'Ese correo está reservado para la administración' });
+  }
 
   const db = getDb();
   const existing = await db.execute({
@@ -243,6 +265,33 @@ router.delete('/cashiers/:id', requireAuth, requireOwner, asyncHandler(async (re
   });
   if (result.rowsAffected === 0) return res.status(404).json({ error: 'Cajero no encontrado' });
   res.json({ success: true });
+}));
+
+// Recuperación de contraseña: canjea un código de un solo uso generado por admin.
+router.post('/reset-password', asyncHandler(async (req, res) => {
+  let { email, code, new_password } = req.body;
+
+  if (typeof email === 'string') email = email.trim().toLowerCase();
+
+  if (typeof email !== 'string' || !email || email.length > 254
+      || typeof code !== 'string' || !code || code.length > 64
+      || typeof new_password !== 'string' || !new_password) {
+    return res.status(400).json({ error: 'Escribe tu correo, el código y la nueva contraseña' });
+  }
+
+  if (new_password.length < 6) {
+    return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+  }
+
+  const newPasswordHash = bcrypt.hashSync(new_password, 10);
+  const db = getDb();
+
+  const success = await redeemResetCode(db, email, code, newPasswordHash);
+  if (!success) {
+    return res.status(400).json({ error: 'El código no es válido o venció. Pide uno nuevo.' });
+  }
+
+  res.json({ ok: true });
 }));
 
 module.exports = router;

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { records, resetStore, failWrites } from './testSupport/memoryStore.js'
+import { stateAt, seedState } from './testSupport/accountState.js'
 import { emptyData } from './offlineModel.js'
 registerHooks({ resolve(specifier, context, next) {
   if (specifier === 'idb-keyval') return { url: new URL('./testSupport/memoryStore.js', import.meta.url).href, shortCircuit: true }
@@ -18,7 +19,7 @@ const { syncOffline, localSyncStatus, retrySync, resolveProductConflict, handles
 const tokenFor = (shop, account = shop) => `x.${Buffer.from(JSON.stringify({ userId: shop, accountId: account })).toString('base64url')}.x`
 const login = (shop) => { setToken(tokenFor(shop)); cacheUser({ id: shop, email: `${shop}@test.local`, role: 'dueño', transfer_limit: null }) }
 const stateKey = (shop) => `mypimes_local_v1:${shop}:${shop}`
-const seed = (shop = 1) => records.set(stateKey(shop), { base: { ...emptyData(), products: [{ id: 10, name: `Pan ${shop}`, stock: 20, sale_price: 10, purchase_price: 6 }] }, outbox: [], initialized: true, nextId: -1 })
+const seed = (shop = 1) => seedState(stateKey(shop), { base: { ...emptyData(), products: [{ id: 10, name: `Pan ${shop}`, stock: 20, sale_price: 10, purchase_price: 6 }] }, outbox: [], initialized: true, nextId: -1 })
 const write = (path, body, method = 'POST') => apiFetch(path, { method, body: JSON.stringify(body) })
 const saleBody = (id = 'sale-1') => ({ client_sale_id: id, payment_method: 'efectivo', items: [{ product_id: 10, quantity: 2, unit_price: 10 }] })
 const jsonResponse = (data, status = 200) => new Response(JSON.stringify(data), { status })
@@ -40,15 +41,15 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     resetStore(); seed(); navigator.onLine = false
     setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' })
     const key = 'mypimes_local_v1:1:2'
-    records.set(key, structuredClone(records.get(stateKey(1))))
+    seedState(key, stateAt(stateKey(1)))
     assert.equal((await write('/api/sales', saleBody('cashier-before-update'))).status, 202)
     assert.equal((await write('/api/products/10', { sale_price: 12.5 }, 'PUT')).status, 202)
-    const stored = structuredClone(records.get(key))
+    const stored = structuredClone(stateAt(key))
     const updated = await import('./offlineClient.js?cashier-update')
     assert.equal((await updated.localSyncStatus()).pending, 2)
     assert.equal((await (await updated.offlineRequest('/api/products')).json())[0].stock, 18)
     assert.equal((await (await updated.offlineRequest('/api/products')).json())[0].sale_price, 12.5)
-    assert.deepEqual(records.get(key), stored, 'la reapertura no cambia las operaciones guardadas')
+    assert.deepEqual(stateAt(key), stored, 'la reapertura no cambia las operaciones guardadas')
     navigator.onLine = true
     const uploaded = []
     const remoteSale = { ...stored.outbox[0].result, id: 45, pending: false }
@@ -64,7 +65,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
         assert.deepEqual(JSON.parse(options.body).product, { sale_price: 12.5 })
         return jsonResponse(remoteProduct)
       }
-      assert.equal(path, '/api/sync/snapshot')
+      assert.ok(path.startsWith('/api/sync/snapshot'))
       return jsonResponse({ products: [remoteProduct], current_period: {} })
     }
     await updated.syncOffline()
@@ -81,13 +82,13 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
       account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null,
       total: 300, payment_method: 'efectivo', created_at: '2026-10-14 10:00:00',
       profit: 250, items: [{ id: 1, product_name: 'Pan', quantity: 1, unit_price: 300, unit_cost: 50 }] };
-    records.set(key, { base: { ...emptyData(), cash_close_coverage_version: 1, products: [], sales: [syncedSale] }, outbox: [], initialized: true, nextId: -1 });
+    seedState(key, { base: { ...emptyData(), cash_close_coverage_version: 1, products: [], sales: [syncedSale] }, outbox: [], initialized: true, nextId: -1 });
     const saved = await write('/api/cash-closes', { client_close_id: 'offline-cash-close', register_id: 'web', opening_float: 1000, counted_cash: 1300 });
     assert.equal(saved.status, 202);
     const provisional = await saved.json();
     assert.equal(provisional.expected_cash, 1300);
     assert.equal(provisional.difference, 0);
-    assert.deepEqual(records.get(key).outbox[0].body.covered_sale_ids, [51]);
+    assert.deepEqual(stateAt(key).outbox[0].body.covered_sale_ids, [51]);
 
     navigator.onLine = true;
     const confirmed = { ...provisional, id: 80, pending: false, expected_cash: 1300, difference: 0, sales_count: 1 };
@@ -100,7 +101,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
         uploadedCoverage = JSON.parse(options.body).covered_sale_ids;
         return jsonResponse(confirmed);
       }
-      assert.equal(path, '/api/sync/snapshot');
+      assert.ok(path.startsWith('/api/sync/snapshot'));
       return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, sales: [{ ...syncedSale, cash_close_id: 80 }, laterSale], cash_closes: [confirmed], current_period: { has_sales: true } });
     };
     await syncOffline();
@@ -115,13 +116,13 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     resetStore(); setToken(tokenFor(1, 2));
     cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' });
     const key = 'mypimes_local_v1:1:2';
-    records.set(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [], sales: [] }, outbox: [], initialized: true, nextId: -1 });
+    seedState(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [], sales: [] }, outbox: [], initialized: true, nextId: -1 });
     navigator.onLine = false;
     const local = await write('/api/cash-closes', { client_close_id: 'legacy-cache-close', opening_float: 1000, counted_cash: 1300 });
     const provisional = await local.json();
     assert.equal(provisional.pending, true);
     assert.equal(provisional.coverage_incomplete, true);
-    const stored = records.get(key).outbox[0];
+    const stored = stateAt(key).outbox[0];
     assert.equal(stored.coverageExact, false);
     assert.equal('covered_sale_ids' in stored.body, false);
     const localHistory = await (await apiFetch('/api/cash-closes')).json();
@@ -137,7 +138,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
         postedBody = JSON.parse(options.body);
         return jsonResponse(confirmed);
       }
-      assert.equal(path, '/api/sync/snapshot');
+      assert.ok(path.startsWith('/api/sync/snapshot'));
       snapshots++;
       return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1,
         sales: [{ ...sale, ...(snapshots > 1 ? { cash_close_id: 81 } : {}) }],
@@ -156,20 +157,21 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     resetStore(); setToken(tokenFor(1, 2));
     cacheUser({ id: 2, email: 'cajero@test.local', role: 'cajero' });
     const key = 'mypimes_local_v1:1:2';
-    records.set(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }], sales: [] }, outbox: [], initialized: true, nextId: -1 });
+    seedState(key, { base: { ...emptyData(), current_period: { has_sales: true }, products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }], sales: [] }, outbox: [], initialized: true, nextId: -1 });
     navigator.onLine = false;
     await write('/api/cash-closes', { client_close_id: 'legacy-close-one', opening_float: 1000, counted_cash: 1300 });
-    const state = records.get(key), first = state.outbox[0];
+    const state = stateAt(key), first = state.outbox[0];
     const firstAt = new Date(Date.now() - 5000).toISOString();
     first.body.closed_at = firstAt; first.result.closed_at = firstAt;
+    seedState(key, state);
     await write('/api/sales', { ...saleBody('legacy-sale-b'), items: [{ product_id: 10, quantity: 1, unit_price: 75 }] });
     await write('/api/cash-closes', { client_close_id: 'legacy-close-two', counted_cash: 150 });
-    assert.deepEqual(records.get(key).outbox.map((op) => op.kind), ['close', 'sale', 'close']);
-    assert.equal(records.get(key).outbox[2].body.client_close_id, 'legacy-close-two');
+    assert.deepEqual(stateAt(key).outbox.map((op) => op.kind), ['close', 'sale', 'close']);
+    assert.equal(stateAt(key).outbox[2].body.client_close_id, 'legacy-close-two');
 
     const saleA = { id: 51, client_sale_id: 'already-synced-a', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 300, payment_method: 'efectivo', created_at: new Date(Date.parse(firstAt) - 60000).toISOString() };
     const saleFromOtherDevice = { id: 52, client_sale_id: 'other-device-after-count', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 75, payment_method: 'efectivo', created_at: new Date(Date.parse(firstAt) + 1000).toISOString() };
-    const saleBAt = records.get(key).outbox[1].body.sold_at;
+    const saleBAt = stateAt(key).outbox[1].body.sold_at;
     const closeOne = { id: 81, client_close_id: 'legacy-close-one', account_id: 2, account_email: 'cajero@test.local', closed_at: firstAt, expected_cash: 1300, counted_cash: 1300, difference: 0, pending: false, sales_count: 1 };
     const closeTwo = { id: 82, client_close_id: 'legacy-close-two', account_id: 2, account_email: 'cajero@test.local', expected_cash: 150, counted_cash: 150, difference: 0, pending: false, sales_count: 2 };
     navigator.onLine = true;
@@ -184,7 +186,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
         const body = JSON.parse(options.body);
         return jsonResponse({ ...body, id: 53, total: 75, created_at: body.sold_at, pending: false });
       }
-      assert.equal(path, '/api/sync/snapshot');
+      assert.ok(path.startsWith('/api/sync/snapshot'));
       snapshotNumber++;
       if (snapshotNumber === 1) return jsonResponse({ ...emptyData(), cash_close_coverage_version: 1, products: [{ id: 10, name: 'Pan', stock: 18, sale_price: 10, purchase_price: 6 }], sales: [saleA, saleFromOtherDevice], current_period: { has_sales: true } });
       const saleB = { id: 53, client_sale_id: 'legacy-sale-b', account_id: 2, account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null, total: 75, payment_method: 'efectivo', created_at: saleBAt };
@@ -212,12 +214,12 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
       throw new Error('No descargar snapshot mientras haya una respuesta desconocida')
     }
     await syncOffline(); assert.equal((await localSyncStatus()).pending, 1); assert.equal(saleCalls, 1)
-    const pending = records.get(stateKey(1)).outbox[0]
+    const pending = stateAt(stateKey(1)).outbox[0]
     const remote = { ...pending.result, id: 25, pending: false }
     globalThis.fetch = async (path, options) => {
       assert.equal(options.headers.Authorization, `Bearer ${tokenFor(1)}`)
       if (path === '/api/sales') { assert.equal(JSON.parse(options.body).client_sale_id, 'sale-1'); return jsonResponse(remote) }
-      assert.equal(path, '/api/sync/snapshot')
+      assert.ok(path.startsWith('/api/sync/snapshot'))
       return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 18, sale_price: 10, purchase_price: 6 }], sales: [remote] })
     }
     await syncOffline(); assert.equal((await localSyncStatus()).pending, 0)
@@ -233,21 +235,55 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     assert.equal((await (await apiFetch('/api/products')).json())[0].name, 'Pan 2')
     assert.equal((await (await apiFetch('/api/sales')).json()).length, 0)
     navigator.onLine = true
-    globalThis.fetch = async (path) => { assert.equal(path, '/api/sync/snapshot'); return jsonResponse(records.get(stateKey(2)).base) }
-    await syncOffline(); assert.equal(records.get(stateKey(1)).outbox.length, 1)
+    globalThis.fetch = async (path) => { assert.ok(path.startsWith('/api/sync/snapshot')); return jsonResponse(stateAt(stateKey(2)).base) }
+    await syncOffline(); assert.equal(stateAt(stateKey(1)).outbox.length, 1)
+  })
+  await t.test('la descarga incremental pagina, aplica cobertura y elimina una venta anulada', async () => {
+    resetStore(); login(1); seed(); navigator.onLine = true
+    const calls = []
+    const sale = { id: 100, client_sale_id: 'cloud-sale', account_id: 1, account_email: '1@test.local', register_id: 'web:1', cash_close_id: null, total: 30, payment_method: 'efectivo', created_at: '2026-10-14 10:00:00' }
+    let pages = 0
+    globalThis.fetch = async (path) => {
+      calls.push(path)
+      const url = new URL(path, 'http://local')
+      assert.equal(url.pathname, '/api/sync/snapshot')
+      assert.equal(url.searchParams.get('limit'), '200')
+      assert.equal(url.searchParams.get('max_bytes'), String(512 * 1024))
+      pages++
+      if (pages === 1) {
+        for (const key of ['after_sale', 'after_close', 'after_count', 'after_purchase', 'after_withdrawal', 'after_correction', 'after_close_correction']) assert.equal(url.searchParams.get(key), '0')
+        return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 19, sale_price: 10, purchase_price: 6 }], sales: [sale],
+          cursors: { sale: 100, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 }, has_more: true })
+      }
+      assert.equal(url.searchParams.get('after_sale'), '100')
+      assert.equal(url.searchParams.get('after_correction'), '0')
+      return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 19, sale_price: 10, purchase_price: 6 }],
+        cash_closes: [{ id: 80, client_close_id: 'cloud-close', covered_sale_ids: [100] }],
+        sale_corrections: [{ sale_id: 100, sale: null, client_sale_id: 'cloud-sale' }],
+        cursors: { sale: 100, close: 80, count: 0, purchase: 0, withdrawal: 0, correction: 1, close_correction: 0 }, has_more: false })
+    }
+    await syncOffline()
+    assert.equal(pages, 2)
+    const state = stateAt(stateKey(1))
+    assert.equal(state.base.products[0].stock, 19)
+    assert.equal(state.base.sales.length, 0, 'la anulación descargada elimina la venta local')
+    assert.equal(state.base.cash_closes[0].id, 80)
+    assert.deepEqual(state.cursors, { sale: 100, close: 80, count: 0, purchase: 0, withdrawal: 0, correction: 1, close_correction: 0 })
+    assert.match(calls[0], /after_sale=0/)
+    assert.match(calls[1], /after_sale=100/)
   })
   await t.test('fallo de almacenamiento devuelve error y no presenta una venta como guardada', async () => {
     login(1); navigator.onLine = false
-    const before = records.get(stateKey(1)).outbox.length
+    const before = stateAt(stateKey(1)).outbox.length
     failWrites(new DOMException('Full', 'QuotaExceededError'))
     const res = await write('/api/sales', saleBody('not-saved'))
     assert.equal(res.status, 507); assert.match((await res.json()).error, /Libera espacio/)
-    failWrites(null); assert.equal(records.get(stateKey(1)).outbox.length, before)
+    failWrites(null); assert.equal(stateAt(stateKey(1)).outbox.length, before)
   })
   await t.test('importación local es atómica si alguna fila es inválida', async () => {
-    const before = records.get(stateKey(1)).outbox.length
+    const before = stateAt(stateKey(1)).outbox.length
     const res = await write('/api/products/import', { items: [{ name: 'Leche', sale_price: 10, stock: 3 }, { name: '', sale_price: 5, stock: -1 }] })
-    assert.equal(res.status, 400); assert.equal(records.get(stateKey(1)).outbox.length, before)
+    assert.equal(res.status, 400); assert.equal(stateAt(stateKey(1)).outbox.length, before)
     assert.equal((await (await apiFetch('/api/products')).json()).length, 1)
   })
   await t.test('401 de sincronización permite seguir trabajando y conserva la sesión local', async () => {
@@ -269,13 +305,13 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     await syncOffline(); navigator.onLine = false
     const sale = await write('/api/sales', { payment_method: 'efectivo', items: [{ product_id: negativeId, quantity: 1, unit_price: 5 }] })
     assert.equal(sale.status, 202)
-    assert.equal(records.get(stateKey(1)).outbox[0].body.items[0].product_id, 60)
+    assert.equal(stateAt(stateKey(1)).outbox[0].body.items[0].product_id, 60)
   })
   await t.test('ventas rechazadas se conservan y se avisa al dueño sin bloquear las siguientes', async () => {
     resetStore(); seed(); login(1); navigator.onLine = false
     await write('/api/sales', saleBody('rejected-sale'))
     await write('/api/sales', saleBody('accepted-sale'))
-    const state = records.get(stateKey(1)), accepted = { ...state.outbox[1].result, id: 70 }
+    const state = stateAt(stateKey(1)), accepted = { ...state.outbox[1].result, id: 70 }
     navigator.onLine = true
     let reported = false
     globalThis.fetch = async (path, options) => {
@@ -318,15 +354,15 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     assert.equal(records.get('mypimes_sales_queue').length, 1)
     assert.equal(records.get('mypimes_sales_queue')[0].account_key, '2:2')
     await apiFetch('/api/products')
-    assert.equal(records.get(stateKey(1)).outbox.length, 1)
+    assert.equal(stateAt(stateKey(1)).outbox.length, 1)
   })
   await t.test('un cambio creado durante la descarga no se pierde al reemplazar la base', async () => {
     resetStore(); seed(); login(1); navigator.onLine = true
     let markStarted, release
     const started = new Promise((resolve) => { markStarted = resolve })
     const gate = new Promise((resolve) => { release = resolve })
-    const snapshot = structuredClone(records.get(stateKey(1)).base)
-    globalThis.fetch = async (path) => { assert.equal(path, '/api/sync/snapshot'); markStarted(); await gate; return jsonResponse(snapshot) }
+    const snapshot = structuredClone(stateAt(stateKey(1)).base)
+    globalThis.fetch = async (path) => { assert.ok(path.startsWith('/api/sync/snapshot')); markStarted(); await gate; return jsonResponse(snapshot) }
     const sync = syncOffline(); await started
     navigator.onLine = false
     assert.equal((await write('/api/sales', saleBody('during-download'))).status, 202)
@@ -337,16 +373,16 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
   await t.test('cambiar de cuenta durante una subida mantiene el token y la confirmación en la cuenta original', async () => {
     resetStore(); seed(1); seed(2); login(1); navigator.onLine = false
     await write('/api/sales', saleBody('switch-account'))
-    const op = records.get(stateKey(1)).outbox[0]
+    const op = stateAt(stateKey(1)).outbox[0]
     let markStarted, release
     const started = new Promise((resolve) => { markStarted = resolve })
     const gate = new Promise((resolve) => { release = resolve })
     navigator.onLine = true
     globalThis.fetch = async (path, options) => { assert.equal(path, '/api/sales'); assert.equal(options.headers.Authorization, `Bearer ${tokenFor(1)}`); markStarted(); await gate; return jsonResponse({ ...op.result, id: 99 }) }
     const sync = syncOffline(); await started; login(2); release(); await sync
-    assert.equal(records.get(stateKey(1)).outbox.length, 0)
-    assert.equal(records.get(stateKey(1)).base.sales[0].id, 99)
-    assert.equal(records.get(stateKey(2)).base.sales.length, 0)
+    assert.equal(stateAt(stateKey(1)).outbox.length, 0)
+    assert.equal(stateAt(stateKey(1)).base.sales[0].id, 99)
+    assert.equal(stateAt(stateKey(2)).base.sales.length, 0)
     navigator.onLine = false
     assert.equal((await (await apiFetch('/api/products')).json())[0].name, 'Pan 2')
   })
@@ -357,7 +393,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     navigator.onLine = true
     globalThis.fetch = async () => jsonResponse({ error: 'Producto cambió' }, 409)
     await syncOffline()
-    const sale = records.get(stateKey(1)).outbox[1]
+    const sale = stateAt(stateKey(1)).outbox[1]
     let posts = 0
     globalThis.fetch = async (path) => {
       if (path === '/api/sales') { posts++; return jsonResponse({ ...sale.result, id: 101 }) }
@@ -365,7 +401,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     }
     await resolveProductConflict('cloud')
     assert.equal((await localSyncStatus()).pending, 0)
-    assert.equal(records.get(stateKey(1)).resolved[0].resolution, 'cloud')
+    assert.equal(stateAt(stateKey(1)).resolved[0].resolution, 'cloud')
     assert.equal(posts, 1)
     assert.equal((await (await apiFetch('/api/products')).json())[0].stock, 13)
   })
@@ -386,7 +422,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     }
     await resolveProductConflict('local')
     assert.ok(uploaded); assert.equal((await localSyncStatus()).pending, 0)
-    assert.equal(records.get(stateKey(1)).resolved[0].resolution, 'local')
+    assert.equal(stateAt(stateKey(1)).resolved[0].resolution, 'local')
   })
 
 })
@@ -394,9 +430,9 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
 test('la ruta de stock diario funciona offline para dueño y queda protegida para cajero', async () => {
   resetStore(); login(1); seed(); navigator.onLine = false
   const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-  const stored = records.get(stateKey(1))
+  const stored = stateAt(stateKey(1))
   stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 20, entries_stock: 3, current_stock: 20 }] }
-  records.set(stateKey(1), stored)
+  seedState(stateKey(1), stored)
   assert.equal(handlesOffline('/api/products/day-stock', 'GET'), true)
   const sold = await write('/api/sales', saleBody('daily-stock-sale'))
   assert.equal(sold.status, 202)
@@ -405,7 +441,7 @@ test('la ruta de stock diario funciona offline para dueño y queda protegida par
   assert.deepEqual((await ownerResponse.json()).products[0], { id: 10, opening_stock: 20, entries_stock: 3, current_stock: 18, tracked: true })
 
   setToken(tokenFor(1, 2)); cacheUser({ id: 2, email: 'cashier@test.local', role: 'cajero' })
-  records.set('mypimes_local_v1:1:2', structuredClone(records.get(stateKey(1))))
+  seedState('mypimes_local_v1:1:2', stateAt(stateKey(1)))
   const cashierResponse = await (await import('./offlineClient.js?daily-cashier')).offlineRequest('/api/products/day-stock')
   assert.equal(cashierResponse.status, 400)
   assert.match((await cashierResponse.json()).error, /Solo el dueño/)
@@ -414,10 +450,10 @@ test('la ruta de stock diario funciona offline para dueño y queda protegida par
 test('las entradas locales de la PWA (recibir y vender) cuadran offline y tras sincronizar', async () => {
   resetStore(); login(1); seed(); navigator.onLine = false
   const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-  const stored = records.get(stateKey(1))
+  const stored = stateAt(stateKey(1))
   stored.base.products[0].stock = 1
   stored.base.daily_stock = { date: today, products: [{ id: 10, opening_stock: 1, entries_stock: 0, current_stock: 1, tracked: true }] }
-  records.set(stateKey(1), stored)
+  seedState(stateKey(1), stored)
 
   assert.equal((await write('/api/products/10', { name: 'Pan 1', purchase_price: 6, sale_price: 10, add_stock: 24 }, 'PUT')).status, 202)
   assert.equal((await write('/api/sales', { ...saleBody('trifecta'), items: [{ product_id: 10, quantity: 3, unit_price: 10 }] })).status, 202)
@@ -428,7 +464,7 @@ test('las entradas locales de la PWA (recibir y vender) cuadran offline y tras s
 
   // Sincroniza: sube la entrada y la venta y baja el resumen confirmado.
   navigator.onLine = true
-  const saleOp = records.get(stateKey(1)).outbox.find((o) => o.kind === 'sale')
+  const saleOp = stateAt(stateKey(1)).outbox.find((o) => o.kind === 'sale')
   globalThis.fetch = async (path, options) => {
     if (path === '/api/sync/product-operation') {
       const body = JSON.parse(options.body)
@@ -437,12 +473,12 @@ test('las entradas locales de la PWA (recibir y vender) cuadran offline y tras s
       return jsonResponse({ id: 10, name: 'Pan 1', purchase_price: 6, sale_price: 10, stock: 25, unit: null, track_stock: 1, pending: false })
     }
     if (path === '/api/sales') return jsonResponse({ ...saleOp.result, id: 55, pending: false })
-    assert.equal(path, '/api/sync/snapshot')
+    assert.ok(path.startsWith('/api/sync/snapshot'))
     return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 22, sale_price: 10, purchase_price: 6, unit: null, track_stock: 1 }], daily_stock: { date: today, products: [{ id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true }] } })
   }
   await syncOffline()
   assert.equal((await localSyncStatus()).pending, 0)
-  assert.equal(records.get(stateKey(1)).base.local_entries, undefined, 'el snapshot confirmado sustituye la cifra local')
+  assert.equal(stateAt(stateKey(1)).base.local_entries, undefined, 'el snapshot confirmado sustituye la cifra local')
   day = await (await apiFetch('/api/products/day-stock')).json()
   assert.deepEqual(day.products[0], { id: 10, opening_stock: 1, entries_stock: 24, current_stock: 22, tracked: true })
 })
@@ -453,7 +489,7 @@ test('una edición de cajero guardada con el producto entero por una versión an
   const key = 'mypimes_local_v1:1:2'
   const legacy = { id: 'legacy-edit', kind: 'product', method: 'PUT', path: '/api/products/10', productId: 10, queued_at: new Date().toISOString(), before: { name: 'Pan 1', sale_price: 10, purchase_price: 6, stock: 20, unit: null }, body: { name: 'Pan 1', purchase_price: 6, sale_price: 12, stock: 20, unit: null }, result: { id: 10, name: 'Pan 1', sale_price: 12, purchase_price: 6, stock: 20 }, error: 'El cajero solo puede cambiar el precio de venta y añadir stock', errorStatus: 403 }
   const sale = { id: 'sale-after', kind: 'sale', method: 'POST', path: '/api/sales', queued_at: new Date().toISOString(), body: saleBody('after-legacy'), result: { id: -1, items: saleBody('after-legacy').items } }
-  records.set(key, { ...structuredClone(records.get(stateKey(1))), outbox: [legacy, sale] })
+  seedState(key, { ...stateAt(stateKey(1)), outbox: [legacy, sale] })
   navigator.onLine = true
   const sent = []
   globalThis.fetch = async (path, options) => {
@@ -480,30 +516,130 @@ test('corregir un cierre PWA requiere red, no crea outbox y refresca el snapshot
   const key = stateKey(1)
   const confirmed = { id: 9, client_close_id: 'close-9', expected_cash: 150, counted_cash: 150, difference: 0, correction_revision: 1 }
   const ownerIdentity = { account: '1:1', token: tokenFor(1) }
-  records.set(key, { base: { ...emptyData(), cash_closes: [
+  seedState(key, { base: { ...emptyData(), cash_closes: [
     { id: 8, client_close_id: null, expected_cash: 1 },
     { id: 9, client_close_id: null, expected_cash: 2 },
   ] }, outbox: [], initialized: true })
   await cacheCashCloseCorrection({ cash_close: { ...confirmed, client_close_id: null } }, ownerIdentity)
-  assert.equal(records.get(key).base.cash_closes.find((row) => row.id === 8).expected_cash, 1,
+  assert.equal(stateAt(key).base.cash_closes.find((row) => row.id === 8).expected_cash, 1,
     'cierres legacy sin client_close_id no colisionan')
-  assert.equal(records.get(key).base.cash_closes.find((row) => row.id === 9).expected_cash, 150)
+  assert.equal(stateAt(key).base.cash_closes.find((row) => row.id === 9).expected_cash, 150)
   setToken(tokenFor(2)); cacheUser({ id: 2, email: 'other@test.local', role: 'dueño' })
   assert.equal(await cacheCashCloseCorrection({ cash_close: { ...confirmed, id: 10 } }, ownerIdentity), false,
     'no aplica la respuesta anterior después de cambiar la cuenta')
-  assert.equal((records.get(stateKey(2))?.base.cash_closes || []).length, 0)
+  assert.equal((stateAt(stateKey(2))?.base.cash_closes || []).length, 0)
   login(1)
-  const ownerState = records.get(key)
+  const ownerState = stateAt(key)
   ownerState.base.cash_closes = [confirmed]
-  records.set(key, ownerState)
+  seedState(key, ownerState)
   let requested = ''
+  navigator.onLine = true
   globalThis.fetch = async (path) => {
     requested = path
     return jsonResponse({ ...emptyData(), cash_closes: [confirmed], current_period: { has_sales: false } })
   }
   await refreshOfflineSnapshot()
-  assert.equal(requested, '/api/sync/snapshot')
+  assert.ok(requested.startsWith('/api/sync/snapshot'), 'la corrección refresca sin bajar todo el historial')
   const history = await (await apiFetch('/api/cash-closes')).json()
   assert.equal(history[0].difference, 0)
-  assert.equal(records.get(key).outbox.length, 0)
+  assert.equal(stateAt(key).outbox.length, 0)
+})
+
+test('la primera carga pide una ventana acotada y el historial se descarga por mes', async () => {
+  resetStore(); login(1); navigator.onLine = true
+  const key = stateKey(1)
+  seedState(key, { base: { ...emptyData(), products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }] }, outbox: [], initialized: false, nextId: -1 })
+  const urls = []
+  globalThis.fetch = async (path) => {
+    urls.push(path)
+    return jsonResponse({
+      ...emptyData(), products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }],
+      cursors: { sale: 10, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 },
+      has_more: false,
+    })
+  }
+  await syncOffline()
+  const first = new URL(urls[0], 'http://local')
+  const since = first.searchParams.get('since')
+  assert.ok(since, 'la instalación nueva no descarga todo el historial')
+  assert.ok(Date.now() - Date.parse(since) >= 6 * 86_400_000, 'la ventana inicial ronda una semana')
+  assert.equal(stateAt(key).initialized, true)
+  assert.ok(!stateAt(key).syncSince, 'al completar se deja de aplicar la ventana')
+
+  urls.length = 0
+  await syncOffline()
+  assert.equal(new URL(urls[0], 'http://local').searchParams.get('since'), null, 'las pasadas siguientes son incrementales')
+
+  const oldSale = (id, clientId) => ({ id, client_sale_id: clientId, total: 100, payment_method: 'efectivo', created_at: '2020-02-15T12:00:00Z', register_id: 'web', account_id: 1, account_email: '1@test.local', items: [] })
+  urls.length = 0
+  let historyPage = 0
+  globalThis.fetch = async (path) => {
+    urls.push(path)
+    historyPage += 1
+    const first = historyPage === 1
+    return jsonResponse({
+      sales: [first ? oldSale(900, 'old-sale-a') : oldSale(901, 'old-sale-b')], cash_closes: [], products: [], cash_close_coverage_version: 1,
+      history: { from: '2020-01-31 00:00:00', to: '2020-03-02 00:00:00' },
+      cursors: { sale: first ? 900 : 901, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 },
+      has_more: first,
+    })
+  }
+  const report = await (await apiFetch('/api/reports/days?month=2020-02')).json()
+  assert.equal(report.totals.sales_count, 2, 'el historial se pagina hasta completar el mes')
+  assert.equal(urls.length, 2)
+  const historyUrl = new URL(urls[0], 'http://local')
+  assert.equal(historyUrl.searchParams.get('history_from'), '2020-01-31T00:00:00.000Z')
+  assert.equal(historyUrl.searchParams.get('history_until'), '2020-03-02T00:00:00.000Z')
+  assert.equal(stateAt(key).historyMonths['2020-02'], true)
+  const fetched = urls.length
+  await apiFetch('/api/reports/days?month=2020-02')
+  assert.equal(urls.length, fetched, 'un mes ya descargado no vuelve a pedirse')
+})
+
+test('una instalación anterior completa una última carga entera y luego usa cursores', async () => {
+  resetStore(); login(1); navigator.onLine = true
+  const key = stateKey(1)
+  seed()
+  const urls = []
+  globalThis.fetch = async (path) => {
+    urls.push(path)
+    return jsonResponse({
+      ...emptyData(), products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }],
+      sales: [{ id: 700, client_sale_id: 'legacy-sale', total: 50, payment_method: 'efectivo', created_at: '2024-01-01T12:00:00Z', items: [] }],
+      cursors: { sale: 700, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 },
+      has_more: false,
+    })
+  }
+  await syncOffline()
+  assert.equal(new URL(urls[0], 'http://local').searchParams.get('since'), null, 'la base existente no se recorta en la actualización')
+  assert.deepEqual(stateAt(key).cursors, { sale: 700, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 })
+  urls.length = 0
+  await syncOffline()
+  assert.equal(new URL(urls[0], 'http://local').searchParams.get('after_sale'), '700')
+})
+
+test('sin conexión el mes no descargado se sirve con lo local sin tocar la red', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  const key = stateKey(1)
+  const state = stateAt(key)
+  state.cursors = { sale: 1, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 }
+  seedState(key, state)
+  globalThis.fetch = () => { throw new Error('Nunca debe tocar la red') }
+  const report = await (await apiFetch('/api/reports/days?month=2019-01')).json()
+  assert.equal(report.totals.sales_count, 0)
+  assert.ok(!stateAt(key).historyMonths?.['2019-01'])
+})
+
+test('encolar una venta conserva el historial y la cola en la clave compatible con versiones anteriores', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  const key = stateKey(1)
+  await apiFetch('/api/products')
+  const salesBefore = structuredClone(records.get(key).base.sales)
+  const productsBefore = structuredClone(records.get(key).base.products)
+  assert.equal((await write('/api/sales', saleBody('entity-write'))).status, 202)
+  assert.deepEqual(records.get(key).base.sales, salesBefore, 'se conservan las ventas confirmadas')
+  assert.deepEqual(records.get(key).base.products, productsBefore, 'se conserva el catálogo confirmado')
+  assert.equal(records.get(key).outbox.length, 1)
+  assert.equal(records.get(key).outbox[0].body.client_sale_id, 'entity-write')
+  assert.equal(records.get(key).cursors, undefined)
 })

@@ -1,0 +1,53 @@
+name: audit-cron
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probar Gemini con datos ficticios, sin procesar cierres'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-cron
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Procesar la cola de auditoría
+        env:
+          AUDIT_CRON_URL: ${{ vars.AUDIT_CRON_URL || secrets.AUDIT_CRON_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          PROBE: ${{ inputs.probe || false }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${AUDIT_CRON_URL:-}" ]; then
+            echo "Falta AUDIT_CRON_URL (variable o secreto del repositorio)." >&2
+            exit 1
+          fi
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "Falta CRON_SECRET (secreto del repositorio)." >&2
+            exit 1
+          fi
+
+          separator='?'
+          case "$AUDIT_CRON_URL" in
+            *\?*) separator='&' ;;
+          esac
+
+          query='limit=20'
+          if [ "$PROBE" = 'true' ]; then query='probe=1'; fi
+
+          curl --fail-with-body --silent --show-error --max-time 55 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${AUDIT_CRON_URL}${separator}${query}"

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate } from './offlineModel.js'
+import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate, applyChanges } from './offlineModel.js'
 import { monthCsv } from './offlineExport.js'
 import { summarizeCashierSales } from './cashierSalesSummary.js'
 import { withdrawalSplit } from './payment.js'
@@ -365,4 +365,45 @@ test('cajero no puede extraer dinero', () => {
   // Create a withdrawal first
   const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 })
   assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w.result.client_withdrawal_id}/void`, {}, { user: cashier }), /Solo el dueño/)
+})
+
+
+test('applyChanges fusiona una página incremental, aplica cobertura y respeta anulaciones', () => {
+  const base = {
+    ...emptyData(),
+    products: [{ id: 10, name: 'Pan', stock: 20 }, { id: 11, name: 'Leche', stock: 5 }],
+    sales: [
+      { id: 100, client_sale_id: 'a', total: 10, cash_close_id: null },
+      { id: 101, client_sale_id: 'b', total: 20, cash_close_id: null },
+    ],
+    currency_purchases: [{ id: 5, client_purchase_id: 'p', cash_close_id: null }],
+    cash_withdrawals: [{ id: 7, client_withdrawal_id: 'w', cash_close_id: null }],
+  }
+  applyChanges(base, {
+    products: [{ id: 10, name: 'Pan', stock: 19 }],
+    sales: [{ id: 100, client_sale_id: 'a', total: 30, cash_close_id: null }],
+    cash_closes: [{ id: 80, client_close_id: 'c', covered_sale_ids: [100], covered_purchase_ids: [5], covered_withdrawal_ids: [7] }],
+    sale_corrections: [{ sale_id: 101, sale: null, client_sale_id: 'b' }],
+    daily_stock: { date: '2026-09-15', products: [] },
+    cash_close_coverage_version: 1,
+  })
+  assert.deepEqual(base.products.map((row) => row.id), [10], 'el catálogo completo refleja productos borrados')
+  assert.equal(base.sales.length, 1)
+  assert.equal(base.sales[0].total, 30, 'la venta existente se actualiza')
+  assert.equal(base.sales[0].cash_close_id, 80)
+  assert.equal(base.currency_purchases[0].cash_close_id, 80)
+  assert.equal(base.cash_withdrawals[0].cash_close_id, 80)
+  assert.equal(base.cash_closes[0].id, 80)
+  assert.deepEqual(base.local_entries, {})
+  assert.equal(base.cash_close_coverage_version, 1)
+})
+
+test('applyChanges conserva las líneas al recibir una corrección de pago sin items', () => {
+  const base = { ...emptyData(), sales: [{ id: 100, client_sale_id: 'a', total: 10, payment_method: 'efectivo', items: [{ product_id: 10, quantity: 1, unit_price: 10 }] }] }
+  applyChanges(base, {
+    sale_corrections: [{ sale_id: 100, sale: { id: 100, client_sale_id: 'a', total: 12, payment_method: 'transferencia' }, cash_close: { id: 81, client_close_id: 'c' } }],
+  })
+  assert.equal(base.sales[0].payment_method, 'transferencia')
+  assert.equal(base.sales[0].items[0].product_id, 10, 'el cliente conserva las líneas que no reenvía el servidor')
+  assert.equal(base.cash_closes[0].id, 81)
 })

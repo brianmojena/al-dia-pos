@@ -1,8 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const bcrypt = require('bcryptjs');
 const { startTestServer, registerUser, createCashier } = require('./helpers');
 
-// El panel de administración se protege por correo (ADMIN_EMAILS en config).
+// El panel de administración se protege con el flag is_admin de la cuenta; el
+// correo de ADMIN_EMAILS queda reservado y se aprovisiona con el script
+// admin:grant (aquí se simula insertando la fila directamente).
 // Se fija aquí, antes de que cualquier módulo lea la config, para que el test
 // no dependa del entorno de quien lo corra.
 process.env.ADMIN_EMAILS = 'brianadmin@aldia.cu';
@@ -24,16 +27,18 @@ test('confirmación: prueba de 7 días, bloqueo al vencer y panel de administrac
   const ctx = await startTestServer();
   t.after(() => ctx.close());
 
-  // La cuenta de administración se crea una sola vez para todo el test.
+  // La cuenta de administración se crea una sola vez para todo el test, como
+  // lo haría `npm run admin:grant`.
   let adminToken = null;
   const adminLogin = async () => {
     if (adminToken) return adminToken;
-    const res = await register(ctx.api, ADMIN_EMAIL, { store_name: 'Administración' });
-    if (res.status === 201) adminToken = res.body.token;
-    else {
-      const login = await ctx.api('POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: 'test1234' } });
-      adminToken = login.body.token;
-    }
+    await ctx.db.execute({
+      sql: `INSERT INTO users (email, password_hash, store_name, plan, plan_status, is_admin)
+            VALUES (?, ?, 'Administración', 'enterprise', 'active', 1)`,
+      args: [ADMIN_EMAIL, bcrypt.hashSync('test1234', 10)],
+    });
+    const login = await ctx.api('POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: 'test1234' } });
+    adminToken = login.body.token;
     return adminToken;
   };
 
@@ -47,6 +52,20 @@ test('confirmación: prueba de 7 días, bloqueo al vencer y panel de administrac
     assert.equal(u.is_admin, false);
     const dias = (new Date(u.trial_ends_at).getTime() - Date.now()) / 86400000;
     assert.ok(dias > 6.9 && dias <= 7.01, `la prueba debe durar ~7 días (fue ${dias})`);
+  });
+
+  await t.test('el registro público no puede reclamar el correo de administración', async () => {
+    const res = await register(ctx.api, ADMIN_EMAIL);
+    assert.equal(res.status, 403);
+    const row = await ctx.db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [ADMIN_EMAIL] });
+    assert.equal(row.rows.length, 0, 'no debe quedar ninguna cuenta creada con el correo reservado');
+
+    const dueño = await registerUser(ctx.api, `dueno-reservado-${sufijo()}@test.local`);
+    const cajero = await ctx.api('POST', '/api/auth/cashiers', {
+      token: dueño,
+      body: { email: ADMIN_EMAIL, password: 'test1234' },
+    });
+    assert.equal(cajero.status, 403, 'tampoco un dueño puede crear un cajero con ese correo');
   });
 
   await t.test('vencida la prueba, la tienda (dueño y cajeros) queda bloqueada; confirmarla desbloquea', async () => {
