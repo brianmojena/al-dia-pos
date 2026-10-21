@@ -85,12 +85,97 @@ export function applyOperation(data, op, result = op.result) {
   return data
 }
 export function project(state) {
-  const data = structuredClone(state.base)
+  // Sin operaciones pendientes no hay nada que proyectar: devolver la base
+  // evita clonar todo el historial en cada lectura. Las operaciones solo
+  // necesitan copiar las entidades que realmente mutan.
+  const kinds = new Set(state.outbox.map((op) => op.kind))
+  if (kinds.size === 0) return state.base
+  const data = { ...state.base }
+  const copyRows = (key) => { data[key] = (state.base[key] || []).map((row) => ({ ...row })) }
+  if (kinds.has('product') || kinds.has('sale') || kinds.has('count')) copyRows('products')
+  if (kinds.has('sale') || kinds.has('review')) copyRows('sales')
+  if (kinds.has('count')) copyRows('inventory_counts')
+  if (kinds.has('purchase') || kinds.has('close')) copyRows('currency_purchases')
+  if (kinds.has('withdrawal') || kinds.has('withdrawal_void') || kinds.has('close')) copyRows('cash_withdrawals')
+  if (kinds.has('close')) copyRows('cash_closes')
+  if (kinds.has('review')) copyRows('rejected_sales')
+  if (kinds.has('product')) data.local_entries = structuredClone(state.base.local_entries || {})
   for (const op of state.outbox) applyOperation(data, op)
   return data
 }
+
+// Aplica una página de /api/sync/snapshot (modo incremental) sobre la base.
+// Es idempotente: repetir una página deja los mismos datos. El catálogo, los
+// cajeros, el stock del día y los rechazados vienen completos en cada página.
+export function applyChanges(base, page) {
+  const copy = (key) => {
+    if (Array.isArray(base[key])) base[key] = base[key].map((row) => ({ ...row }))
+    else base[key] = []
+  }
+  if (Array.isArray(page.products)) base.products = page.products
+  if (Array.isArray(page.cashiers)) base.cashiers = page.cashiers
+  if (page.daily_stock !== undefined) {
+    base.daily_stock = page.daily_stock
+    // La cifra confirmada ya incluye lo que estaba en `local_entries`; las
+    // operaciones aún pendientes lo vuelven a sumar al proyectar.
+    base.local_entries = {}
+  }
+  if (page.current_period !== undefined) base.current_period = page.current_period
+  if (page.current_periods !== undefined) base.current_periods = page.current_periods
+  if (page.shared_device !== undefined) base.shared_device = page.shared_device
+  if (Array.isArray(page.rejected_sales)) base.rejected_sales = page.rejected_sales
+  if (page.sales?.length) { copy('sales'); for (const sale of page.sales) upsert(base.sales, sale, 'client_sale_id') }
+  if (page.inventory_counts?.length) { copy('inventory_counts'); for (const count of page.inventory_counts) upsert(base.inventory_counts, count, 'client_count_id') }
+  if (page.currency_purchases?.length) { copy('currency_purchases'); for (const purchase of page.currency_purchases) upsert(base.currency_purchases, purchase, 'client_purchase_id') }
+  if (page.cash_withdrawals?.length) { copy('cash_withdrawals'); for (const withdrawal of page.cash_withdrawals) upsert(base.cash_withdrawals, withdrawal, 'client_withdrawal_id') }
+  const covered = { sales: new Map(), currency_purchases: new Map(), cash_withdrawals: new Map() }
+  if (page.cash_closes?.length) {
+    copy('cash_closes')
+    for (const close of page.cash_closes) {
+      upsert(base.cash_closes, close, 'client_close_id')
+      for (const [key, ids] of [['sales', close.covered_sale_ids], ['currency_purchases', close.covered_purchase_ids], ['cash_withdrawals', close.covered_withdrawal_ids]]) {
+        if (Array.isArray(ids)) for (const id of ids) covered[key].set(Number(id), close.id)
+      }
+    }
+  }
+  for (const [key, ids] of Object.entries(covered)) {
+    if (!ids.size) continue
+    copy(key)
+    base[key] = base[key].map((row) => ids.has(Number(row.id)) ? { ...row, cash_close_id: ids.get(Number(row.id)) } : row)
+  }
+  for (const correction of page.sale_corrections || []) {
+    if (correction.sale) { copy('sales'); upsert(base.sales, correction.sale, 'client_sale_id') }
+    else {
+      copy('sales')
+      base.sales = base.sales.filter((sale) =>
+        Number(sale.id) !== Number(correction.sale_id)
+        && (!correction.client_sale_id || sale.client_sale_id !== correction.client_sale_id))
+    }
+    if (correction.cash_close) { copy('cash_closes'); upsert(base.cash_closes, correction.cash_close, 'client_close_id') }
+  }
+  for (const correction of page.cash_close_corrections || []) {
+    if (correction.cash_close) { copy('cash_closes'); upsert(base.cash_closes, correction.cash_close, 'client_close_id') }
+  }
+  if (page.cash_close_coverage_version != null) base.cash_close_coverage_version = page.cash_close_coverage_version
+  return base
+}
+// Una página de historial solo toca las entidades históricas: nunca reemplaza
+// el catálogo, el stock del día ni el periodo abierto que ya están al día.
+export function applyHistory(base, page) {
+  return applyChanges(base, {
+    sales: page.sales,
+    cash_closes: page.cash_closes,
+    inventory_counts: page.inventory_counts,
+    currency_purchases: page.currency_purchases,
+    cash_withdrawals: page.cash_withdrawals,
+    sale_corrections: page.sale_corrections,
+    cash_close_corrections: page.cash_close_corrections,
+    cash_close_coverage_version: page.cash_close_coverage_version,
+  })
+}
 export function replaceProductId(state, from, to) {
-  for (const p of state.base.products) if (p.id === from) p.id = to
+  state.base.products = (state.base.products || []).map((p) => p.id === from ? { ...p, id: to } : p)
+
   for (const op of state.outbox) {
     if (op.productId === from) {
       op.productId = to
@@ -102,9 +187,21 @@ export function replaceProductId(state, from, to) {
     }
   }
 }
+const copyOperationBase = (base, kind) => {
+  const copy = (key) => { base[key] = (base[key] || []).map((row) => ({ ...row })) }
+  if (kind === 'product' || kind === 'sale' || kind === 'count') copy('products')
+  if (kind === 'sale' || kind === 'review') copy('sales')
+  if (kind === 'count') copy('inventory_counts')
+  if (kind === 'purchase' || kind === 'close') copy('currency_purchases')
+  if (kind === 'withdrawal' || kind === 'withdrawal_void' || kind === 'close') copy('cash_withdrawals')
+  if (kind === 'close') copy('cash_closes')
+  if (kind === 'review') copy('rejected_sales')
+  if (kind === 'product') base.local_entries = structuredClone(base.local_entries || {})
+}
 export function acknowledgeOperation(state, opId, result) {
   const op = state.outbox.find((o) => o.id === opId)
   if (!op) return state
+  copyOperationBase(state.base, op.kind)
   if (op.kind === 'product' && op.method === 'POST') {
     state.productIds ||= {}
     state.productIds[op.result.id] = Number(result.id)

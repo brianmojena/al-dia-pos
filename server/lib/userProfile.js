@@ -1,4 +1,4 @@
-const { isAdminEmail, showsCashierBreakdown } = require('../config');
+const { showsCashierBreakdown } = require('../config');
 const { planStateOf } = require('./plans');
 
 const publicUser = (account, shop = account) => ({
@@ -10,7 +10,7 @@ const publicUser = (account, shop = account) => ({
   // día (efectivo, transferencia, dólares y euros). Va por la tienda, así que
   // sale de la fila del dueño: un cajero lo hereda con los demás ajustes.
   cashier_day_breakdown: showsCashierBreakdown(shop.email),
-  ...planStateOf(shop), is_admin: isAdminEmail(account.email),
+  ...planStateOf(shop), is_admin: Number(account.is_admin) === 1,
 });
 
 module.exports = { publicUser };

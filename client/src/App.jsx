@@ -7,6 +7,7 @@ import Login from './pages/Login'
 import SharedCashier from './pages/SharedCashier'
 import ActivateDevice from './pages/ActivateDevice'
 import Register from './pages/Register'
+import RecuperarContrasena from './pages/RecuperarContrasena'
 import Bienvenida from './pages/Bienvenida'
 import Admin from './pages/Admin'
 import Dashboard from './pages/Dashboard'
@@ -17,6 +18,7 @@ import Caja from './pages/Caja'
 import Divisas from './pages/Divisas'
 import Almacen from './pages/Almacen'
 import Cajeros from './pages/Cajeros'
+import Auditoria from './pages/Auditoria'
 import Inventario from './pages/Inventario'
 import ImportarProductos from './pages/ImportarProductos'
 import { isElectron } from './lib/api'
@@ -35,6 +37,7 @@ export default function App() {
         <Route path="/cajero" element={<SharedCashier />} />
         <Route path="/activar" element={<ActivateDevice />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/recuperar" element={<RecuperarContrasena />} />
 
         <Route element={<RequireAuth />}>
           {/* Cartel tras registrarse: prueba de 7 días + plan pendiente de
@@ -67,6 +70,8 @@ export default function App() {
             <Route element={<RequireOwner />}>
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="cajeros"    element={<Cajeros />} />
+              {/* Los informes viven en la nube; en el escritorio offline no hay nada que ver. */}
+              <Route path="auditoria"  element={<Auditoria />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
 

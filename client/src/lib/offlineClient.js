@@ -1,10 +1,11 @@
-import { get, update, keys } from 'idb-keyval'
+import { get, update } from 'idb-keyval'
+import { read as readAccount, update as updateAccount, accounts as storedAccounts } from './accountStore.js'
 import { getToken, isElectron, networkFetch } from './network.js'
 import { getCachedUser, getCachedProducts } from './offlineCache.js'
 import { accountKeyFromToken, splitByAccount } from './queueOwnership.js'
 import { newId } from './newId.js'
 import { requestPersistentStorage } from './storagePersistence.js'
-import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
+import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, applyChanges, applyHistory, businessDate, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
 import { getSharedDevice, getSharedContext, getSharedCredential, getLastSharedAccount, isSharedLocked, isSharedExpired } from './sharedDevice.js'
 
 const sharedFor = (account) => {
@@ -18,7 +19,7 @@ const keyFor = (account) => {
 const accountNow = () => accountKeyFromToken(getToken())
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 const initialState = (account, device = sharedFor(account)) => ({ base: { ...emptyData(), ...(device ? { shared_device: device } : {}), products: (accountNow() === account && getCachedProducts()) || [] }, outbox: [], nextId: -1, initialized: false, lastSynced: null, syncError: '' })
-const readState = async (account, storageKey = keyFor(account)) => (await get(storageKey)) || initialState(account)
+const readState = async (account, storageKey = keyFor(account)) => readAccount(storageKey, () => initialState(account))
 const utcMillis = (value) => {
   if (typeof value !== 'string' || !value.trim()) return null
   const normalized = value.trim().replace(' ', 'T')
@@ -44,7 +45,7 @@ export function handlesOffline(path, method) {
 async function migrateLegacy(account) {
   const legacy = splitByAccount((await get('mypimes_sales_queue')) || [], account).mine
   if (!legacy.length) return
-  await update(keyFor(account), (state = initialState(account)) => {
+  await updateAccount(keyFor(account), (state = initialState(account)) => {
     for (const sale of legacy) {
       if (state.outbox.some((o) => o.body.client_sale_id === sale.client_sale_id) || state.base.sales.some((s) => s.client_sale_id === sale.client_sale_id)) continue
       const data = project(state)
@@ -74,6 +75,15 @@ export async function offlineRequest(path, options = {}) {
   if (accountNow() !== account) return response({ error: 'La sesión cambió' }, 401)
   const method = options.method || 'GET', route = path.split('?')[0]
   if (getSharedContext() && (isSharedLocked() || isSharedExpired())) return response({ error: 'Desbloquea la caja con tu PIN para continuar' }, 423)
+  if (method === 'GET') {
+    const month = monthFor(path)
+    if (month && state.cursors && !state.historyMonths?.[month] && navigator.onLine !== false) {
+      try {
+        await syncHistoryMonth(account, month, keyFor(account))
+        state = await readState(account)
+      } catch { /* la lectura local sigue disponible con lo ya descargado */ }
+    }
+  }
   try {
     if (method === 'GET') {
       if (!state.initialized && !state.base.products.length && !state.outbox.length) return response({ error: 'Conéctate una vez para descargar los datos de esta tienda' }, 503)
@@ -82,9 +92,14 @@ export async function offlineRequest(path, options = {}) {
     }
     const body = options.body ? JSON.parse(options.body) : {}
     let result
-    await update(keyFor(account), (current = initialState(account)) => {
+    await updateAccount(keyFor(account), (current = initialState(account)) => {
       if (accountNow() !== account) throw new Error('La sesión cambió')
-      const data = project(current)
+      let data = project(current)
+      if (route === '/api/products/import') {
+        // La importación encadena operaciones y necesita ver el stock/alta
+        // anterior, pero no debe tocar la base: el outbox las proyecta después.
+        data = { ...data, products: (data.products || []).map((p) => ({ ...p })), local_entries: structuredClone(data.local_entries || {}) }
+      }
       const ctx = { account, user, newId, localId: () => current.nextId-- }
       if (route === '/api/products/import') {
         if (user.role === 'cajero') throw new Error('Solo el dueño puede importar')
@@ -132,6 +147,89 @@ export async function offlineRequest(path, options = {}) {
 // y rechazaba (403) la operación, dejando parada toda la cola detrás de ella.
 const cashierEdit = (op) => op.method === 'PUT' && (getSharedContext() ? getSharedCredential(op.account_key)?.user : getCachedUser())?.role === 'cajero'
 const priceAndStockOnly = ({ sale_price, add_stock }) => ({ ...(sale_price !== undefined && { sale_price }), ...(add_stock !== undefined && { add_stock }) })
+const CURSOR_PARAMS = {
+  sale: 'after_sale',
+  close: 'after_close',
+  count: 'after_count',
+  purchase: 'after_purchase',
+  withdrawal: 'after_withdrawal',
+  correction: 'after_correction',
+  close_correction: 'after_close_correction',
+}
+const emptyCursors = () => Object.fromEntries(Object.keys(CURSOR_PARAMS).map((key) => [key, 0]))
+const INITIAL_SYNC_DAYS = 7
+const changesPath = (cursors, since = null) => {
+  const params = new URLSearchParams({ limit: '200', max_bytes: String(512 * 1024) })
+  for (const [key, param] of Object.entries(CURSOR_PARAMS)) params.set(param, String(cursors[key] ?? 0))
+  if (since) params.set('since', since)
+  return `/api/sync/snapshot?${params}`
+}
+const monthBounds = (month) => {
+  const first = new Date(`${month}-01T00:00:00Z`)
+  if (!Number.isFinite(first.getTime())) return null
+  const from = new Date(first); from.setUTCDate(from.getUTCDate() - 1)
+  const to = new Date(first); to.setUTCMonth(to.getUTCMonth() + 1); to.setUTCDate(to.getUTCDate() + 1)
+  return { from: from.toISOString(), to: to.toISOString() }
+}
+const historyPath = (month, cursors) => {
+  const bounds = monthBounds(month)
+  if (!bounds) return null
+  const params = new URLSearchParams({ history_from: bounds.from, history_until: bounds.to, limit: '500', max_bytes: String(1024 * 1024) })
+  for (const [key, param] of Object.entries(CURSOR_PARAMS)) params.set(param, String(cursors[key] ?? 0))
+  return `/api/sync/snapshot?${params}`
+}
+const historyLoading = new Map()
+async function syncHistoryMonth(account, month, storageKey) {
+  const key = `${storageKey}:${month}`
+  if (historyLoading.has(key)) return historyLoading.get(key)
+  const load = (async () => {
+    const token = getSharedContext() ? getSharedCredential(account)?.token || getToken() : getToken()
+    let cursors = emptyCursors()
+    for (;;) {
+      const path = historyPath(month, cursors)
+      if (!path) return false
+      const res = await networkFetch(path, { token, preserveSession: true })
+      const page = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(page.error || (res.status === 401 ? 'Renueva tu sesión para consultar el historial.' : 'No se pudo descargar el historial.'))
+      if (!page.cursors) return false
+      if (page.has_more && JSON.stringify(page.cursors) === JSON.stringify(cursors)) throw new Error('La nube no pudo avanzar el historial; vuelve a intentar')
+      await updateAccount(storageKey, (state = initialState(account)) => {
+        state.base = applyHistory(state.base, page)
+        if (!page.has_more) {
+          state.historyMonths ||= {}
+          state.historyMonths[month] = true
+        }
+        return state
+      })
+      broadcast()
+      if (!page.has_more) return true
+      cursors = page.cursors
+    }
+  })()
+  historyLoading.set(key, load)
+  try { return await load } finally { historyLoading.delete(key) }
+}
+const monthFor = (path) => {
+  const url = new URL(path, 'http://local')
+  if (url.pathname === '/api/reports/days') return url.searchParams.get('month') || businessDate().slice(0, 7)
+  if (['/api/sales', '/api/sales/corrections', '/api/cash-withdrawals', '/api/currency-purchases'].includes(url.pathname)) {
+    const date = url.searchParams.get('date')
+    return date && /^\d{4}-\d{2}$/.test(date.slice(0, 7)) ? date.slice(0, 7) : null
+  }
+  return null
+}
+const cursorsFromSnapshot = (snapshot) => {
+  const max = (rows) => (rows || []).reduce((n, row) => Math.max(n, Number(row.id) || 0), 0)
+  return {
+    sale: max(snapshot.sales),
+    close: max(snapshot.cash_closes),
+    count: max(snapshot.inventory_counts),
+    purchase: max(snapshot.currency_purchases),
+    withdrawal: max(snapshot.cash_withdrawals),
+    correction: 0,
+    close_correction: 0,
+  }
+}
 let syncing = null
 export async function syncOffline() {
   if (isElectron() || navigator.onLine === false || !accountNow() || !getCachedUser()) return
@@ -157,7 +255,7 @@ export async function syncOffline() {
           const snapshot = await snapshotResponse.json()
           if (snapshot.cash_close_coverage_version !== CASH_CLOSE_COVERAGE_VERSION) throw new Error('La nube no confirmó una cobertura completa de caja; el cierre sigue pendiente')
           if (!stillCurrent()) return
-          await update(storageKey, (current = initialState(account, shared)) => {
+          await updateAccount(storageKey, (current = initialState(account, shared)) => {
             current.base = { ...emptyData(), ...snapshot }
             const closeIndex = current.outbox.findIndex((pending) => pending.id === op.id)
             const prefix = current.outbox.slice(0, Math.max(0, closeIndex))
@@ -206,7 +304,7 @@ export async function syncOffline() {
             // El dinero ya se cobró: conservar el recibo y avisar al dueño,
             // como hacía la cola anterior, sin bloquear las ventas posteriores.
             await update('mypimes_rejected_sales', (list = []) => list.some((sale) => sale.client_sale_id === op.body.client_sale_id) ? list : [...list, { ...op.body, items: op.result.items, account_key: op.account_key || account, shared_device_id: shared?.id, queued_at: Date.parse(op.queued_at), error: result.error || 'Venta rechazada al sincronizar', rejected_at: Date.now(), reported: false }])
-            await update(storageKey, (state) => {
+            await updateAccount(storageKey, (state) => {
               state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
               for (const pending of state.outbox) if (pending.saleIds) pending.saleIds = pending.saleIds.filter((id) => id !== op.result.id)
               return state
@@ -219,7 +317,7 @@ export async function syncOffline() {
           if (op.kind === 'withdrawal_void' && [404, 409].includes(res.status)) {
             // El servidor ya anuló esta extracción desde otro aparato,
             // o entró en cierre: ignorar y seguir. El snapshot al final restaura el estado real.
-            await update(storageKey, (state) => {
+            await updateAccount(storageKey, (state) => {
               state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
               return state
             })
@@ -229,26 +327,57 @@ export async function syncOffline() {
           if (res.status === 401) throw new Error('La sesión necesita renovarse. Tus cambios siguen guardados; inicia sesión con esta misma cuenta.')
           const error = result.error || `No se pudo sincronizar (${res.status})`
           // Nunca descartar una operación cobrada o sobrepasar una dependencia.
-          if ([400, 403, 404, 409, 422].includes(res.status)) await update(storageKey, (s) => { const pending = s.outbox.find((o) => o.id === op.id); if (pending) { pending.error = error; pending.errorStatus = res.status } return s })
+          if ([400, 403, 404, 409, 422].includes(res.status)) await updateAccount(storageKey, (s) => { const pending = s.outbox.find((o) => o.id === op.id); if (pending) { pending.error = error; pending.errorStatus = res.status } return s })
           throw new Error(error)
         }
-        await update(storageKey, (s) => acknowledgeOperation(s, op.id, { ...result, pending: false }))
+        await updateAccount(storageKey, (s) => acknowledgeOperation(s, op.id, { ...result, pending: false }))
         broadcast()
       }
       if (!stillCurrent()) return
       await flushQueue() // Reportar también los rechazos de esta pasada.
       if (!stillCurrent()) return
-      // Snapshot consistente del servidor: catálogo, todo el historial con sus
-      // líneas y cobertura de cierres. Solo se reemplaza la base, nunca la cola.
-      const res = await request('/api/sync/snapshot', shared ? { token: getSharedCredential(accountNow())?.token || token } : {})
-      if (!res.ok) throw new Error(res.status === 401 ? 'Renueva tu sesión para sincronizar. Los datos locales siguen disponibles.' : 'No se pudieron descargar los datos de la tienda')
-      const snapshot = await res.json()
-      if (!stillCurrent()) return
-      await update(storageKey, (s = initialState(account, shared)) => ({ ...s, base: { ...emptyData(), ...snapshot }, initialized: true, lastSynced: Date.now(), syncError: '' }))
+      // Descarga consistente del servidor en páginas. La base se actualiza
+      // página a página y los cursores se guardan tras cada una: si se corta la
+      // conexión, la siguiente pasada continúa donde quedó en vez de rehacer
+      // todo el historial.
+      const saved = await readState(account, storageKey)
+      let cursors = { ...emptyCursors(), ...(saved.cursors || {}) }
+      const since = saved.syncSince || (!saved.initialized && !saved.cursors
+        ? new Date(Date.now() - INITIAL_SYNC_DAYS * 86_400_000).toISOString()
+        : null)
+      for (;;) {
+        const res = await request(changesPath(cursors, since), shared ? { token: getSharedCredential(accountNow())?.token || token } : {})
+        if (!res.ok) throw new Error(res.status === 401 ? 'Renueva tu sesión para sincronizar. Los datos locales siguen disponibles.' : 'No se pudieron descargar los datos de la tienda')
+        const page = await res.json()
+        if (!stillCurrent()) return
+        if (!page.cursors) {
+          // Servidor anterior al protocolo paginado: una última descarga
+          // completa y cursores derivados de lo recibido.
+          await updateAccount(storageKey, (s = initialState(account, shared)) => ({
+            ...s, base: { ...emptyData(), ...page }, cursors: cursorsFromSnapshot(page),
+            initialized: true, lastSynced: Date.now(), syncError: '', syncSince: null,
+          }))
+          break
+        }
+        if (page.has_more && JSON.stringify(page.cursors) === JSON.stringify(cursors)) {
+          throw new Error('La nube no pudo avanzar la sincronización; vuelve a intentar')
+        }
+        await updateAccount(storageKey, (s = initialState(account, shared)) => {
+          s.base = applyChanges(s.base, page)
+          s.cursors = page.cursors
+          s.initialized = true
+          s.lastSynced = Date.now()
+          s.syncError = ''
+          s.syncSince = page.has_more ? since : null
+          return s
+        })
+        broadcast()
+        if (!page.has_more) break
+        cursors = page.cursors
+      }
       requestPersistentStorage()
-      broadcast()
     } catch (error) {
-      try { await update(storageKey, (s = initialState(account, shared)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
+      try { await updateAccount(storageKey, (s = initialState(account, shared)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
       broadcast()
     }
   }
@@ -259,8 +388,8 @@ export async function localSyncStatus() {
   const account = accountNow()
   if (!account || isElectron()) return { pending: 0 }
   const state = await readState(account)
-  const otherKeys = (await keys()).filter((key) => typeof key === 'string' && (key.startsWith('mypimes_local_v1:') || key.startsWith('mypimes_shared_v1:')) && key !== keyFor(account))
-  const others = await Promise.all(otherKeys.map((key) => get(key)))
+  const otherKeys = (await storedAccounts()).filter((key) => key !== keyFor(account))
+  const others = await Promise.all(otherKeys.map((key) => readAccount(key)))
   const otherAccounts = others.reduce((count, state) => count + (state?.outbox?.length || 0), 0)
   return { otherAccounts, pending: state.outbox.length, error: state.syncError, conflicts: state.outbox.filter((o) => o.error).length, problem: state.outbox.find((o) => o.error), initialized: state.initialized, lastSynced: state.lastSynced }
 }
@@ -270,15 +399,15 @@ export async function localSyncStatus() {
 export async function canReplaceSharedDevice() {
   if (isElectron()) return { allowed: false, error: 'Configura la caja compartida en la aplicación web de la tablet o teléfono.' }
   try {
-    const allKeys = (await keys()).filter((key) => typeof key === 'string' && (key.startsWith('mypimes_local_v1:') || key.startsWith('mypimes_shared_v1:')))
-    const states = await Promise.all(allKeys.map((key) => get(key)))
+    const allKeys = await storedAccounts()
+    const states = await Promise.all(allKeys.map((key) => readAccount(key)))
     if (states.some((s) => s?.outbox?.length) || ((await get('mypimes_sales_queue')) || []).length
       || ((await get('mypimes_rejected_sales')) || []).some((s) => !s.reported && !s.report_failed)) {
       return { allowed: false, error: 'Sincroniza todos los cambios pendientes de este dispositivo antes de configurarlo. Los datos se conservan.' }
     }
     const device = getSharedDevice()
     if (device) {
-      const old = await get(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
+      const old = await readAccount(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
       if (old) {
         const data = project(old)
         if ([...(data.sales || []), ...(data.currency_purchases || [])].some((row) => row.cash_close_id == null)) return { allowed: false, error: 'Cierra y sincroniza la caja instalada antes de cambiar su configuración.' }
@@ -291,7 +420,7 @@ export async function canReplaceSharedDevice() {
 export async function sharedHandoverStatus(account = getLastSharedAccount()) {
   const device = getSharedDevice()
   if (!device || device.continuous || !account) return { hasOpenOperations: false }
-  const state = await get(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
+  const state = await readAccount(`mypimes_shared_v1:${device.owner_id}:${device.id}`)
   if (!state) return { hasOpenOperations: false }
   const user = getSharedCredential(account)?.user
   if (!user) throw new Error('No se pudo comprobar la caja del cajero anterior.')
@@ -300,7 +429,7 @@ export async function sharedHandoverStatus(account = getLastSharedAccount()) {
 export async function retrySync() {
   const account = accountNow()
   if (!account) return
-  await update(keyFor(account), (s = initialState(account)) => ({ ...s, outbox: s.outbox.map(({ error, ...op }) => op), syncError: '' }))
+  await updateAccount(keyFor(account), (s = initialState(account)) => ({ ...s, outbox: s.outbox.map(({ error, ...op }) => op), syncError: '' }))
   return syncOffline()
 }
 
@@ -311,13 +440,13 @@ export async function cacheCashCloseCorrection(payload, expectedIdentity = null)
   const identity = expectedIdentity || current;
   if (!identity.account || !identity.token || identity.account !== current.account || identity.token !== current.token
       || isElectron() || !payload?.cash_close) return false;
-  await update(keyFor(identity.account), (state = initialState(identity.account)) => {
+  await updateAccount(keyFor(identity.account), (state = initialState(identity.account)) => {
     const close = payload.cash_close;
     const index = (state.base.cash_closes || []).findIndex((row) =>
       (Boolean(close.client_close_id) && row.client_close_id === close.client_close_id)
       || Number(row.id) === Number(close.id));
     if (index < 0) state.base.cash_closes = [close, ...(state.base.cash_closes || [])];
-    else state.base.cash_closes[index] = { ...state.base.cash_closes[index], ...close };
+    else state.base.cash_closes = state.base.cash_closes.map((row, i) => i === index ? { ...row, ...close } : row);
     return state;
   });
   broadcast();
@@ -331,14 +460,12 @@ export async function refreshOfflineSnapshot(expectedIdentity = null) {
   if (!account || !token || isElectron()) return;
   const stillCurrent = () => accountNow() === account && getToken() === token;
   if (!stillCurrent()) throw new Error('La sesión cambió antes de actualizar el historial.');
-  const response = await networkFetch('/api/sync/snapshot', { token, preserveSession: true });
-  const snapshot = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(snapshot.error || 'No se pudo actualizar el historial confirmado.');
+  // Sincronización incremental: una corrección no debe obligar a bajar de
+  // nuevo todo el historial de la tienda (puede pesar decenas de MB).
+  await syncOffline();
   if (!stillCurrent()) throw new Error('La sesión cambió antes de actualizar el historial.');
-  await update(keyFor(account), (state = initialState(account)) => ({
-    ...state, base: { ...emptyData(), ...snapshot }, initialized: true,
-    lastSynced: Date.now(), syncError: '',
-  }));
+  const state = await readState(account);
+  if (state.syncError) throw new Error(state.syncError);
   broadcast();
 }
 export async function resolveProductConflict(choice) {
@@ -352,7 +479,7 @@ export async function resolveProductConflict(choice) {
     if (accountNow() !== account || getToken() !== token) throw new Error('La sesión cambió')
     const product = snapshot.products.find((p) => Number(p.id) === op.productId)
     if (choice === 'local' && !product) throw new Error('El producto ya no existe en la nube. Usa los datos de la nube y créalo de nuevo si hace falta.')
-    await update(keyFor(account), (current) => {
+    await updateAccount(keyFor(account), (current) => {
       const pending = current.outbox.find((p) => p.id === op.id)
       if (!pending) return current
       current.resolved ||= []

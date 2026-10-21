@@ -66,4 +66,42 @@ test('delta de sincronización', async (t) => {
     assert.equal(forbidden.status, 403);
     void tokenB;
   });
+
+  await t.test('las extracciones abiertas no atascan el cursor', async () => {
+    const token = await registerUser(ctx.api);
+    const ids = [];
+    for (let i = 0; i < 3; i++) {
+      const res = await ctx.api('POST', '/api/cash-withdrawals', {
+        token,
+        body: {
+          client_withdrawal_id: `abierta-${i}-${Date.now()}`,
+          method: 'efectivo',
+          amount: 10 + i,
+        },
+      });
+      assert.equal(res.status, 201);
+      ids.push(Number(res.body.id));
+    }
+
+    // Con limit=1 y tres extracciones abiertas, la versión anterior devolvía
+    // siempre la primera (id <= cursor OR abierta) y el cursor no avanzaba.
+    let cursor = 0;
+    let hasMore = true;
+    let pages = 0;
+    const vistos = new Set();
+    while (hasMore && pages < 6) {
+      const page = await ctx.api('GET', `/api/sync/delta?after_withdrawal=${cursor}&limit=1`, { token });
+      assert.equal(page.status, 200);
+      for (const row of page.body.cash_withdrawals) vistos.add(Number(row.id));
+      assert.ok(page.body.cursors.withdrawal >= cursor, 'el cursor nunca retrocede');
+      cursor = page.body.cursors.withdrawal;
+      hasMore = page.body.has_more;
+      pages++;
+    }
+
+    assert.equal(hasMore, false, 'la paginación termina aunque queden extracciones abiertas');
+    assert.equal(cursor, Math.max(...ids), 'el cursor llegó a la última extracción');
+    assert.equal(pages, ids.length + 1, 'una página por extracción nueva y una final de recordatorios');
+    assert.deepEqual([...vistos].sort((a, b) => a - b), [...ids].sort((a, b) => a - b));
+  });
 });

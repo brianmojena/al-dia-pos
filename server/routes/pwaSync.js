@@ -7,6 +7,7 @@ const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
 const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
 const { dailyStock } = require('../lib/dailyStock');
+const { syncChanges, isPaginated } = require('../lib/syncChanges');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 // Una fotografía bajo la misma transacción: no mezclar stock anterior a una
@@ -14,6 +15,11 @@ const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300
 router.get('/snapshot', asyncHandler(async (req, res) => {
   const tx = await getDb().transaction('read');
   try {
+    if (isPaginated(req.query)) {
+      const page = await syncChanges(tx, req);
+      await tx.commit();
+      return res.json(page);
+    }
     if (req.sharedDevice) {
       const snapshot = await require('../lib/sharedSnapshot').sharedSnapshot(tx, req);
       await tx.commit();

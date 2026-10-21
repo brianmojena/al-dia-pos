@@ -1,9 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const bcrypt = require('bcryptjs');
 const { startTestServer, registerUser, createProduct, createCashier } = require('./helpers');
 
-// El panel de administración se protege por correo (ADMIN_EMAILS en config).
-// Se fija antes de que cualquier módulo lea la config para no depender del entorno.
+// El panel de administración se protege con el flag is_admin de la cuenta.
+// ADMIN_EMAILS se fija antes de que cualquier módulo lea la config para que la
+// migración de arranque promueva exactamente este correo si existiera.
 process.env.ADMIN_EMAILS = 'brianadmin@aldia.cu';
 const ADMIN_EMAIL = 'brianadmin@aldia.cu';
 
@@ -20,16 +22,18 @@ test('caja compartida (shared device) — servidor', async (t) => {
   const ctx = await startTestServer();
   t.after(() => ctx.close());
 
-  // El administrador se crea una sola vez para todo el archivo.
+  // El administrador se crea una sola vez para todo el archivo, como lo haría
+  // `npm run admin:grant`.
   let adminToken = null;
   const admin = async () => {
     if (adminToken) return adminToken;
-    const res = await ctx.api('POST', '/api/auth/register', {
-      body: { email: ADMIN_EMAIL, password: 'test1234', store_name: 'Administración' },
+    await ctx.db.execute({
+      sql: `INSERT INTO users (email, password_hash, store_name, plan, plan_status, is_admin)
+            VALUES (?, ?, 'Administración', 'enterprise', 'active', 1)`,
+      args: [ADMIN_EMAIL, bcrypt.hashSync('test1234', 10)],
     });
-    adminToken = res.status === 201
-      ? res.body.token
-      : (await ctx.api('POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: 'test1234' } })).body.token;
+    const login = await ctx.api('POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: 'test1234' } });
+    adminToken = login.body.token;
     return adminToken;
   };
 
@@ -252,6 +256,66 @@ test('caja compartida (shared device) — servidor', async (t) => {
     }
     assert.equal((await ctx.api('GET', '/api/dashboard', { token: ana })).status, 403);
     assert.equal((await ctx.api('GET', '/api/cash-closes/summary', { token: ana })).status, 403);
+  });
+
+  await t.test('sync incremental compartido: pagina solo el aparato y sin datos del dueño', async () => {
+    const shop = await makeShop();
+    const dos = await createCashier(ctx.api, shop.ownerToken, { email: `inc-${suffix()}@test.local` });
+    const bundle = await provision(shop.ownerId, [
+      { id: Number(shop.owner.id), display_name: 'Ana' },
+      { id: Number(dos.id), display_name: 'Beto' },
+    ], { continuous: true, name: 'Kiosco incremental' });
+    const ana = tokenOf(bundle, shop.owner);
+    const first = await sell(ana, { client_sale_id: 'inc-a', items: item(shop.productId) });
+    const second = await sell(tokenOf(bundle, dos), { client_sale_id: 'inc-b', items: item(shop.productId) });
+    const web = await ctx.api('POST', '/api/sales', {
+      token: shop.ownerToken,
+      body: { register_id: 'web', client_sale_id: 'inc-web', items: item(shop.productId) },
+    });
+    assert.equal(first.status, 201); assert.equal(second.status, 201); assert.equal(web.status, 201);
+
+    const path = (cursors = {}, limit = 2) => {
+      const params = new URLSearchParams({ limit: String(limit), max_bytes: '524288' });
+      for (const key of ['sale', 'close', 'count', 'purchase', 'withdrawal', 'correction', 'close_correction']) params.set(`after_${key}`, String(cursors[key] ?? 0));
+      return `/api/sync/snapshot?${params}`;
+    };
+    const page = await ctx.api('GET', path({}, 1), { token: ana });
+    assert.equal(page.status, 200, JSON.stringify(page.body));
+    assert.equal(page.body.shared_device.id, bundle.device.id);
+    assert.equal(page.body.current_period.register_id, `shared:${bundle.device.id}`);
+    assert.ok(page.body.current_periods);
+    assert.ok(page.body.products.length > 0);
+    assert.ok(page.body.products.every((p) => !('purchase_price' in p)), 'sin costos');
+    assert.ok(page.body.sales.every((s) => !('profit' in s)), 'sin ganancia');
+    assert.ok(!page.body.sales.some((s) => s.client_sale_id === 'inc-web'), 'no mezcla la caja web del dueño');
+    for (const key of ['daily_stock', 'cashiers', 'inventory_counts', 'rejected_sales']) assert.ok(!(key in page.body), `no expone ${key}`);
+    assert.ok(page.body.cursors.sale > 0);
+
+    let cursors = page.body.cursors;
+    const seen = page.body.sales.map((s) => s.client_sale_id);
+    while (page.body.has_more) {
+      const next = await ctx.api('GET', path(cursors, 1), { token: ana });
+      assert.equal(next.status, 200, JSON.stringify(next.body));
+      seen.push(...next.body.sales.map((s) => s.client_sale_id));
+      cursors = next.body.cursors;
+      if (!next.body.has_more) break;
+    }
+    assert.deepEqual(seen.sort(), ['inc-a', 'inc-b']);
+
+    const correct = await ctx.api('POST', `/api/sales/${second.body.id}/correct`, {
+      token: shop.ownerToken, body: { action: 'pago', payment_method: 'transferencia', reason: 'prueba compartida' },
+    });
+    assert.equal(correct.status, 200);
+    await ctx.api('POST', `/api/sales/${web.body.id}/correct`, {
+      token: shop.ownerToken, body: { action: 'anular', reason: 'no debe llegar al aparato' },
+    });
+    const after = await ctx.api('GET', path(cursors, 500), { token: ana });
+    assert.equal(after.status, 200, JSON.stringify(after.body));
+    assert.equal(after.body.sale_corrections.length, 1, 'solo la corrección del aparato');
+    assert.equal(Number(after.body.sale_corrections[0].sale_id), Number(second.body.id));
+    assert.equal(after.body.sale_corrections[0].sale.payment_method, 'transferencia');
+    assert.equal('before' in after.body.sale_corrections[0], false);
+    assert.equal('after' in after.body.sale_corrections[0], false);
   });
 
   await t.test('duplicados y reconexión; el JWT normal se conserva', async () => {

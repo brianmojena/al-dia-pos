@@ -285,6 +285,9 @@ function initLocalDb(dbPath) {
     // veces. Sin esta marca, una entrada confirmada cuyo GET del resumen falló
     // desaparecería de "Entradas de hoy".
     'ALTER TABLE outbox ADD COLUMN covered_by_snapshot INTEGER NOT NULL DEFAULT 0',
+    // Espera creciente ante errores transitorios: la fila no vuelve a
+    // intentarse hasta esta marca. NULL = se puede intentar ya.
+    'ALTER TABLE outbox ADD COLUMN next_attempt_at TEXT',
   ]) {
     try { db.exec(sql); } catch (_) { /* la columna ya existe */ }
   }

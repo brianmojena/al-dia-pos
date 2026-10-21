@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { CheckCircle2, MonitorSmartphone, RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, MonitorSmartphone, RefreshCw, ShieldCheck, Sparkles, Store, KeyRound, Copy, Check, X } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { formatDateTime } from '../lib/dates'
 import SharedDeviceSetup from '../components/SharedDeviceSetup'
+import AuditReportCard from '../components/AuditReportCard'
 
 // Etiqueta visual del estado. El cálculo real (locked, días de prueba) lo
 // manda el servidor: aquí solo se pinta.
@@ -16,7 +17,7 @@ const estadoDe = (shop) => {
 }
 
 /**
- * Panel de administración (solo la cuenta de ADMIN_EMAILS): las tiendas
+ * Panel de administración (solo cuentas con is_admin): las tiendas
  * registradas, pendientes primero, con botón para confirmarlas cuando el
  * pago se cobra en persona.
  */
@@ -27,6 +28,18 @@ export default function Admin() {
   const [confirming, setConfirming] = useState(null)
   // Tienda cuya ficha de caja compartida está abierta (una a la vez).
   const [setupShop, setSetupShop] = useState(null)
+  // Tienda que está solicitando código de recuperación
+  const [requestingCode, setRequestingCode] = useState(null)
+  // Tienda cuyo código de recuperación está visible
+  const [resetCodeShop, setResetCodeShop] = useState(null)
+  const [resetCode, setResetCode] = useState('')
+  const [resetCodeExpires, setResetCodeExpires] = useState('')
+  const [copiedCode, setCopiedCode] = useState(false)
+  // Pestaña activa y datos de auditoría (se cargan solo al abrirla).
+  const [tab, setTab] = useState('shops')
+  const [audit, setAudit] = useState({ health: null, reports: null })
+  const [auditError, setAuditError] = useState('')
+  const [auditLoading, setAuditLoading] = useState(false)
 
   const load = async () => {
     setError('')
@@ -41,9 +54,6 @@ export default function Admin() {
   }
 
   useEffect(() => { if (user?.is_admin) void load() }, [user?.is_admin])
-
-  // El servidor también lo bloquea (403); esto es para no enseñar la pantalla.
-  if (!user?.is_admin) return <Navigate to="/" replace />
 
   const confirmar = async (id) => {
     setConfirming(id)
@@ -60,6 +70,86 @@ export default function Admin() {
     }
   }
 
+  const requestResetCode = async (id) => {
+    setRequestingCode(id)
+    setError('')
+    try {
+      const res = await apiFetch(`/api/admin/shops/${id}/reset-code`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo generar el código')
+      setResetCodeShop(id)
+      setResetCode(data.code)
+      setResetCodeExpires(data.expires_at)
+      setCopiedCode(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRequestingCode(null)
+    }
+  }
+
+  const copyResetCode = async () => {
+    try {
+      await navigator.clipboard.writeText(resetCode)
+      setCopiedCode(true)
+      setTimeout(() => setCopiedCode(false), 2000)
+    } catch (err) {
+      // Silencioso, el usuario puede copiar manualmente
+    }
+  }
+
+  const loadAudit = async () => {
+    setAuditLoading(true)
+    setAuditError('')
+    try {
+      const [healthRes, reportsRes] = await Promise.all([
+        apiFetch('/api/admin/audit/health'),
+        apiFetch('/api/admin/audit/reports?limit=100'),
+      ])
+      const [health, reports] = await Promise.all([healthRes.json(), reportsRes.json()])
+      if (!healthRes.ok) throw new Error(health.error || 'No se pudo leer el estado del worker')
+      if (!reportsRes.ok) throw new Error(reports.error || 'No se pudieron cargar los informes')
+      setAudit({ health, reports: Array.isArray(reports) ? reports : [] })
+    } catch (err) {
+      setAuditError(err.message)
+    } finally {
+      setAuditLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (user?.is_admin && tab === 'audit') void loadAudit()
+  }, [tab, user?.is_admin])
+
+  const retryFailed = async () => {
+    setAuditLoading(true)
+    setAuditError('')
+    try {
+      const res = await apiFetch('/api/admin/audit/jobs/retry-failed', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudieron reintentar los trabajos')
+      await loadAudit()
+    } catch (err) {
+      setAuditError(err.message)
+      setAuditLoading(false)
+    }
+  }
+
+  const retryReport = async (report) => {
+    setAuditError('')
+    try {
+      const res = await apiFetch(`/api/admin/audit/reports/${report.id}/retry`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo reintentar el informe')
+      await loadAudit()
+    } catch (err) {
+      setAuditError(err.message)
+    }
+  }
+
+  // Todos los hooks se ejecutan también si el servidor retira el permiso.
+  if (!user?.is_admin) return <Navigate to="/" replace />
+
   const pendientes = shops?.filter((s) => s.plan_status === 'pending').length ?? 0
 
   return (
@@ -71,18 +161,39 @@ export default function Admin() {
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Administración</h2>
           <p className="text-xs text-gray-400 mt-0.5">
-            {shops === null
-              ? 'Cargando tiendas…'
-              : `${shops.length} tienda${shops.length === 1 ? '' : 's'} · ${pendientes} pendiente${pendientes === 1 ? '' : 's'}`}
+            {tab === 'shops'
+              ? (shops === null
+                ? 'Cargando tiendas…'
+                : `${shops.length} tienda${shops.length === 1 ? '' : 's'} · ${pendientes} pendiente${pendientes === 1 ? '' : 's'}`)
+              : 'Salud del worker e informes de todas las tiendas'}
           </p>
         </div>
+      </div>
+
+      <div className="flex gap-1 bg-gray-100 rounded-xl p-1 mt-4 mb-2">
+        <button
+          onClick={() => setTab('shops')}
+          className={`flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold py-2.5 rounded-lg transition-colors ${
+            tab === 'shops' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+          }`}
+        >
+          <Store size={15} /> Tiendas
+        </button>
+        <button
+          onClick={() => setTab('audit')}
+          className={`flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold py-2.5 rounded-lg transition-colors ${
+            tab === 'audit' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+          }`}
+        >
+          <Sparkles size={15} /> Auditoría
+        </button>
       </div>
 
       {error && (
         <div className="mt-4 bg-red-50 text-red-600 text-sm px-4 py-3 rounded-xl">{error}</div>
       )}
 
-      {shops === null ? (
+      {tab === 'shops' ? (shops === null ? (
         <div className="flex justify-center py-16">
           <div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" />
         </div>
@@ -126,15 +237,180 @@ export default function Admin() {
                       <MonitorSmartphone size={14} />
                       {setupOpen ? 'Ocultar' : 'Caja compartida'}
                     </button>
+                    <button
+                      onClick={() => requestResetCode(shop.id)}
+                      disabled={requestingCode === shop.id}
+                      className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-2 rounded-xl text-sm font-semibold hover:bg-gray-50 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                      {requestingCode === shop.id
+                        ? <RefreshCw size={14} className="animate-spin" />
+                        : <KeyRound size={14} />}
+                      Código de recuperación
+                    </button>
                   </div>
                 </div>
                 {setupOpen && (
                   <SharedDeviceSetup shop={shop} onInstalled={() => setSetupShop(null)} />
                 )}
+                {resetCodeShop === shop.id && (
+                  <div className="mt-3 bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-gray-700 mb-2">
+                          Código de recuperación
+                        </p>
+                        <p className="font-mono text-2xl font-bold text-[#007AFF] mb-3 tracking-wider break-all">
+                          {resetCode}
+                        </p>
+                        <p className="text-xs text-gray-600 mb-3">
+                          Válido hasta {formatDateTime(resetCodeExpires)}. Compártelo con <span className="font-semibold">{shop.store_name}</span> por WhatsApp.
+                        </p>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={copyResetCode}
+                            className="flex items-center gap-1.5 bg-[#007AFF] text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-blue-600 active:scale-95 transition-all"
+                          >
+                            {copiedCode ? (
+                              <>
+                                <Check size={14} />
+                                Copiado
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={14} />
+                                Copiar
+                              </>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => setResetCodeShop(null)}
+                            className="flex items-center gap-1.5 bg-gray-100 text-gray-700 px-3 py-2 rounded-xl text-sm font-semibold hover:bg-gray-200 active:scale-95 transition-all"
+                          >
+                            <X size={14} />
+                            Cerrar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })}
         </div>
+      )) : (
+        <AdminAudit
+          data={audit}
+          loading={auditLoading}
+          error={auditError}
+          onRefresh={loadAudit}
+          onRetry={retryFailed}
+          onRetryReport={retryReport}
+        />
+      )}
+    </div>
+  )
+}
+
+function AdminAudit({ data, loading, error, onRefresh, onRetry, onRetryReport }) {
+  const health = data.health
+  const reports = data.reports
+  const cards = health ? [
+    ['Pendientes', health.pending, 'text-amber-600'],
+    ['Procesando', health.processing, 'text-blue-600'],
+    ['Fallidos', health.failed, Number(health.failed) > 0 ? 'text-red-600' : 'text-gray-900'],
+    ['Informes', health.reports, 'text-gray-900'],
+    ['Con IA hoy', health.model_calls_today, 'text-gray-900'],
+    ['Respaldo', health.fallbacks, Number(health.fallbacks) > 0 ? 'text-amber-600' : 'text-gray-900'],
+  ] : []
+
+  return (
+    <div className="mt-4">
+      {error && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm mb-4">{error}</div>}
+      {loading && !health ? (
+        <div className="flex justify-center py-16">
+          <div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : (
+        <>
+          {health && (
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Estado del worker</p>
+                <div className="flex items-center gap-2">
+                  {Number(health.failed) > 0 && (
+                    <button
+                      onClick={onRetry}
+                      disabled={loading}
+                      className="text-xs font-semibold text-red-600 hover:underline disabled:opacity-50"
+                    >
+                      Reintentar fallidos
+                    </button>
+                  )}
+                  <button
+                    onClick={onRefresh}
+                    disabled={loading}
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-[#007AFF] disabled:opacity-50"
+                    title="Actualizar"
+                  >
+                    <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-2">
+                {cards.map(([label, value, tone]) => (
+                  <div key={label} className="bg-white border border-gray-100 rounded-xl px-3 py-2.5 text-center">
+                    <p className={`text-lg font-bold ${tone}`}>{value ?? '—'}</p>
+                    <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">{label}</p>
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-[11px] text-gray-400 mb-4">
+                {health.last_report_at
+                  ? `Último informe: ${formatDateTime(health.last_report_at)}`
+                  : 'Todavía no se ha generado ningún informe.'}
+                {health.oldest_pending_at ? ` · Pendiente más antiguo: ${formatDateTime(health.oldest_pending_at)}` : ''}
+              </p>
+
+              {Number(health.failed) > 0 && (
+                <div className="flex items-start gap-2 bg-amber-50 text-amber-800 rounded-xl px-3.5 py-2.5 text-xs mb-4">
+                  <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+                  <span>
+                    Hay {health.failed} trabajo(s) fallido(s). Revisa los secretos del worker
+                    (Turso, Gemini y el secreto compartido) y reintenta.
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
+            Informes de todas las tiendas {reports?.length ? `(${reports.length})` : ''}
+          </p>
+
+          {!reports ? (
+            error ? null : (
+              <div className="flex justify-center py-12">
+                <div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" />
+              </div>
+            )
+          ) : reports.length === 0 ? (
+            <p className="text-center text-gray-400 text-sm py-12">Todavía no hay informes.</p>
+          ) : (
+            <div className="space-y-3">
+              {reports.map((report) => (
+                <AuditReportCard
+                  key={report.id}
+                  report={report}
+                  showStore
+                  onRetry={onRetryReport}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )

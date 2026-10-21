@@ -103,6 +103,12 @@ Copy `.env.example` to `.env`:
 | `TURSO_DATABASE_URL` | yes | libSQL URL; unset locally = local SQLite file |
 | `TURSO_AUTH_TOKEN` | yes | Turso auth |
 | `JWT_SECRET` | yes | Session signing; falls back to a dev-only constant |
+| `CRON_SECRET` | si la auditoría está activa | Secreto del worker `/api/cron/audit`; el cron externo lo envía como Bearer |
+| `GEMINI_API_KEY` | no | Redacción de informes; sin ella solo se generan informes deterministas |
+| `AUDIT_ENABLED` | no | `1` encola cierres para auditoría; `0` es el rollback |
+| `AUDIT_MODEL` | no | Modelo de Gemini; por defecto `gemini-3.5-flash` |
+| `AUDIT_MAX_LLM_PER_DAY_PER_SHOP` | no | Tope diario de llamadas al modelo por tienda (100 por defecto; `0` desactiva) |
+| `AUDIT_WORKER_TIME_BUDGET_MS` | no | Tiempo máximo por invocación del cron (30 s por defecto, 35 s máximo) |
 
 ### Scripts
 
@@ -113,6 +119,7 @@ Copy `.env.example` to `.env`:
 | `npm run seed` | wipes and reseeds — destructive |
 | `npm run migrate` | one-off `CHECK (stock >= 0)` rebuild; idempotent, clamps negative stock first |
 | `npm run migrate:plans` | only migrates legacy plans; backs up users and preserves retired IDs, indexes and triggers |
+| `npm run audit:process` | processes pending audit jobs locally; `-- --watch`, `-- --no-model`, `-- --limit=N` |
 
 Before deploying Basic/Enterprise over an existing database, run the plans-only migration.
 For a remote database it requires `CONFIRM_REMOTE_MIGRATE=1`. Existing stores stay active;

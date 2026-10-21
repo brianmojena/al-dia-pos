@@ -49,7 +49,10 @@ test('caja compartida: relevo offline, SQLite real y respuesta perdida', async (
   resetStore()
   values.clear()
   const owner = await registerUser(ctx.api, 'shared-owner@test.local')
-  const admin = await registerUser(ctx.api, 'brianadmin@aldia.cu')
+  // La administración ya no se obtiene registrando un correo de ADMIN_EMAILS:
+  // la cuenta se crea normal y el privilegio se concede con el flag controlado.
+  const admin = await registerUser(ctx.api, 'shared-admin@test.local')
+  await ctx.db.execute({ sql: 'UPDATE users SET is_admin = 1 WHERE lower(email) = ?', args: ['shared-admin@test.local'] })
   const a = await createCashier(ctx.api, owner, { email: 'shared-a@test.local' })
   const b = await createCashier(ctx.api, owner, { email: 'shared-b@test.local' })
   const product = await createProduct(ctx.api, owner, { name: 'Pan compartido', stock: 10 })
