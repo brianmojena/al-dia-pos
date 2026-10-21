@@ -1,0 +1,59 @@
+{
+  "commit": "501f2c528a2f272fb8b6d44815c006aa18b64d60",
+  "preexisting_changes": [
+    "desktop/README.md",
+    "desktop/package-lock.json",
+    "desktop/package.json",
+    "desktop/scripts/ (sin seguimiento)"
+  ],
+  "checks": [
+    {
+      "area": "Servidor",
+      "command": "MYPIMES_TEST_TRANSPORT=in-process npm test --prefix server",
+      "tests": 248,
+      "passed": 248,
+      "failed": 0,
+      "duration_ms": 12279.4585,
+      "log_sha256": "18a6a02682edbe80b4ddbc68f09782fa92fa9c582a0069f3c081b1f711cdabc2"
+    },
+    {
+      "area": "Cliente",
+      "command": "npm test --prefix client",
+      "tests": 155,
+      "passed": 155,
+      "failed": 0,
+      "duration_ms": 2660.148916,
+      "log_sha256": "50e4a070dcc05f6539b11837218b04a9704aef6fb3af50aad3d4a8ae3987cbab"
+    },
+    {
+      "area": "Integración",
+      "command": "npm run test:integration --prefix client",
+      "tests": 7,
+      "passed": 7,
+      "failed": 0,
+      "duration_ms": 3408.714916,
+      "log_sha256": "5123b629a719d42530bfbb3fa142ddfaaff6dad8b7162616b95bee6758fe53ec"
+    },
+    {
+      "area": "Escritorio (copia aislada)",
+      "command": "npm test (copia desktop con SQLite para Node arm64)",
+      "tests": 132,
+      "passed": 132,
+      "failed": 0,
+      "duration_ms": 2801.891334,
+      "log_sha256": "fa1de9ef78e8b305312541a659f183acb38cdbfb0477787679d8fab823d280f0"
+    },
+    {
+      "area": "Build PWA",
+      "command": "npm run build --prefix client",
+      "exit_code": 0,
+      "js_bytes_uncompressed": 512920,
+      "js_gzip_kb": 137.58,
+      "warning": "Chunk JavaScript supera 500 kB; todas las páginas se importan estáticamente."
+    }
+  ],
+  "initial_desktop_test_failure": "Binario better_sqlite3.node PE32+ Windows x64; no es un fallo funcional de las 132 pruebas. Se recompiló una copia temporal con headers Node locales y /usr/bin/python3, sin tocar desktop/node_modules.",
+  "production_access": false,
+  "ports_opened": false,
+  "fixture_databases": "Temporales, eliminadas al terminar; resultados solo sintéticos."
+}

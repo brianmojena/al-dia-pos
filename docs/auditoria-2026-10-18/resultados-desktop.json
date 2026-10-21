@@ -1,0 +1,57 @@
+{
+  "environment": {
+    "node": "v24.7.0",
+    "native_copy": "/private/tmp/mypimes-audit-desktop-2qdc3e3x"
+  },
+  "diagnostics": {
+    "sale_timestamp": {
+      "local_created_at": "2026-10-15 14:00:00",
+      "sent_sold_at": null,
+      "original_ui_id": "provided-by-ui",
+      "stored_sale_id": "f16d4122-c355-4cbc-a04c-b8d34f6be0c5"
+    },
+    "local_sale_idempotency": {
+      "supplied_same_id": true,
+      "first_saved_id": "f16d4122-c355-4cbc-a04c-b8d34f6be0c5",
+      "second_saved_id": "d4c2154d-ab8b-4b56-9405-19e7c3e51243",
+      "rows": 2
+    },
+    "pack_contract": {
+      "initial_stock": 998,
+      "requested_pack_size": 12,
+      "quantity": 1,
+      "expected_stock": 986,
+      "actual_stock": 997,
+      "expected_cost": 720,
+      "actual_profit": 940,
+      "note": "El esquema de productos local tampoco almacena pack_size/pack_price"
+    },
+    "overlapping_sync": {
+      "local_addition": 5,
+      "put_requests": 2,
+      "same_outbox_operation": true,
+      "note": "resetStuckSyncing rescata una operación todavía en vuelo en la otra pasada"
+    },
+    "conflict_starvation": {
+      "conflicts_at_head": 50,
+      "requests_after_two_ticks": 100,
+      "pending_last_id": 56,
+      "pending_last_status": "pending",
+      "first_tick_processed": 50,
+      "second_tick_processed": 50,
+      "selected_again": false
+    },
+    "cashier_change": {
+      "existing_account_id": 1,
+      "new_account_id": 2,
+      "message": "Esta computadora ya tiene datos de otra tienda. Para usar una cuenta distinta, instalá la app en otra máquina o contactá soporte para migrar los datos.",
+      "note": "publicUser.id es accountId; el perfil no expone owner_id"
+    },
+    "account_guard_after_logout": {
+      "session_user_id": 2,
+      "old_products_still_visible": 1,
+      "old_sales_still_present": 54,
+      "note": "Llamada directa al logout exportado; la UI no invoca este logout de SQLite"
+    }
+  }
+}

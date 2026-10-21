@@ -1,0 +1,416 @@
+{
+  "environment": {
+    "node": "v24.7.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "date": "2026-10-18T21:53:07.777Z",
+    "transport": "Express in-process + libSQL file, sin red ni Turso"
+  },
+  "diagnostics": {
+    "admin_email_claim": {
+      "registration": "registro público sin verificación de correo",
+      "admin_endpoint_status": 200,
+      "shops_visible": 1,
+      "conditional": "Requiere que el correo configurado en ADMIN_EMAILS todavía no esté registrado"
+    },
+    "cashier_cost_projection": {
+      "products_purchase_price": 60,
+      "snapshot_purchase_price": 60,
+      "create_sale_profit": 40
+    },
+    "deleted_cashier": {
+      "read_status": 200,
+      "sale_status": 201,
+      "saved_account_id": 2,
+      "saved_account_email": null
+    },
+    "expired_trial": {
+      "profile_locked": true,
+      "sale_status": 201
+    },
+    "price_update_lost_stock": {
+      "sale_status": 201,
+      "update_status": 200,
+      "expected_stock": 99,
+      "actual_stock": 100
+    },
+    "desktop_add_stock_retry_endpoint": {
+      "initial_stock": 100,
+      "intended_addition": 5,
+      "requests": 2,
+      "actual_stock": 110,
+      "note": "Electron usa PUT sin operation_id; dos entregas equivalentes suman dos veces"
+    },
+    "withdrawal_cursor_starvation": {
+      "first_ids": [
+        1,
+        2
+      ],
+      "second_ids": [
+        1,
+        2
+      ],
+      "first_cursor": 2,
+      "second_cursor": 2,
+      "has_more": true,
+      "actual_desktop_threshold": 500
+    },
+    "positive_invariants": {
+      "cross_shop_sale": 400,
+      "concurrent_sales_statuses": [
+        201,
+        201,
+        201,
+        201,
+        201,
+        409,
+        409,
+        409
+      ],
+      "final_stock": 0,
+      "repeat_statuses": [
+        201,
+        200,
+        200,
+        200,
+        200
+      ],
+      "repeat_rows": 1
+    }
+  },
+  "measurements": [
+    {
+      "name": "initDb warm sobre esquema existente",
+      "repetitions": 3,
+      "p50_ms": 2.76,
+      "p95_ms": 2.78,
+      "calls": {
+        "execute": 68,
+        "executeMultiple": 3,
+        "errors": 63
+      },
+      "bytes_json": 11,
+      "status": null
+    },
+    {
+      "name": "venta 1 línea",
+      "repetitions": 5,
+      "p50_ms": 1.65,
+      "p95_ms": 1.98,
+      "calls": {
+        "execute": 9,
+        "transaction": 1,
+        "commit": 1
+      },
+      "bytes_json": 345,
+      "status": 201
+    },
+    {
+      "name": "venta 5 líneas",
+      "repetitions": 5,
+      "p50_ms": 1.96,
+      "p95_ms": 2.42,
+      "calls": {
+        "execute": 21,
+        "transaction": 1,
+        "commit": 1
+      },
+      "bytes_json": 352,
+      "status": 201
+    },
+    {
+      "name": "snapshot 10 tiendas / 30 días",
+      "repetitions": 3,
+      "p50_ms": 267.32,
+      "p95_ms": 284.38,
+      "calls": {
+        "transaction": 1,
+        "execute": 21,
+        "commit": 1
+      },
+      "bytes_json": 7065573,
+      "status": 200
+    },
+    {
+      "name": "dashboard 10 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 2.05,
+      "p95_ms": 4.75,
+      "calls": {
+        "execute": 14
+      },
+      "bytes_json": 2350,
+      "status": 200
+    },
+    {
+      "name": "delta 10 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 33.25,
+      "p95_ms": 33.72,
+      "calls": {
+        "execute": 11
+      },
+      "bytes_json": 613329,
+      "status": 200
+    },
+    {
+      "name": "ráfaga dashboard 10 tiendas",
+      "concurrency": 10,
+      "repetitions": 1,
+      "p50_ms": 8.82,
+      "p95_ms": 17.39,
+      "wall_ms": 18.14,
+      "statuses": {
+        "200": 10
+      }
+    },
+    {
+      "name": "ráfaga dashboard 10 tiendas",
+      "concurrency": 50,
+      "repetitions": 1,
+      "p50_ms": 47.78,
+      "p95_ms": 85.64,
+      "wall_ms": 90.42,
+      "statuses": {
+        "200": 50
+      }
+    },
+    {
+      "name": "ráfaga dashboard 10 tiendas",
+      "concurrency": 100,
+      "repetitions": 1,
+      "p50_ms": 82.22,
+      "p95_ms": 154.37,
+      "wall_ms": 165.11,
+      "statuses": {
+        "200": 100
+      }
+    },
+    {
+      "name": "snapshot 50 tiendas / 30 días",
+      "repetitions": 3,
+      "p50_ms": 266.52,
+      "p95_ms": 272.25,
+      "calls": {
+        "transaction": 1,
+        "execute": 21,
+        "commit": 1
+      },
+      "bytes_json": 7065573,
+      "status": 200
+    },
+    {
+      "name": "dashboard 50 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 1.48,
+      "p95_ms": 8.03,
+      "calls": {
+        "execute": 14
+      },
+      "bytes_json": 2350,
+      "status": 200
+    },
+    {
+      "name": "delta 50 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 32.56,
+      "p95_ms": 34.62,
+      "calls": {
+        "execute": 11
+      },
+      "bytes_json": 613329,
+      "status": 200
+    },
+    {
+      "name": "ráfaga dashboard 50 tiendas",
+      "concurrency": 10,
+      "repetitions": 1,
+      "p50_ms": 8.89,
+      "p95_ms": 17.06,
+      "wall_ms": 17.68,
+      "statuses": {
+        "200": 10
+      }
+    },
+    {
+      "name": "ráfaga dashboard 50 tiendas",
+      "concurrency": 50,
+      "repetitions": 1,
+      "p50_ms": 43.41,
+      "p95_ms": 79.35,
+      "wall_ms": 84.53,
+      "statuses": {
+        "200": 50
+      }
+    },
+    {
+      "name": "ráfaga dashboard 50 tiendas",
+      "concurrency": 100,
+      "repetitions": 1,
+      "p50_ms": 79.19,
+      "p95_ms": 148.13,
+      "wall_ms": 158.82,
+      "statuses": {
+        "200": 100
+      }
+    },
+    {
+      "name": "snapshot 100 tiendas / 30 días",
+      "repetitions": 3,
+      "p50_ms": 261.92,
+      "p95_ms": 278.3,
+      "calls": {
+        "transaction": 1,
+        "execute": 21,
+        "commit": 1
+      },
+      "bytes_json": 7065573,
+      "status": 200
+    },
+    {
+      "name": "project PWA 6000 ventas sin pendientes",
+      "repetitions": 5,
+      "p50_ms": 31.73,
+      "p95_ms": 34.32,
+      "calls": {},
+      "bytes_json": 11,
+      "status": null
+    },
+    {
+      "name": "dashboard 100 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 1.58,
+      "p95_ms": 5.94,
+      "calls": {
+        "execute": 14
+      },
+      "bytes_json": 2350,
+      "status": 200
+    },
+    {
+      "name": "delta 100 tiendas / 30 días",
+      "repetitions": 5,
+      "p50_ms": 33.1,
+      "p95_ms": 34.41,
+      "calls": {
+        "execute": 11
+      },
+      "bytes_json": 613329,
+      "status": 200
+    },
+    {
+      "name": "ráfaga dashboard 100 tiendas",
+      "concurrency": 10,
+      "repetitions": 1,
+      "p50_ms": 9.4,
+      "p95_ms": 16.91,
+      "wall_ms": 17.35,
+      "statuses": {
+        "200": 10
+      }
+    },
+    {
+      "name": "ráfaga dashboard 100 tiendas",
+      "concurrency": 50,
+      "repetitions": 1,
+      "p50_ms": 41.13,
+      "p95_ms": 78.13,
+      "wall_ms": 82.56,
+      "statuses": {
+        "200": 50
+      }
+    },
+    {
+      "name": "ráfaga dashboard 100 tiendas",
+      "concurrency": 100,
+      "repetitions": 1,
+      "p50_ms": 84.38,
+      "p95_ms": 154.7,
+      "wall_ms": 166.12,
+      "statuses": {
+        "200": 100
+      }
+    },
+    {
+      "name": "snapshot 100 tiendas / 1 tienda con 365 días",
+      "repetitions": 3,
+      "p50_ms": 3284.1,
+      "p95_ms": 3356.54,
+      "calls": {
+        "transaction": 1,
+        "execute": 21,
+        "commit": 1
+      },
+      "bytes_json": 87193577,
+      "status": 200
+    },
+    {
+      "name": "project PWA 73000 ventas sin pendientes",
+      "repetitions": 5,
+      "p50_ms": 448.56,
+      "p95_ms": 452.1,
+      "calls": {},
+      "bytes_json": 11,
+      "status": null
+    }
+  ],
+  "fixture": {
+    "stores": 100,
+    "days_other_stores": 30,
+    "days_first_store": 365,
+    "daily_sales": 200,
+    "items_per_sale": 5,
+    "total_sales": 667000,
+    "total_items": 3335000
+  },
+  "query_plans": {
+    "delta": [
+      {
+        "id": 5,
+        "parent": 0,
+        "notused": 0,
+        "detail": "SEARCH sales USING INDEX idx_sales_user_created (user_id=?)"
+      },
+      {
+        "id": 44,
+        "parent": 0,
+        "notused": 0,
+        "detail": "USE TEMP B-TREE FOR ORDER BY"
+      }
+    ],
+    "sale_items_snapshot": [
+      {
+        "id": 5,
+        "parent": 0,
+        "notused": 0,
+        "detail": "SEARCH s USING COVERING INDEX idx_sales_user_created (user_id=?)"
+      },
+      {
+        "id": 11,
+        "parent": 0,
+        "notused": 0,
+        "detail": "SEARCH i USING INDEX idx_sale_items_sale (sale_id=?)"
+      },
+      {
+        "id": 32,
+        "parent": 0,
+        "notused": 0,
+        "detail": "USE TEMP B-TREE FOR ORDER BY"
+      }
+    ],
+    "products": [
+      {
+        "id": 4,
+        "parent": 0,
+        "notused": 0,
+        "detail": "SEARCH products USING INDEX idx_products_user (user_id=?)"
+      },
+      {
+        "id": 30,
+        "parent": 0,
+        "notused": 0,
+        "detail": "USE TEMP B-TREE FOR ORDER BY"
+      }
+    ]
+  }
+}
