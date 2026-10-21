@@ -1,8 +1,9 @@
-import { useState } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles, MoreHorizontal, X } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
+import { splitMobileNav, isMoreActive } from '../lib/mobileNav.js'
 import OfflineStatus from './OfflineStatus'
 import { localSyncStatus, retrySync } from '../lib/offlineClient.js'
 import { isElectron } from '../lib/network.js'
@@ -37,6 +38,7 @@ export default function Layout() {
   const [handoverError, setHandoverError] = useState('')
   const sharedAction = async (action) => { setHandoverError(''); try { await action() } catch (e) { setHandoverError(e.message) } }
   const navigate = useNavigate()
+  const location = useLocation()
   const isOwner = user?.role !== 'cajero'
   // Una tienda puede tener el almacén apagado (users.warehouse_enabled en el servidor).
   const visibleNav = navItems.filter(item =>
@@ -44,6 +46,24 @@ export default function Layout() {
     && (!item.adminOnly || user?.is_admin)
     && !(item.cloudOnly && isElectron())
     && !(item.warehouse && user?.warehouse_enabled === false))
+
+  // Navegación móvil: divide en 4 principales + menú "Más" para evitar saturación
+  const [moreOpen, setMoreOpen] = useState(false)
+  const { primary, more } = splitMobileNav(visibleNav, { isOwner })
+
+  // Cierra la hoja de "Más" al cambiar de ruta o presionar Escape
+  useEffect(() => {
+    setMoreOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!moreOpen) return
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setMoreOpen(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [moreOpen])
 
   // Cerrar sesión con ventas sin subir no las borra, pero las deja esperando
   // hasta que ESTA cuenta vuelva a entrar en este teléfono — y mientras, el
@@ -163,7 +183,7 @@ export default function Layout() {
 
       {/* Bottom nav — mobile/tablet */}
       <nav className="md:hidden flex bg-white border-t border-gray-200 flex-shrink-0 safe-area-bottom">
-        {visibleNav.map(({ to, icon: Icon, label }) => (
+        {primary.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
@@ -177,7 +197,75 @@ export default function Layout() {
             {label}
           </NavLink>
         ))}
+        {more.length > 0 && (
+          <button
+            onClick={() => setMoreOpen(true)}
+            className={`flex flex-1 flex-col items-center py-2.5 gap-1 text-xs font-medium transition-colors ${
+              isMoreActive(more, location.pathname) || moreOpen ? 'text-[#007AFF]' : 'text-gray-400'
+            }`}
+            aria-label="Más opciones"
+            aria-expanded={moreOpen}
+            aria-controls="mobile-more-menu"
+          >
+            <MoreHorizontal size={22} />
+            Más
+          </button>
+        )}
       </nav>
+
+      {/* "Más" sheet — modal overlay + panel anclado abajo */}
+      {more.length > 0 && moreOpen && (
+        <>
+          {/* Overlay para cerrar */}
+          <div
+            className="md:hidden fixed inset-0 z-40 bg-black/40"
+            onClick={() => setMoreOpen(false)}
+            aria-hidden="true"
+          />
+          {/* Panel de la hoja */}
+          <div
+            id="mobile-more-menu"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Más opciones"
+            className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white rounded-t-3xl shadow-xl safe-area-bottom"
+          >
+            <div className="p-4 max-h-[70vh] overflow-y-auto">
+              {/* Encabezado */}
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-bold text-gray-900">Más opciones</h2>
+                <button
+                  onClick={() => setMoreOpen(false)}
+                  className="p-2 rounded-xl hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+                  aria-label="Cerrar"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              {/* Grid 2 columnas de opciones */}
+              <div className="grid grid-cols-2 gap-3">
+                {more.map(({ to, icon: Icon, label }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    onClick={() => setMoreOpen(false)}
+                    className={({ isActive }) =>
+                      `flex flex-col items-center justify-center py-4 px-3 rounded-2xl font-medium transition-colors min-h-14 ${
+                        isActive
+                          ? 'bg-[#007AFF] text-white'
+                          : 'bg-gray-50 text-gray-900 hover:bg-gray-100'
+                      }`
+                    }
+                  >
+                    <Icon size={24} />
+                    <span className="text-sm mt-1 text-center">{label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {blockers && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
