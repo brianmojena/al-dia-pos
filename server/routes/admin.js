@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { ADMIN_EMAILS } = require('../config');
 const { labelOf, planStateOf } = require('../lib/plans');
 
 /**
@@ -32,13 +31,11 @@ const SHOP_COLUMNS = `
 // Todas las tiendas, pendientes primero. La cuenta (o cuentas) de
 // administración se excluyen: no se confirman a sí mismas.
 router.get('/shops', asyncHandler(async (req, res) => {
-  const marks = ADMIN_EMAILS.map(() => '?').join(', ');
   const result = await getDb().execute({
     sql: `SELECT ${SHOP_COLUMNS}
           FROM users u
-          WHERE u.owner_id IS NULL AND u.email NOT IN (${marks})
+          WHERE u.owner_id IS NULL AND u.is_admin = 0
           ORDER BY (u.plan_status = 'pending') DESC, u.created_at DESC, u.id DESC`,
-    args: ADMIN_EMAILS,
   });
   res.json({ shops: result.rows.map(shapeShop) });
 }));

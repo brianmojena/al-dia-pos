@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import OfflineStatus from './OfflineStatus'
@@ -23,6 +23,8 @@ const navItems = [
   { to: '/products',  icon: Package,         label: 'Productos'                    },
   { to: '/almacen',   icon: Warehouse,       label: 'Almacén',   warehouse: true   },
   { to: '/sales',     icon: ClipboardList,   label: 'Historial'                    },
+  // Los informes de auditoría los genera la nube; el escritorio offline no los tiene.
+  { to: '/auditoria', icon: Sparkles,        label: 'Auditoría',   ownerOnly: true, cloudOnly: true },
   // Panel de administración: confirmar tiendas nuevas (ver pages/Admin.jsx).
   // Solo existe para la cuenta de administración (is_admin del servidor).
   { to: '/admin',     icon: ShieldCheck,     label: 'Admin',     adminOnly: true   },
@@ -40,6 +42,7 @@ export default function Layout() {
   const visibleNav = navItems.filter(item =>
     (isOwner || !item.ownerOnly)
     && (!item.adminOnly || user?.is_admin)
+    && !(item.cloudOnly && isElectron())
     && !(item.warehouse && user?.warehouse_enabled === false))
 
   // Cerrar sesión con ventas sin subir no las borra, pero las deja esperando

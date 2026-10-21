@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { requireAuth, requireOwner, OWNER, CASHIER } = require('../middleware/auth');
-const { JWT_SECRET } = require('../config');
+const { JWT_SECRET, isAdminEmail } = require('../config');
 const { asyncHandler } = require('../lib/asyncHandler');
 // La identidad y los ajustes del negocio salen de sitios distintos: un cajero
 // tiene su propio email y su propio rol, pero el nombre de la tienda, el plan,
@@ -50,6 +50,11 @@ router.post('/register', asyncHandler(async (req, res) => {
   }
   if (password.length < 6) {
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+  }
+  // Los correos de ADMIN_EMAILS están reservados: el privilegio de
+  // administración no se obtiene registrándose, sino con `npm run admin:grant`.
+  if (isAdminEmail(email)) {
+    return res.status(403).json({ error: 'Ese correo está reservado para la administración' });
   }
   const chosenPlan = isPlan(plan) ? plan : DEFAULT_PLAN;
 
@@ -186,6 +191,9 @@ router.post('/cashiers', requireAuth, requireOwner, asyncHandler(async (req, res
   }
   if (password.length < 6) {
     return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+  }
+  if (isAdminEmail(email)) {
+    return res.status(403).json({ error: 'Ese correo está reservado para la administración' });
   }
 
   const db = getDb();

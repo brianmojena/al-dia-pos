@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { JWT_SECRET, isAdminEmail } = require('../config');
+const { JWT_SECRET } = require('../config');
 const { getDb } = require('../db/database');
 
 const OWNER = 'dueño';
@@ -32,9 +32,22 @@ async function requireAuth(req, res, next) {
       if (!result.device) return res.status(result.status).json({ error: result.error, code: result.code });
       req.sharedDevice = result.device;
     }
-    req.userId    = payload.userId;
-    req.accountId = payload.accountId ?? payload.userId;
-    req.role      = payload.role ?? OWNER;
+    // La cuenta se relee en cada petición: el token de 30 días no puede seguir
+    // autorizando a un cajero que el dueño acaba de borrar, ni conservar un rol
+    // o una tienda que cambiaron después de emitirse. La pertenencia se toma
+    // de la base, no del JWT.
+    const accountId = payload.accountId ?? payload.userId;
+    const accountResult = await getDb().execute({
+      sql: 'SELECT id, role, owner_id FROM users WHERE id = ?',
+      args: [accountId],
+    });
+    const account = accountResult.rows[0];
+    if (!account) {
+      return res.status(401).json({ error: 'Sesión inválida o expirada', code: 'ACCOUNT_REVOKED' });
+    }
+    req.userId    = account.owner_id ?? account.id;
+    req.accountId = account.id;
+    req.role      = account.role ?? OWNER;
     next();
   } catch (error) { next(error); }
 }
@@ -52,17 +65,18 @@ function requireOwner(req, res, next) {
 }
 
 /**
- * El panel de administración es de una sola persona (ADMIN_EMAILS en config).
- * Se comprueba el correo de la CUENTA que inició sesión — los tokens llevan
- * ids, no correo — así que esta comprobación lee la fila de la cuenta.
+ * El panel de administración se protege con el flag `is_admin` de la cuenta,
+ * no con el correo: el privilegio se aprovisiona explícitamente
+ * (`npm run admin:grant`) y no puede reclamarse registrándose con un correo
+ * que figure en ADMIN_EMAILS.
  */
 async function requireAdmin(req, res, next) {
   try {
     const result = await getDb().execute({
-      sql: 'SELECT email FROM users WHERE id = ?',
+      sql: 'SELECT is_admin FROM users WHERE id = ?',
       args: [req.accountId],
     });
-    if (!isAdminEmail(result.rows[0]?.email)) {
+    if (Number(result.rows[0]?.is_admin) !== 1) {
       return res.status(403).json({ error: 'Solo la cuenta de administración puede hacer esto' });
     }
     next();

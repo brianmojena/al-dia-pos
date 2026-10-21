@@ -70,12 +70,28 @@ router.get('/delta', asyncHandler(async (req, res) => {
     args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
   });
 
+  // Las extracciones nuevas avanzan por cursor. Las que siguen abiertas y ya
+  // estaban antes del cursor se mandan aparte, como recordatorio: así una
+  // anulación hecha en otro aparato llega a todos, pero no llenan la página
+  // ni impiden que el cursor avance (antes se reenviaban en cada página).
   const withdrawals = await db.execute({
-    sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND (id > ? OR cash_close_id IS NULL)
+    sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND id > ?
             ${since ? 'AND created_at >= ?' : ''}
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterWithdrawal, since, limit] : [req.userId, afterWithdrawal, limit],
   });
+  const openWithdrawals = await db.execute({
+    sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND id <= ?
+          ORDER BY id DESC LIMIT 200`,
+    args: [req.userId, afterWithdrawal],
+  });
+  const withdrawalRows = new Map();
+  for (const row of withdrawals.rows) withdrawalRows.set(Number(row.id), row);
+  for (const row of openWithdrawals.rows) {
+    if (!withdrawalRows.has(Number(row.id))) withdrawalRows.set(Number(row.id), row);
+  }
+  const allWithdrawals = [...withdrawalRows.values()]
+    .sort((a, b) => Number(a.id) - Number(b.id));
 
   // Correcciones de la cuenta principal (forma de pago cambiada o venta
   // anulada): la caja de escritorio ya bajó esas ventas y esos cierres, así que
@@ -153,22 +169,20 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const saleRows = attachItems(sales.rows, saleItems, 'id', 'sale_id');
   const countRows = attachItems(counts.rows, countItems, 'id', 'count_id');
   const last = (rows, cursor) => rows.length ? Number(rows[rows.length - 1].id) : cursor;
-  // Para withdrawals, evitar que el cursor se mueva atrás (id <= cursor devuelve abiertas viejas).
-  const lastWithMax = (rows, cursor) => Math.max(cursor, rows.length ? Number(rows[rows.length - 1].id) : cursor);
 
   res.json({
     sales: saleRows,
     cash_closes: closeRows,
     inventory_counts: countRows,
     currency_purchases: purchases.rows,
-    cash_withdrawals: withdrawals.rows,
+    cash_withdrawals: allWithdrawals,
     sale_corrections: correctionRows,
     cash_close_corrections: closeCorrectionRows,
     cursors: {
       correction: last(corrections, afterCorrection),
       close_correction: last(closeCorrections, afterCloseCorrection),
       purchase: last(purchases.rows, afterPurchase),
-      withdrawal: lastWithMax(withdrawals.rows, afterWithdrawal),
+      withdrawal: last(withdrawals.rows, afterWithdrawal),
       sale: last(sales.rows, afterSale),
       close: last(closes.rows, afterClose),
       count: last(counts.rows, afterCount),

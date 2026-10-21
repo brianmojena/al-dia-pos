@@ -255,6 +255,57 @@ test('down-sync del escritorio', async (t) => {
       ctx.close();
     }
   });
+
+  await t.test('una extracción abierta recibe anulación y cobertura del cierre remoto', async () => {
+    const ctx = startLocalDb();
+    try {
+      ownerSession();
+      const withdrawal = ctx.queries.createWithdrawalLocal({ method: 'efectivo', amount: 20, note: 'prueba' });
+      ctx.db.prepare("UPDATE outbox SET status = 'synced'").run();
+      assert.equal(withdrawal.server_id, null);
+
+      const base = {
+        sales: [], inventory_counts: [],
+        cursors: { sale: 0, close: 0, count: 0, close_correction: 0 }, has_more: false,
+      };
+      queries.applyServerDelta({
+        ...base,
+        cash_closes: [],
+        cash_withdrawals: [{
+          id: 501, client_withdrawal_id: withdrawal.client_withdrawal_id,
+          method: 'efectivo', amount: 20, note: 'prueba',
+          created_at: withdrawal.created_at, voided_at: '2026-10-19 10:00:00',
+        }],
+      });
+      let row = ctx.db.prepare('SELECT * FROM cash_withdrawals WHERE id = ?').get(withdrawal.id);
+      assert.equal(row.server_id, 501);
+      assert.equal(row.voided_at, '2026-10-19 10:00:00', 'la anulación hecha en otro aparato se refleja');
+      assert.equal(row.cash_close_id, null);
+
+      queries.applyServerDelta({
+        ...base,
+        cash_withdrawals: [{
+          id: 501, client_withdrawal_id: withdrawal.client_withdrawal_id,
+          method: 'efectivo', amount: 20, created_at: withdrawal.created_at,
+          voided_at: '2026-10-19 10:00:00',
+        }],
+        cash_closes: [{
+          id: 900, client_close_id: 'srv-cierre-900',
+          opened_at: '2026-10-19 09:00:00', closed_at: '2026-10-19 18:00:00',
+          opening_float: 0, expected_cash: 0, counted_cash: 0, difference: 0,
+          expected_transfer: 0, sales_count: 0,
+          covered_sale_ids: [], covered_purchase_ids: [], covered_withdrawal_ids: [501],
+        }],
+      });
+
+      const closeId = ctx.db.prepare("SELECT id FROM cash_closes WHERE client_close_id = 'srv-cierre-900'").get().id;
+      row = ctx.db.prepare('SELECT * FROM cash_withdrawals WHERE id = ?').get(withdrawal.id);
+      assert.equal(row.cash_close_id, closeId, 'la extracción queda cubierta por el cierre remoto');
+      assert.equal(row.voided_at, '2026-10-19 10:00:00');
+    } finally {
+      ctx.close();
+    }
+  });
 });
 
 test('actualizar desde 1.2.1 conserva el período abierto de la caja', () => {

@@ -7,6 +7,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { records, resetStore } from './testSupport/memoryStore.js'
+import { stateAt, seedState } from './testSupport/accountState.js'
 
 registerHooks({ resolve(specifier, context, next) {
   if (specifier === 'idb-keyval') return { url: new URL('./testSupport/memoryStore.js', import.meta.url).href, shortCircuit: true }
@@ -51,7 +52,7 @@ const bundleFor = (continuous = true) => ({
 })
 const deviceFor = (continuous) => ({ id: TENANT, owner_id: OWNER, name: 'Mostrador', continuous, expires_at: future() })
 const seedShared = (device, products = [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }]) =>
-  records.set(SHARED_KEY, { base: { ...emptyData(), shared_device: device, products }, outbox: [], nextId: -1, initialized: true })
+  seedState(SHARED_KEY, { base: { ...emptyData(), shared_device: device, products }, outbox: [], nextId: -1, initialized: true })
 const installAndOpen = async (continuous, cashierId, pin) => {
   await installSharedDevice(bundleFor(continuous), { [CASHIER_A]: '123456', [CASHIER_B]: '654321' })
   await unlockSharedCashier(cashierId, pin)
@@ -132,7 +133,7 @@ test('A vende sin conexion, B ve el stock al instante y cada recibo sube con su 
 
   const saved = await write('/api/sales', saleBody('shared-a-1', 2))
   assert.equal(saved.pending, true)
-  const stored = records.get(SHARED_KEY)
+  const stored = stateAt(SHARED_KEY)
   assert.equal(stored.outbox.length, 1)
   assert.equal(stored.outbox[0].account_key, `1:${CASHIER_A}`, 'la venta congela a su actor')
   assert.equal(stored.outbox[0].result.register_id, `shared:${TENANT}`)
@@ -156,14 +157,14 @@ test('A vende sin conexion, B ve el stock al instante y cada recibo sube con su 
       registers.push(body.register_id)
       return jsonResponse({ id: body.client_sale_id === 'shared-a-1' ? 61 : 62, client_sale_id: body.client_sale_id, pending: false })
     }
-    assert.equal(path, '/api/sync/snapshot')
+    assert.ok(path.startsWith('/api/sync/snapshot'))
     return jsonResponse({ ...emptyData(), shared_device: device, products: [{ id: 10, name: 'Pan', stock: 17, sale_price: 10, purchase_price: 6 }], sales: [] })
   }
   await syncOffline()
   assert.equal((await localSyncStatus()).pending, 0)
   assert.deepEqual(tokens, [`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`], 'cada recibo sube con el token del cajero que lo cobró')
   assert.deepEqual(registers, [`shared:${TENANT}`, `shared:${TENANT}`], 'el registro enviado es el de la caja, no "web"')
-  assert.equal(records.get(SHARED_KEY).base.products[0].stock, 17)
+  assert.equal(stateAt(SHARED_KEY).base.products[0].stock, 17)
 })
 
 test('un 403 conserva el recibo y lo reporta con el autor original aunque B esté activo', async () => {
@@ -180,7 +181,7 @@ test('un 403 conserva el recibo y lo reporta con el autor original aunque B est�
   globalThis.fetch = async (path, options = {}) => {
     if (path === '/api/sales') { saleTokens.push(options.headers.Authorization); return jsonResponse({ error: 'La caja no admite esta venta', code: 'SALE_REJECTED' }, 403) }
     if (path === '/api/sales/rejected') { reportToken = options.headers.Authorization; return jsonResponse({ id: 1 }) }
-    assert.equal(path, '/api/sync/snapshot')
+    assert.ok(path.startsWith('/api/sync/snapshot'))
     return jsonResponse({ ...emptyData(), shared_device: device })
   }
   await syncOffline()
@@ -209,7 +210,7 @@ test('una credencial revocada deja la operación guardada y bloqueada, sin reasi
     assert.fail(`no debería llamar a ${path} tras revocar`)
   }
   await syncOffline()
-  const state = records.get(SHARED_KEY)
+  const state = stateAt(SHARED_KEY)
   assert.equal(state.outbox.length, 1, 'la operación sigue guardada, no se destruye')
   assert.equal(state.outbox[0].account_key, `1:${CASHIER_A}`, 'no se reasigna al cajero activo')
   assert.equal((await localSyncStatus()).pending, 1)
