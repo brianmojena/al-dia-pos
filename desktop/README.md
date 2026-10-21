@@ -88,6 +88,9 @@ npm run dist -- --mac --win
 ```
 
 electron-builder produces a `.dmg` (macOS) and a portable `.exe` (Windows) in `dist/`.
+The `beforeBuild` hook always rebuilds SQLite for the target Electron version and
+architecture. This also prevents a previous `npm test` / Node rebuild from leaving
+a stale native binary inside an otherwise successful installer.
 The Windows target is `portable`, not NSIS: NSIS packaging from macOS needs Wine, and a
 single self-contained `.exe` suits USB distribution better than an installer anyway.
 
