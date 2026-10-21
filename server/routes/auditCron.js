@@ -95,8 +95,20 @@ router.all('/', async (req, res, next) => {
         apiKey: String(process.env.GEMINI_API_KEY || '').trim(),
         model: String(process.env.AUDIT_MODEL || '').trim() || DEFAULT_MODEL,
       }));
-    } catch (_) {
-      return res.status(502).json({ ok: false, probe: true, error: 'No se pudo validar Gemini; revisa su configuración en Vercel' });
+    } catch (error) {
+      const message = String(error.message || '');
+      const providerStatus = Number(/Gemini respondió (\d+)/.exec(message)?.[1]) || null;
+      // Solo categorías fijas: nunca devolver la respuesta cruda del proveedor
+      // ni valores de entorno en el diagnóstico que queda en GitHub Actions.
+      const code = /no está configurada/.test(message) ? 'MISSING_KEY'
+        : /API_KEY_INVALID|API key not valid/.test(message) ? 'INVALID_KEY'
+        : providerStatus === 404 ? 'MODEL_NOT_FOUND'
+        : providerStatus === 429 ? 'QUOTA_EXCEEDED'
+        : providerStatus === 403 ? 'PROVIDER_DENIED'
+        : error.name === 'AbortError' ? 'TIMEOUT'
+        : providerStatus ? 'PROVIDER_ERROR' : 'INVALID_OUTPUT';
+      return res.status(502).json({ ok: false, probe: true, code, provider_status: providerStatus,
+        error: 'No se pudo validar Gemini; revisa su configuración en Vercel' });
     }
   }
 

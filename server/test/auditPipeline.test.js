@@ -207,7 +207,10 @@ test('flujo de auditoría', async (t) => {
         headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
       });
       assert.equal(probe.status, 502);
-      assert.equal((await probe.json()).probe, true);
+      const result = await probe.json();
+      assert.equal(result.probe, true);
+      assert.equal(result.code, 'MISSING_KEY');
+      assert.equal(result.provider_status, null);
     } finally {
       if (previousKey !== undefined) process.env.GEMINI_API_KEY = previousKey;
     }
