@@ -27,7 +27,7 @@ const intervalMs = Math.max(Number(intervalArg?.split('=')[1]) || 15, 5) * 1000;
 
 const loadShared = async () => ({
   ...(await import('../lib/audit/auditProcessor.mjs')),
-  ...(await import('../lib/audit/gemini.mjs')),
+  ...(await import('../lib/audit/groq.mjs')),
 });
 
 async function main() {
@@ -36,11 +36,11 @@ async function main() {
   const db = getDb();
   const {
     claimAuditJobs, countModelCallsToday, processAuditJob, recoverStaleJobs,
-    callGemini, DEFAULT_MODEL,
+    callGroq, DEFAULT_MODEL,
   } = await loadShared();
 
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  const model = String(process.env.AUDIT_MODEL || '').trim() || DEFAULT_MODEL;
+  const apiKey = String(process.env.GROQ_API_KEY || '').trim();
+  const model = String(process.env.GROQ_AUDIT_MODEL || '').trim() || DEFAULT_MODEL;
   const capText = String(process.env.AUDIT_MAX_LLM_PER_DAY_PER_SHOP || '').trim();
   const parsedCap = capText === '' ? 100 : Number(capText);
   const dailyCap = Number.isFinite(parsedCap) && parsedCap >= 0 ? Math.floor(parsedCap) : 100;
@@ -63,7 +63,7 @@ async function main() {
       let callModel = null;
       if (useModel) {
         const used = await countModelCallsToday(db, Number(job.user_id)).catch(() => dailyCap);
-        if (used < dailyCap) callModel = (payload) => callGemini({ apiKey, model, payload });
+        if (used < dailyCap) callModel = (payload) => callGroq({ apiKey, model, payload });
       }
       const result = await processAuditJob(db, job, { callModel });
       processed += 1;
@@ -79,7 +79,7 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   } while (!stopping);
 
-  console.log(useModel ? `audit: modelo ${model}` : 'audit: solo reglas deterministas (sin Gemini)');
+  console.log(useModel ? `audit: modelo ${model}` : 'audit: solo reglas deterministas (sin Groq)');
 }
 
 main().catch((error) => {

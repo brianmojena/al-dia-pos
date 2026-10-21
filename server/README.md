@@ -104,9 +104,9 @@ Copy `.env.example` to `.env`:
 | `TURSO_AUTH_TOKEN` | yes | Turso auth |
 | `JWT_SECRET` | yes | Session signing; falls back to a dev-only constant |
 | `CRON_SECRET` | si la auditoría está activa | Secreto del worker `/api/cron/audit`; el cron externo lo envía como Bearer |
-| `GEMINI_API_KEY` | no | Redacción de informes; sin ella solo se generan informes deterministas |
+| `GROQ_API_KEY` | no | Redacción de informes; sin ella solo se generan informes deterministas |
 | `AUDIT_ENABLED` | no | `1` encola cierres para auditoría; `0` es el rollback |
-| `AUDIT_MODEL` | no | Modelo de Gemini; por defecto `gemini-3.5-flash` |
+| `GROQ_AUDIT_MODEL` | no | Modelo de Groq; por defecto `openai/gpt-oss-120b` |
 | `AUDIT_MAX_LLM_PER_DAY_PER_SHOP` | no | Tope diario de llamadas al modelo por tienda (100 por defecto; `0` desactiva) |
 | `AUDIT_WORKER_TIME_BUDGET_MS` | no | Tiempo máximo por invocación del cron (30 s por defecto, 35 s máximo) |
 

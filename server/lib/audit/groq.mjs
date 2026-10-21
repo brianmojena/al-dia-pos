@@ -1,7 +1,7 @@
 import { buildAuditSnapshot, toPromptPayload, validateModelOutput } from './auditRules.mjs';
 
 /**
- * Llamada a Gemini para redactar el informe de auditoría.
+ * Llamada a Groq para redactar el informe de auditoría.
  *
  * El modelo recibe un snapshot ya calculado y seudonimizado. No decide
  * severidades ni sumas: solo explica lo que las reglas encontraron.
@@ -10,29 +10,31 @@ import { buildAuditSnapshot, toPromptPayload, validateModelOutput } from './audi
  * específico de un runtime.
  */
 
-export const DEFAULT_MODEL = 'gemini-3.5-flash';
+export const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 
 const RESPONSE_SCHEMA = {
-  type: 'OBJECT',
+  type: 'object',
+  additionalProperties: false,
   properties: {
-    headline: { type: 'STRING' },
-    summary: { type: 'STRING' },
+    headline: { type: 'string' },
+    summary: { type: 'string' },
     findings: {
-      type: 'ARRAY',
+      type: 'array',
       items: {
-        type: 'OBJECT',
+        type: 'object',
+        additionalProperties: false,
         properties: {
-          probable_cause: { type: 'STRING' },
-          confidence: { type: 'STRING', enum: ['alta', 'media', 'baja'] },
-          evidence: { type: 'ARRAY', items: { type: 'STRING' } },
-          impact: { type: 'STRING' },
-          recommendation: { type: 'STRING' },
+          probable_cause: { type: 'string' },
+          confidence: { type: 'string', enum: ['alta', 'media', 'baja'] },
+          evidence: { type: 'array', items: { type: 'string' } },
+          impact: { type: 'string' },
+          recommendation: { type: 'string' },
         },
         required: ['probable_cause', 'confidence', 'evidence', 'impact', 'recommendation'],
       },
     },
-    questions: { type: 'ARRAY', items: { type: 'STRING' } },
-    next_step: { type: 'STRING' },
+    questions: { type: 'array', items: { type: 'string' } },
+    next_step: { type: 'string' },
   },
   required: ['headline', 'summary', 'findings', 'questions', 'next_step'],
 };
@@ -65,63 +67,65 @@ const parseModelJson = (text) => {
  * @param {number} [options.timeoutMs]
  * @returns {Promise<{content: object, model: string, tokens_in: number|null, tokens_out: number|null}>}
  */
-export async function callGemini({
+export async function callGroq({
   apiKey,
   model = DEFAULT_MODEL,
   payload,
   fetchImpl = fetch,
   timeoutMs = 20_000,
 }) {
-  if (!apiKey) throw new Error('GEMINI_API_KEY no está configurada');
+  if (!apiKey) throw new Error('GROQ_API_KEY no está configurada');
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetchImpl(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      'https://api.groq.com/openai/v1/chat/completions',
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{
-            role: 'user',
-            parts: [{ text: `Snapshot del cierre:\n${JSON.stringify(payload, null, 2)}` }],
-          }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 1400,
-            responseMimeType: 'application/json',
-            responseSchema: RESPONSE_SCHEMA,
+          model,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: `Snapshot del cierre:\n${JSON.stringify(payload, null, 2)}` },
+          ],
+          temperature: 0.2,
+          reasoning_effort: 'low',
+          include_reasoning: false,
+          max_completion_tokens: 4096,
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'cash_close_audit', strict: true, schema: RESPONSE_SCHEMA },
           },
         }),
         signal: controller.signal,
       },
     );
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Gemini respondió ${response.status}: ${body.slice(0, 500)}`);
+      const data = await response.json().catch(() => ({}));
+      const code = String(data?.error?.code || 'provider_error').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 80);
+      throw new Error(`Groq respondió ${response.status} (${code})`);
     }
 
     const data = await response.json();
-    const blockReason = data?.promptFeedback?.blockReason;
-    if (blockReason) throw new Error(`Gemini bloqueó la respuesta: ${blockReason}`);
-
-    const text = (data?.candidates?.[0]?.content?.parts || [])
-      .map((part) => part?.text || '')
-      .join('');
-    if (!text.trim()) throw new Error('Gemini devolvió una respuesta vacía');
+    const choice = data?.choices?.[0];
+    if (choice?.finish_reason === 'length') throw new Error('Groq devolvió una respuesta incompleta');
+    if (choice?.message?.refusal) throw new Error('Groq rechazó redactar el informe');
+    const text = choice?.message?.content;
+    if (typeof text !== 'string') throw new Error('Groq devolvió una respuesta vacía');
+    if (!text.trim()) throw new Error('Groq devolvió una respuesta vacía');
 
     const content = parseModelJson(text);
     return {
       content,
       model,
-      tokens_in: data?.usageMetadata?.promptTokenCount ?? null,
-      tokens_out: data?.usageMetadata?.candidatesTokenCount ?? null,
+      tokens_in: data?.usage?.prompt_tokens ?? null,
+      tokens_out: data?.usage?.completion_tokens ?? null,
     };
   } finally {
     // El plazo también cubre la descarga del cuerpo, no solo las cabeceras.
@@ -130,7 +134,7 @@ export async function callGemini({
 }
 
 // Prueba operativa con cifras fijas: nunca lee ni escribe información de tiendas.
-export async function probeGemini(options) {
+export async function probeGroq(options) {
   const snapshot = buildAuditSnapshot({
     close: {
       id: 1, opened_at: '2026-01-01 08:00:00', closed_at: '2026-01-01 18:00:00',
@@ -140,7 +144,7 @@ export async function probeGemini(options) {
     },
     sales: [{ id: 1, total: 900, payment_method: 'efectivo', created_at: '2026-01-01 10:00:00' }],
   });
-  const result = await callGemini({ ...options, payload: toPromptPayload(snapshot) });
+  const result = await callGroq({ ...options, payload: toPromptPayload(snapshot) });
   if (!validateModelOutput(result.content)) throw new Error('Respuesta de prueba inválida');
   return { ok: true, probe: true, model: result.model };
 }

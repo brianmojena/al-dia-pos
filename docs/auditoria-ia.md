@@ -1,7 +1,7 @@
 # Auditoría de cierres con IA
 
 La app calcula las señales de un cierre con reglas deterministas y, solo cuando
-hay algo que explicar, pide a Gemini que redacte el informe. La IA nunca calcula
+hay algo que explicar, pide a Groq que redacte el informe. La IA nunca calcula
 cifras ni bloquea el cierre: si el worker o el modelo fallan, el cierre ya está
 guardado y el informe determinista se genera igual.
 
@@ -24,7 +24,7 @@ Cierre de caja (Express)
        -> GitHub Actions cada 5 minutos (cron externo)
             -> GET /api/cron/audit (protegido con CRON_SECRET)
                  -> reglas deterministas en server/lib/audit/auditRules.mjs
-                 -> si hay warning/critical: Gemini Flash redacta
+                 -> si hay warning/critical: GPT-OSS 120B redacta
                  -> UPSERT audit_reports
                       -> GET /api/audit/reports        (dueño)
                       -> GET /api/admin/audit/reports  (administrador)
@@ -44,8 +44,8 @@ Configurar en Vercel (proyecto del API) o en `server/.env` para desarrollo:
 ```env
 AUDIT_ENABLED=1
 CRON_SECRET=<secreto largo y aleatorio>
-GEMINI_API_KEY=...
-AUDIT_MODEL=gemini-3.5-flash
+GROQ_API_KEY=...
+GROQ_AUDIT_MODEL=openai/gpt-oss-120b
 AUDIT_MAX_LLM_PER_DAY_PER_SHOP=100
 AUDIT_WORKER_TIME_BUDGET_MS=30000
 ```
@@ -55,12 +55,12 @@ AUDIT_WORKER_TIME_BUDGET_MS=30000
 - `CRON_SECRET` es obligatorio para el endpoint. Tanto Vercel como el cron
   externo deben usar el mismo valor; el cron lo envía como
   `Authorization: Bearer <CRON_SECRET>`.
-- `AUDIT_MODEL` y `AUDIT_MAX_LLM_PER_DAY_PER_SHOP` son opcionales. El tope diario
+- `GROQ_AUDIT_MODEL` y `AUDIT_MAX_LLM_PER_DAY_PER_SHOP` son opcionales. El tope diario
   se aplica por tienda; al alcanzarlo se sigue generando el informe determinista
-  sin llamar al modelo. `0` desactiva las llamadas a Gemini.
+  sin llamar al modelo. `0` desactiva las llamadas a Groq.
 - `AUDIT_WORKER_TIME_BUDGET_MS` limita cuánto tiempo se reclaman trabajos nuevos
   por invocación. El valor por defecto es 30 s y el máximo es 35 s, para que una
-  llamada a Gemini (20 s) todavía quepa en los 60 s de la función.
+  llamada a Groq (20 s) todavía quepa en los 60 s de la función.
 - `AUDIT_WORKER_SECRET` se acepta como alias heredado para pruebas manuales,
   pero el cron externo usa `CRON_SECRET`.
 
@@ -87,7 +87,7 @@ workflow**. Debe estar en la rama `main` para que GitHub ejecute el horario.
 - En repositorios públicos, GitHub desactiva los workflows programados tras 60
   días sin actividad; se reactivan desde la pestaña Actions o con un push.
 - `server/vercel.json` ya no declara un cron de Vercel. Solo conserva
-  `maxDuration: 60` para que una llamada externa tenga margen para Gemini.
+  `maxDuration: 60` para que una llamada externa tenga margen para Groq.
 - El endpoint también acepta `POST` para pruebas manuales.
 
 ### Probar el worker
@@ -122,7 +122,7 @@ npm run audit:process -- --watch --interval=60
 - `--watch`: repite el ciclo cada `--interval` segundos.
 - `--limit=N`: máximo de trabajos por ciclo (1–50).
 - Requiere `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` y, si se quiere modelo,
-  `GEMINI_API_KEY` en `server/.env`.
+  `GROQ_API_KEY` en `server/.env`.
 
 ## Despliegue
 
@@ -132,7 +132,7 @@ npm run audit:process -- --watch --interval=60
    `AUDIT_CRON_URL` con la URL completa del endpoint.
 3. Para el primer smoke test, poner `AUDIT_ENABLED=1` y
    `AUDIT_MAX_LLM_PER_DAY_PER_SHOP=0`; así se prueba el flujo determinista sin
-   gastar Gemini.
+   gastar Groq.
 4. Desplegar el proyecto `server/`. `initDb()` crea las tablas e índices de
    auditoría de forma aditiva en el primer arranque.
 5. Hacer un cierre de prueba y llamar al endpoint manualmente o ejecutar el
@@ -170,7 +170,7 @@ informes con IA hoy, último informe y trabajo pendiente más antiguo.
 - `AUDIT_MAX_LLM_PER_DAY_PER_SHOP` limita los informes con modelo por tienda y
   día (100 por defecto; `0` desactiva las llamadas al modelo). Es una protección
   de costo, no una cuota del proveedor.
-- Gemini se configura con `temperature: 0.2`, `maxOutputTokens: 1400` y timeout
+- Groq se configura con `temperature: 0.2`, `max_completion_tokens: 4096` y timeout
   de 20 segundos. Si falla, el informe queda con `status = "fallback"` y el
   texto determinista; se puede reintentar desde el panel de administración.
 
@@ -178,7 +178,7 @@ informes con IA hoy, último informe y trabajo pendiente más antiguo.
 
 - `ready`: informe completo. Si `model` es `null`, es determinista (no se gastó
   cuota).
-- `fallback`: Gemini falló o devolvió una respuesta inválida; se guardó el
+- `fallback`: Groq falló o devolvió una respuesta inválida; se guardó el
   informe determinista y el error.
 
 Los trabajos pasan por `pending → processing → done` o `failed`. Un trabajo
@@ -215,12 +215,12 @@ reintento (`test/auditPipeline.test.js`).
   el snapshot completo. Las operaciones de producto anteriores pueden omitir
   `operation_id`; las nuevas lo usan para evitar duplicar entradas.
 - Encolar una auditoría espera como máximo 1,5 segundos después de guardar
-  el cierre. Gemini también tiene un plazo para leer el cuerpo de respuesta.
+  el cierre. Groq también tiene un plazo para leer el cuerpo de respuesta.
 - Electron conserva su sesión, stock y outbox si la recuperación o la consulta
   de auditoría no pueden llegar a la nube. La recuperación necesita conexión.
 
 Las pruebas `upgradeCompatibility`, `passwordReset`, `accountStore`,
-`cloudFeatures`, `auditAvailability` y `gemini` cubren estos casos junto con
+`cloudFeatures`, `auditAvailability` y `groq` cubren estos casos junto con
 las suites de ventas, sincronización y caja compartida.
 
 ## Recuperación de contraseña
@@ -231,10 +231,10 @@ El código vence a los 15 minutos, admite cinco intentos y se canjea una vez.
 Se guarda únicamente su hash. Emitir otro código invalida el anterior.
 Cambiar la contraseña conserva las sesiones existentes y sus colas pendientes.
 
-### Verificar Gemini sin datos de clientes
+### Verificar Groq sin datos de clientes
 
 Ejecutar el workflow `audit-cron` con la opción `probe=true`. Usa el secreto
 existente del cron y un cierre completamente ficticio; no procesa trabajos
-pendientes. Si Gemini devuelve un informe válido, responde `ok: true`.
+pendientes. Si Groq devuelve un informe válido, responde `ok: true`.
 Las variables sensibles de Vercel no se validan mediante una copia descargada:
 la prueba usa la credencial en su entorno real.

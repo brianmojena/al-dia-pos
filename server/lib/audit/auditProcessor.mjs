@@ -6,7 +6,7 @@
  * trabajos, arma el snapshot y guarda el informe.
  *
  * Si el modelo falla, el informe determinista siempre queda guardado: la
- * auditoría no depende de que Gemini esté disponible.
+ * auditoría no depende de que Groq esté disponible.
  */
 
 import {

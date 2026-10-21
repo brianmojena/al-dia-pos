@@ -196,12 +196,12 @@ test('flujo de auditoría', async (t) => {
     assert.equal(reports.body[0].model, null);
   });
 
-  await t.test('la prueba de Gemini exige el secreto y no procesa trabajos pendientes', async () => {
+  await t.test('la prueba de Groq exige el secreto y no procesa trabajos pendientes', async () => {
     const before = await ctx.db.execute('SELECT id, status, attempts FROM audit_jobs ORDER BY id');
     const unauthorized = await fetch(`${ctx.baseUrl}/api/cron/audit?probe=1`);
     assert.equal(unauthorized.status, 401);
-    const previousKey = process.env.GEMINI_API_KEY;
-    delete process.env.GEMINI_API_KEY;
+    const previousKey = process.env.GROQ_API_KEY;
+    delete process.env.GROQ_API_KEY;
     try {
       const probe = await fetch(`${ctx.baseUrl}/api/cron/audit?probe=1`, {
         headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
@@ -212,7 +212,7 @@ test('flujo de auditoría', async (t) => {
       assert.equal(result.code, 'MISSING_KEY');
       assert.equal(result.provider_status, null);
     } finally {
-      if (previousKey !== undefined) process.env.GEMINI_API_KEY = previousKey;
+      if (previousKey !== undefined) process.env.GROQ_API_KEY = previousKey;
     }
     const after = await ctx.db.execute('SELECT id, status, attempts FROM audit_jobs ORDER BY id');
     assert.deepEqual(after.rows, before.rows);

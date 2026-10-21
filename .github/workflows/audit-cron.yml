@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       probe:
-        description: 'Probar Gemini con datos ficticios, sin procesar cierres'
+        description: 'Probar Groq con datos ficticios, sin procesar cierres'
         type: boolean
         default: false
 

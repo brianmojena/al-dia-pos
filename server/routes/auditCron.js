@@ -15,8 +15,8 @@ const loadEngine = () => {
   if (!enginePromise) {
     enginePromise = Promise.all([
       import('../lib/audit/auditProcessor.mjs'),
-      import('../lib/audit/gemini.mjs'),
-    ]).then(([processor, gemini]) => ({ ...processor, ...gemini }))
+      import('../lib/audit/groq.mjs'),
+    ]).then(([processor, groq]) => ({ ...processor, ...groq }))
       .catch((error) => { enginePromise = null; throw error; });
   }
   return enginePromise;
@@ -52,7 +52,7 @@ const dailyCap = () => {
 const timeBudgetMs = () => {
   const parsed = Number(process.env.AUDIT_WORKER_TIME_BUDGET_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) return 30_000;
-  // 35 s + los 20 s de timeout de Gemini siguen dentro de maxDuration=60.
+  // 35 s + los 20 s de timeout de Groq siguen dentro de maxDuration=60.
   return Math.min(Math.max(Math.floor(parsed), 5_000), 35_000);
 };
 
@@ -61,7 +61,7 @@ const timeBudgetMs = () => {
  *
  * El cron llama esta ruta cada pocos minutos con `Authorization: Bearer
  * <CRON_SECRET>`. Reclama trabajos de Turso de una en una, calcula las señales
- * con las reglas deterministas y solo llama a Gemini si hay anomalías. Si el
+ * con las reglas deterministas y solo llama a Groq si hay anomalías. Si el
  * modelo falla, el informe determinista se guarda igual.
  *
  * No usa requireAuth: el cron no tiene una sesión de usuario. La credencial es
@@ -90,25 +90,25 @@ router.all('/', async (req, res, next) => {
   if (req.query.probe === '1') {
     res.set('Cache-Control', 'no-store');
     try {
-      const { probeGemini, DEFAULT_MODEL } = await loadEngine();
-      return res.json(await probeGemini({
-        apiKey: String(process.env.GEMINI_API_KEY || '').trim(),
-        model: String(process.env.AUDIT_MODEL || '').trim() || DEFAULT_MODEL,
+      const { probeGroq, DEFAULT_MODEL } = await loadEngine();
+      return res.json(await probeGroq({
+        apiKey: String(process.env.GROQ_API_KEY || '').trim(),
+        model: String(process.env.GROQ_AUDIT_MODEL || '').trim() || DEFAULT_MODEL,
       }));
     } catch (error) {
       const message = String(error.message || '');
-      const providerStatus = Number(/Gemini respondió (\d+)/.exec(message)?.[1]) || null;
+      const providerStatus = Number(/Groq respondió (\d+)/.exec(message)?.[1]) || null;
       // Solo categorías fijas: nunca devolver la respuesta cruda del proveedor
       // ni valores de entorno en el diagnóstico que queda en GitHub Actions.
       const code = /no está configurada/.test(message) ? 'MISSING_KEY'
-        : /API_KEY_INVALID|API key not valid/.test(message) ? 'INVALID_KEY'
+        : /invalid_api_key/.test(message) ? 'INVALID_KEY'
         : providerStatus === 404 ? 'MODEL_NOT_FOUND'
         : providerStatus === 429 ? 'QUOTA_EXCEEDED'
         : providerStatus === 403 ? 'PROVIDER_DENIED'
         : error.name === 'AbortError' ? 'TIMEOUT'
         : providerStatus ? 'PROVIDER_ERROR' : 'INVALID_OUTPUT';
       return res.status(502).json({ ok: false, probe: true, code, provider_status: providerStatus,
-        error: 'No se pudo validar Gemini; revisa su configuración en Vercel' });
+        error: 'No se pudo validar Groq; revisa su configuración en Vercel' });
     }
   }
 
@@ -119,19 +119,19 @@ router.all('/', async (req, res, next) => {
   try {
     const {
       recoverStaleJobs, claimAuditJobs, countModelCallsToday,
-      processAuditJob, callGemini, DEFAULT_MODEL,
+      processAuditJob, callGroq, DEFAULT_MODEL,
     } = await loadEngine();
 
     const db = getDb();
-    const model = String(process.env.AUDIT_MODEL || '').trim() || DEFAULT_MODEL;
-    const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+    const model = String(process.env.GROQ_AUDIT_MODEL || '').trim() || DEFAULT_MODEL;
+    const apiKey = String(process.env.GROQ_API_KEY || '').trim();
     const cap = dailyCap();
     const recovered = await recoverStaleJobs(db);
     const results = [];
 
     for (let index = 0; index < limit; index += 1) {
       // No empezar un trabajo que probablemente no termine antes del timeout
-      // de la función. Gemini tiene un timeout propio de 20 s.
+      // de la función. Groq tiene un timeout propio de 20 s.
       if (Date.now() >= deadline) break;
       const [job] = await claimAuditJobs(db, 1);
       if (!job) break;
@@ -139,7 +139,7 @@ router.all('/', async (req, res, next) => {
       let callModel = null;
       if (apiKey) {
         const used = await countModelCallsToday(db, Number(job.user_id)).catch(() => cap);
-        if (used < cap) callModel = (payload) => callGemini({ apiKey, model, payload });
+        if (used < cap) callModel = (payload) => callGroq({ apiKey, model, payload });
       }
 
       const result = await processAuditJob(db, job, { callModel });
