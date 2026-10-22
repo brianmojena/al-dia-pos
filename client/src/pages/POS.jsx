@@ -258,12 +258,14 @@ export default function POS() {
     }
   }
 
-  // La pantalla guiada valida de nuevo al confirmar; al servidor solo se envía
-  // el cobro normal en CUP, nunca el efectivo recibido ni el vuelto.
+  // La pantalla guiada valida de nuevo al confirmar; el servidor recibe
+  // el efectivo recibido (cash_received) para guardar cuánto entregó el cliente.
   const handleCashCheckout = (amountReceived) => {
     if (!isMontevaldesCashEnabled(getToken()) || cart.length === 0 || completing) return
-    if (!cashPaymentBreakdown(total, amountReceived).canConfirm) return
-    return handleCheckout({ payment_method: 'efectivo' })
+    const breakdown = cashPaymentBreakdown(total, amountReceived)
+    if (!breakdown.canConfirm) return
+    const cashReceivedCups = breakdown.receivedCents / 100
+    return handleCheckout({ payment_method: 'efectivo', cash_received: cashReceivedCups })
   }
 
   if (loading) return (

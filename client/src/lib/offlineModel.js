@@ -342,6 +342,12 @@ export function prepareOperation(data, method, path, body, ctx) {
       return { ...item, id: index, product_name: p.name, unit_cost: Number(p.purchase_price || 0) }
     })
     const total = round(items.reduce((n, i) => n + lineTotal(i.quantity, i.unit_price), 0))
+    if (body.payment_method !== 'efectivo') {
+      delete op.body.cash_received
+    } else if (body.cash_received != null) {
+      assert(number(body.cash_received) && round(Number(body.cash_received)) >= total, 'El efectivo recibido no puede ser menor que el total')
+      op.body.cash_received = round(Number(body.cash_received))
+    }
     if (body.payment_method === 'mixto') assert(number(body.transfer_amount) && body.transfer_amount > 0 && body.transfer_amount < total, 'Monto transferido inválido')
     const split = paymentSplit({ ...op.body, total })
     assert(ctx.user.transfer_limit == null || split.transfer <= Number(ctx.user.transfer_limit), 'Transferencia por encima del límite')
@@ -487,10 +493,10 @@ export function readLocal(data, path, account, user) {
   const cashierSale = (sale) => {
     if (!sale) return sale
     const { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-      foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id,
+      foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, cash_close_id,
       pending, items = [] } = sale
     return { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-      foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id, pending,
+      foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, cash_close_id, pending,
       items: items.map(({ id: itemId, sale_id, product_id, product_name, quantity, unit_price, pack_size, unit }) =>
         ({ id: itemId, sale_id, product_id, product_name, quantity, unit_price, pack_size, unit })) }
   }

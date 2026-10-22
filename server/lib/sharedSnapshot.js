@@ -10,7 +10,7 @@ async function sharedSnapshot(tx, req) {
     .map(({ purchase_price, ...product }) => product);
   const sales = (await tx.execute({
     sql: `SELECT id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount,
-          exchange_rate, shop_rate, created_at, register_id, account_id, account_email, cash_close_id
+          exchange_rate, shop_rate, cash_received, created_at, register_id, account_id, account_email, cash_close_id
           FROM sales WHERE user_id = ? AND ${deviceScope} ORDER BY created_at DESC, id DESC`, args: scope,
   })).rows;
   const items = (await tx.execute({

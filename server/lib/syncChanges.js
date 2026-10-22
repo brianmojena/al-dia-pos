@@ -184,10 +184,10 @@ function parseCorrection(row, { owner, cashierProjection }) {
 
 function cashierSaleProjection(sale) {
   const { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-    foreign_amount, exchange_rate, shop_rate, created_at, register_id, account_id,
+    foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, account_id,
     account_email, cash_close_id } = sale;
   return { id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-    foreign_amount, exchange_rate, shop_rate, created_at, register_id, account_id,
+    foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, account_id,
     account_email, cash_close_id };
 }
 
@@ -239,14 +239,14 @@ async function syncChanges(tx, req) {
     const scope = [req.userId, `shared:${shared.id}`, `shared:${shared.id}:%`, cursors.sale, ...saleWindow.args, limit];
     sales = await query(tx,
       `SELECT id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-              foreign_amount, exchange_rate, shop_rate, created_at, register_id,
+              foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id,
               account_id, account_email, cash_close_id
         FROM sales WHERE user_id = ? AND (register_id = ? OR register_id LIKE ?)
           AND id > ?${saleWindow.sql} ORDER BY id ASC LIMIT ?`, scope);
   } else if (cashier) {
     sales = await query(tx,
       `SELECT id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
-              foreign_amount, exchange_rate, shop_rate, created_at, register_id,
+              foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id,
               account_id, account_email, cash_close_id
         FROM sales WHERE user_id = ? AND id > ?${saleWindow.sql}${cashierScope}
         ORDER BY id ASC LIMIT ?`, [req.userId, cursors.sale, ...saleWindow.args, ...cashierArgs, limit]);

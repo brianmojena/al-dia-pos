@@ -71,7 +71,7 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
       // La proyección excluye ganancia y cualquier dato de costo.
       snapshot.sales = (await tx.execute({
         sql: `SELECT id, client_sale_id, total, payment_method, transfer_amount,
-                     foreign_currency, foreign_amount, exchange_rate, shop_rate,
+                     foreign_currency, foreign_amount, exchange_rate, shop_rate, cash_received,
                      created_at, register_id, account_id, account_email, cash_close_id
               FROM sales WHERE user_id = ?
                 AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))

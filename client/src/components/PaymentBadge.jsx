@@ -48,6 +48,25 @@ export default function PaymentBadge({ sale, short = false }) {
       </span>
     )
   }
+  // Efectivo puro: si cash_received está presente, mostrar vuelto
+  if (sale.cash_received != null && Number(sale.cash_received) > Number(sale.total)) {
+    const change = Number(sale.cash_received) - Number(sale.total)
+    const detail = `Recibió ${fmt(sale.cash_received)} · vuelto ${fmt(change)}`
+    return (
+      <span className={`${base} bg-green-100 text-green-700`} title={detail}>
+        <Banknote size={11} /> {short ? `Efectivo · vuelto ${fmt(change)}` : `Efectivo · ${detail}`}
+      </span>
+    )
+  }
+  // Efectivo exacto
+  if (sale.cash_received != null && Number(sale.cash_received) === Number(sale.total)) {
+    return (
+      <span className={`${base} bg-green-100 text-green-700`} title="Pago exacto, sin vuelto">
+        <Banknote size={11} /> Efectivo · exacto
+      </span>
+    )
+  }
+  // Efectivo antiguo (sin cash_received)
   return (
     <span className={`${base} bg-green-100 text-green-700`}>
       <Banknote size={11} /> Efectivo

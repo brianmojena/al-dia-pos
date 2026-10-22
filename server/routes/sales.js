@@ -33,7 +33,7 @@ router.get('/', asyncHandler(async (req, res) => {
     ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'
     : '';
   const columns = req.role === 'cajero'
-    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id'
+    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, cash_close_id'
     : '*';
   const argsFor = (dateArgs) => req.role === 'cajero'
     ? [...dateArgs, req.accountId, req.accountId]
@@ -223,7 +223,7 @@ router.post('/:id/correct', requireOwner, asyncHandler(async (req, res) => {
 router.get('/:id', asyncHandler(async (req, res) => {
   const db = getDb();
   const columns = req.role === 'cajero'
-    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, created_at, register_id, cash_close_id'
+    ? 'id, client_sale_id, total, payment_method, transfer_amount, foreign_currency, foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id, cash_close_id'
     : '*';
   const saleResult = await db.execute({
     sql: `SELECT ${columns} FROM sales WHERE id = ? AND user_id = ?${req.role === 'cajero' ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))' : ''}`,
@@ -246,7 +246,7 @@ router.post('/', asyncHandler(async (req, res) => {
   catch (error) { return res.status(400).json({ error: error.message }); }
   const {
     items, payment_method = 'efectivo', client_sale_id = null,
-    register_id: requestedRegisterId = null, transfer_amount = null,
+    register_id: requestedRegisterId = null, transfer_amount = null, cash_received = null,
   } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -431,15 +431,33 @@ router.post('/', asyncHandler(async (req, res) => {
       });
     }
 
+    // Efectivo recibido del cliente: solo se guarda si el pago es en efectivo.
+    // En otros métodos se ignora y se guarda NULL.
+    let finalCashReceived = null;
+    if (payment_method === 'efectivo') {
+      if (cash_received !== null && cash_received !== undefined && cash_received !== '') {
+        const cashReceivedNum = Number(cash_received);
+        if (!Number.isFinite(cashReceivedNum)) {
+          await tx.rollback();
+          return res.status(400).json({ error: 'Efectivo recibido inválido' });
+        }
+        const cashReceivedRounded = round2(cashReceivedNum);
+        // Menos que el total (p. ej. un precio cambió mientras la venta esperaba
+        // en la cola sin internet): la venta ya se cobró, no se pierde; solo se
+        // descarta este dato en vez de rechazarla.
+        if (cashReceivedRounded >= total) finalCashReceived = cashReceivedRounded;
+      }
+    }
+
     const saleResult = await tx.execute({
       sql: `INSERT INTO sales
               (user_id, client_sale_id, total, profit, payment_method, transfer_amount,
-               foreign_currency, foreign_amount, exchange_rate, shop_rate,
+               foreign_currency, foreign_amount, exchange_rate, shop_rate, cash_received,
                register_id, account_id, account_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [req.userId, client_sale_id, total, profit, payment_method, transferAmount,
              foreign.foreign_currency, foreign.foreign_amount, foreign.exchange_rate, foreign.shop_rate,
-             registerId, account.id, account.email, operationDate],
+             finalCashReceived, registerId, account.id, account.email, operationDate],
     });
     const saleId = Number(saleResult.lastInsertRowid);
 

@@ -278,6 +278,32 @@ test('cobro en divisa sin internet: vuelto en pesos, arqueo por moneda y aviso d
   assert.ok(monthCsv(project(state).sales, '2026-09').includes('20 USD a 350'))
 })
 
+test('venta en efectivo con cash_received se conserva si es >= total, se rechaza si es menor', () => {
+  const state = fixture()
+  const sale = add(state, 'POST', '/api/sales', { client_sale_id: 'cash-received-1', payment_method: 'efectivo', cash_received: 25, items: [{ product_id: 10, unit_price: 10, quantity: 2 }] })
+  assert.equal(sale.result.total, 20)
+  assert.equal(sale.body.cash_received, 25)
+  assert.equal(sale.result.cash_received, 25)
+
+  // Con vuelto exacto
+  const exact = add(state, 'POST', '/api/sales', { client_sale_id: 'cash-received-2', payment_method: 'efectivo', cash_received: 20, items: [{ product_id: 10, unit_price: 10, quantity: 2 }] })
+  assert.equal(exact.result.cash_received, 20)
+
+  // Rechaza si es menor que el total
+  assert.throws(() => add(state, 'POST', '/api/sales', { client_sale_id: 'cash-received-3', payment_method: 'efectivo', cash_received: 15, items: [{ product_id: 10, unit_price: 10, quantity: 2 }] }), /no puede ser menor/)
+
+  // Rechaza si no es un número válido
+  assert.throws(() => add(state, 'POST', '/api/sales', { client_sale_id: 'cash-received-4', payment_method: 'efectivo', cash_received: 'abc', items: [{ product_id: 10, unit_price: 10, quantity: 2 }] }), /no puede ser menor/)
+})
+
+test('transferencia con cash_received lo descarta sin error', () => {
+  const state = fixture()
+  const sale = add(state, 'POST', '/api/sales', { client_sale_id: 'transfer-1', payment_method: 'transferencia', cash_received: 25, items: [{ product_id: 10, unit_price: 10, quantity: 2 }] })
+  assert.equal(sale.result.total, 20)
+  assert.equal('cash_received' in sale.body, false, 'cash_received se descarta para transferencia')
+  assert.equal('cash_received' in sale.result, false)
+})
+
 test('producto por peso: se vende en fracciones, el total se redondea y el stock decimal se descuenta', () => {
   const state = fixture()
   const created = add(state, 'POST', '/api/products', { name: 'Frijoles', purchase_price: 80, sale_price: 120, stock: 10, unit: 'lb', track_stock: true })

@@ -445,6 +445,7 @@ async function initDb() {
     'ALTER TABLE sales ADD COLUMN foreign_amount REAL',
     'ALTER TABLE sales ADD COLUMN exchange_rate REAL',
     'ALTER TABLE sales ADD COLUMN shop_rate REAL',
+    'ALTER TABLE sales ADD COLUMN cash_received REAL',
     'ALTER TABLE rejected_sales ADD COLUMN foreign_currency TEXT',
     'ALTER TABLE rejected_sales ADD COLUMN foreign_amount REAL',
     'ALTER TABLE rejected_sales ADD COLUMN exchange_rate REAL',
