@@ -352,7 +352,16 @@ router.get('/:id', asyncHandler(async (req, res) => {
     const { corrected_at, original_expected_cash, original_difference, overlap_sales, ...safeClose } = close;
     return res.json({ ...safeClose, corrections: [] });
   }
-  res.json(await closeDetails(db, close));
+  const details = await closeDetails(db, close);
+  // Añadir cruce de inventario: solo para el dueño
+  try {
+    const { computeInventoryCrossCheck } = await import('../lib/audit/inventoryCrossCheck.mjs');
+    details.inventory_check = await computeInventoryCrossCheck(db, close);
+  } catch (error) {
+    // Si el cálculo falla, el detalle sigue funcionando sin él
+    details.inventory_check = null;
+  }
+  res.json(details);
 }));
 
 router.put('/:id', requireOwner, asyncHandler(async (req, res) => {

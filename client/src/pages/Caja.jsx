@@ -13,6 +13,7 @@ import { accountLabel } from '../lib/accountLabel'
 import { useAuth } from '../context/AuthContext'
 import { useExchangeRates } from '../lib/exchangeRates'
 import { fmtForeign } from '../lib/payment'
+import InventoryCrossCheck from '../components/InventoryCrossCheck'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const sameCashClose = (left, right) => Boolean(
@@ -516,6 +517,8 @@ export function CashCloseDetail({ close, isOwner, onBack, onSaved }) {
           </>
         )}
       </div>
+
+      {isOwner && !pending && <InventoryCrossCheck check={detail.inventory_check} />}
 
       {isOwner && detail.corrections?.length > 0 && <div className="bg-white rounded-2xl shadow-sm p-5"><h3 className="font-semibold text-sm mb-3">Historial de correcciones</h3>{detail.corrections.map((entry) => <div key={entry.id} className="border-t border-gray-100 py-3 first:border-0"><p className="text-xs font-semibold text-gray-700">Revisión {entry.correction_revision} · {accountLabel(entry.account_email) || entry.account_email || 'Dueño'} · {fmtDateTime(entry.created_at)}</p><p className="text-xs text-gray-400 mt-1">Efectivo contado: {fmt(entry.before.counted_cash)} → {fmt(entry.after.counted_cash)} · fondo: {fmt(entry.before.opening_float)} → {fmt(entry.after.opening_float)}</p></div>)}</div>}
     </div>

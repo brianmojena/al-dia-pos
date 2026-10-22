@@ -343,3 +343,96 @@ test('validateModelOutput rechaza respuestas incompletas y limpia las válidas',
   assert.deepEqual(valid.findings[0].evidence, ['Faltan 50 CUP']);
   assert.equal(valid.findings[0].confidence, 'alta');
 });
+
+test('S18: inventario cuadra sin faltante de caja (info)', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ difference: 0 }),
+    sales: [sale()],
+    context: {
+      inventoryCheck: {
+        available: true,
+        verdict: 'cuadra',
+        message: 'El inventario cuadra con las ventas registradas.',
+        net_missing_value: 0,
+        cash_difference: 0,
+      },
+    },
+  });
+  const signal = snapshot.signals.find((item) => item.id === 'S18');
+  assert.ok(!signal, 'No debe generar S18 si cuadra sin faltante de caja');
+});
+
+test('S18: inventario cuadra pero hay faltante de caja (info)', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ difference: -50 }),
+    sales: [sale()],
+    context: {
+      inventoryCheck: {
+        available: true,
+        verdict: 'cuadra',
+        message: 'El inventario cuadra con las ventas registradas. La diferencia de caja viene del efectivo.',
+        net_missing_value: 0,
+        cash_difference: -50,
+      },
+    },
+  });
+  const signal = snapshot.signals.find((item) => item.id === 'S18');
+  assert.ok(signal);
+  assert.equal(signal.id, 'S18');
+  assert.equal(signal.severity, 'info');
+  assert.match(signal.title, /Inventario cuadra/);
+});
+
+test('S18: inventario con diferencias respaldadas por faltante (warning)', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ difference: -500 }),
+    sales: [sale()],
+    context: {
+      inventoryCheck: {
+        available: true,
+        verdict: 'respaldo',
+        message: 'Faltan mercancías por 400 CUP y el faltante de caja es 500 CUP: probablemente hay ventas sin registrar.',
+        net_missing_value: 400,
+        cash_difference: -500,
+      },
+    },
+  });
+  const signal = snapshot.signals.find((item) => item.id === 'S18');
+  assert.ok(signal);
+  assert.equal(signal.id, 'S18');
+  assert.equal(signal.severity, 'warning');
+  assert.match(signal.title, /respaldado/);
+});
+
+test('S18: inventario con diferencias no respaldadas (warning)', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ difference: 100 }),
+    sales: [sale()],
+    context: {
+      inventoryCheck: {
+        available: true,
+        verdict: 'diferencias',
+        message: 'El inventario tiene diferencias (10 faltan, 0 sobran, valor neto -2000) que no coinciden.',
+        net_missing_value: -2000,
+        cash_difference: 100,
+      },
+    },
+  });
+  const signal = snapshot.signals.find((item) => item.id === 'S18');
+  assert.ok(signal);
+  assert.equal(signal.id, 'S18');
+  assert.equal(signal.severity, 'warning');
+  assert.match(signal.title, /diferencias/);
+});
+
+test('S18: no se genera si no hay inventory_check disponible', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ difference: -50 }),
+    sales: [sale()],
+    context: {
+      inventoryCheck: null,
+    },
+  });
+  const signal = snapshot.signals.find((item) => item.id === 'S18');
+  assert.ok(!signal, 'No debe generar S18 sin inventoryCheck');
+});

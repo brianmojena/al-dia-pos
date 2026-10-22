@@ -18,6 +18,7 @@ import {
   toPromptPayload,
   validateModelOutput,
 } from './auditRules.mjs';
+import { computeInventoryCrossCheck } from './inventoryCrossCheck.mjs';
 
 const rows = async (db, sql, args = []) => (await db.execute({ sql, args })).rows;
 
@@ -171,6 +172,15 @@ async function fetchSnapshotInput(db, close) {
       WHERE user_id = ? AND cash_close_id IS NULL AND datetime(created_at) <= datetime(?, '-1 day')`,
     [userId, close.closed_at]))[0]?.n) || 0;
 
+  // Cruce de inventario con cierre de caja
+  let inventoryCheck = null;
+  try {
+    inventoryCheck = await computeInventoryCrossCheck(db, close);
+  } catch (error) {
+    // Si falla, el contexto sigue funcionando sin el cruce
+    inventoryCheck = null;
+  }
+
   return {
     close,
     sales,
@@ -184,6 +194,7 @@ async function fetchSnapshotInput(db, close) {
       previousRegisterClose: previousClose,
       sameRegisterClosesToday,
       openSalesOlderThan24h,
+      inventoryCheck,
     },
   };
 }

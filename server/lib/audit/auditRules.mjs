@@ -10,7 +10,7 @@
  * calcula saldos ni diferencias.
  */
 
-export const PROMPT_VERSION = '2026-10-20.1';
+export const PROMPT_VERSION = '2026-10-22.1';
 
 export const SEVERITY_ORDER = { ok: 0, info: 1, warning: 2, critical: 3 };
 
@@ -334,6 +334,22 @@ export function buildAuditSnapshot({
       rejected_sales_count: rejectionCount,
       rejected_sales_total: rejectedTotal,
       open_sales_older_than_24h: Number(context.openSalesOlderThan24h) || 0,
+      inventory_check: context.inventoryCheck ? {
+        available: context.inventoryCheck.available,
+        verdict: context.inventoryCheck.verdict,
+        message: context.inventoryCheck.message,
+        products_counted: context.inventoryCheck.products_counted ?? null,
+        products_total: context.inventoryCheck.products_total ?? null,
+        units_missing: context.inventoryCheck.units_missing ?? null,
+        units_extra: context.inventoryCheck.units_extra ?? null,
+        value_missing: context.inventoryCheck.value_missing ?? null,
+        value_extra: context.inventoryCheck.value_extra ?? null,
+        net_missing_value: context.inventoryCheck.net_missing_value ?? null,
+        cash_difference: context.inventoryCheck.cash_difference ?? null,
+        minutes_before_close: context.inventoryCheck.minutes_before_close ?? null,
+        counted_at: context.inventoryCheck.counted_at ?? null,
+        count_id: context.inventoryCheck.count_id ?? null,
+      } : null,
     },
   };
 
@@ -563,6 +579,50 @@ export function buildAuditSnapshot({
     }));
   }
 
+  // Cruce de inventario con cierre de caja
+  const inventoryCheck = context.inventoryCheck || null;
+  if (inventoryCheck && inventoryCheck.available) {
+    const { verdict, message, net_missing_value, cash_difference } = inventoryCheck;
+    let severity = 'info';
+    let title = '';
+
+    if (verdict === 'respaldo') {
+      severity = 'warning';
+      title = 'Faltante respaldado por inventario';
+    } else if (verdict === 'cuadra') {
+      if (abs(cash_difference) > limits.squareCash) {
+        severity = 'info';
+        title = 'Inventario cuadra: la diferencia es de efectivo';
+      }
+    } else if (verdict === 'diferencias') {
+      severity = 'warning';
+      title = 'Inventario con diferencias';
+    } else if (verdict === 'parcial') {
+      severity = 'info';
+      title = 'Arqueo de inventario incompleto';
+    }
+
+    // Generar la señal solo si es relevante: debe haber una diferencia visible
+    // o el veredicto indica conclusiones importantes
+    const hasInventoryDifference = abs(net_missing_value) > limits.squareCash
+      || (verdict === 'cuadra' && abs(cash_difference) > limits.squareCash);
+    // Un arqueo incompleto solo merece aviso si la caja tampoco cuadró: en un
+    // cierre limpio sería ruido en cada informe.
+    const isExplicitVerdict = verdict === 'respaldo' || verdict === 'diferencias'
+      || (verdict === 'parcial' && abs(cash_difference) > limits.squareCash);
+
+    if (hasInventoryDifference || isExplicitVerdict) {
+      signals.push(signal({
+        id: 'S18',
+        severity,
+        title,
+        evidence: message,
+        amount: abs(net_missing_value),
+        currency: 'CUP',
+      }));
+    }
+  }
+
   signals.sort((left, right) => SEVERITY_ORDER[right.severity] - SEVERITY_ORDER[left.severity]
     || left.id.localeCompare(right.id));
 
@@ -592,6 +652,7 @@ const CAUSES = {
   S15: 'Diferencia en billetes de dólares o euros; revisar el conteo de divisa.',
   S16: 'Ventas antiguas sin cerrar; el efectivo puede estar fuera del arqueo.',
   S17: 'Dos cierres de la misma caja muy seguidos; puede ser un doble cierre del mismo período.',
+  S18: 'El cruce de inventario con el cierre de caja detecta discrepancias: posibles ventas sin registrar, duplicadas o mercancía dañada.',
 };
 
 const RECOMMENDATIONS = {
@@ -612,6 +673,7 @@ const RECOMMENDATIONS = {
   S15: 'Repetir el conteo de billetes de divisa.',
   S16: 'Cerrar las ventas pendientes y conciliar el efectivo.',
   S17: 'Revisar el cierre anterior para descartar un doble cierre del mismo período.',
+  S18: 'Revisar el arqueo de inventario contra las ventas del período y comprobar que ambas cierren coherentes.',
 };
 
 const moneyText = (amount, currency = 'CUP') => `${round2(amount)} ${currency}`;
