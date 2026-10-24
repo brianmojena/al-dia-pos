@@ -334,6 +334,19 @@ router.get('/current', asyncHandler(async (req, res) => {
   });
 }));
 
+// IDs de los cierres que este usuario puede ver. El cliente web los usa para
+// retirar de su caché los cierres que ya se borraron en la nube: la
+// sincronización incremental solo inserta y actualiza, nunca elimina.
+router.get('/ids', asyncHandler(async (req, res) => {
+  const result = await getDb().execute({
+    sql: `SELECT id FROM cash_closes WHERE user_id = ?${req.role === OWNER ? '' : ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'}`,
+    args: req.role === OWNER ? [req.userId] : [req.userId, req.accountId, req.accountId],
+  });
+  const ids = result.rows.map((row) => Number(row.id));
+  res.set('Cache-Control', 'no-store');
+  res.json({ ids, total: ids.length });
+}));
+
 // Detalle de un cierre confirmado. El cajero solo puede consultar los suyos;
 // los cambios y su auditoría quedan reservados al dueño de la tienda.
 router.get('/:id', asyncHandler(async (req, res) => {

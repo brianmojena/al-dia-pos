@@ -108,4 +108,21 @@ test('cierres separados por caja', async (t) => {
     assert.equal(close.status, 201);
     assert.equal(Number(close.body.expected_cash), 100);
   });
+
+  await t.test('GET /ids replica el alcance del historial y nunca queda truncado', async () => {
+    const ownerHistory = (await ctx.api('GET', '/api/cash-closes', { token: owner })).body;
+    const ownerIds = (await ctx.api('GET', '/api/cash-closes/ids', { token: owner })).body;
+    assert.equal(ownerIds.total, ownerIds.ids.length);
+    assert.deepEqual([...ownerIds.ids].sort((a, b) => a - b), ownerHistory.map((close) => close.id).sort((a, b) => a - b));
+
+    const cashierHistory = (await ctx.api('GET', '/api/cash-closes', { token: cashier.token })).body;
+    const cashierIds = (await ctx.api('GET', '/api/cash-closes/ids', { token: cashier.token })).body;
+    assert.equal(cashierIds.total, cashierIds.ids.length);
+    assert.deepEqual([...cashierIds.ids].sort((a, b) => a - b), cashierHistory.map((close) => close.id).sort((a, b) => a - b));
+    assert.ok(cashierIds.ids.every((id) => ownerIds.ids.includes(id)), 'el cajero solo ve sus propios cierres');
+
+    const other = await registerUser(ctx.api);
+    const otherIds = (await ctx.api('GET', '/api/cash-closes/ids', { token: other })).body;
+    assert.deepEqual(otherIds, { ids: [], total: 0 }, 'otra tienda no ve ningún cierre');
+  });
 });

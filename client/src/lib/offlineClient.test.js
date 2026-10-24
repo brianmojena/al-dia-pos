@@ -532,14 +532,14 @@ test('corregir un cierre PWA requiere red, no crea outbox y refresca el snapshot
   const ownerState = stateAt(key)
   ownerState.base.cash_closes = [confirmed]
   seedState(key, ownerState)
-  let requested = ''
+  const requestedPaths = []
   navigator.onLine = true
   globalThis.fetch = async (path) => {
-    requested = path
+    requestedPaths.push(path)
     return jsonResponse({ ...emptyData(), cash_closes: [confirmed], current_period: { has_sales: false } })
   }
   await refreshOfflineSnapshot()
-  assert.ok(requested.startsWith('/api/sync/snapshot'), 'la corrección refresca sin bajar todo el historial')
+  assert.ok(requestedPaths.some((path) => path.startsWith('/api/sync/snapshot')), 'la corrección refresca sin bajar todo el historial')
   const history = await (await apiFetch('/api/cash-closes')).json()
   assert.equal(history[0].difference, 0)
   assert.equal(stateAt(key).outbox.length, 0)
@@ -642,4 +642,38 @@ test('encolar una venta conserva el historial y la cola en la clave compatible c
   assert.equal(records.get(key).outbox.length, 1)
   assert.equal(records.get(key).outbox[0].body.client_sale_id, 'entity-write')
   assert.equal(records.get(key).cursors, undefined)
+})
+
+test('la sincronización retira cierres borrados en la nube y conserva pendientes y recientes', async () => {
+  resetStore(); login(1); navigator.onLine = true
+  const key = stateKey(1)
+  const old = '2026-01-01 00:00:00'
+  const now = new Date().toISOString()
+  seedState(key, {
+    base: { ...emptyData(), cash_closes: [
+      { id: 22, closed_at: old, difference: -6920 },
+      { id: 23, closed_at: old, difference: 75605 },
+      { id: 24, closed_at: now, difference: 0 },
+      { id: -1, closed_at: now, difference: 0, pending: true },
+    ] },
+    outbox: [], initialized: true, nextId: -2,
+  })
+  const urls = []
+  globalThis.fetch = async (path) => {
+    urls.push(path)
+    if (path === '/api/cash-closes/ids') return jsonResponse({ ids: [22], total: 1 })
+    return jsonResponse({ ...emptyData(), cursors: { sale: 0, close: 24, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 }, has_more: false })
+  }
+  await syncOffline()
+  const ids = stateAt(key).base.cash_closes.map((close) => close.id)
+  assert.deepEqual(ids, [22, 24, -1], 'sale el cierre borrado y quedan el confirmado, el reciente y el pendiente')
+  assert.ok(urls.includes('/api/cash-closes/ids'))
+
+  seedState(key, { ...stateAt(key), base: { ...stateAt(key).base, cash_closes: [...stateAt(key).base.cash_closes, { id: 23, closed_at: old, difference: 75605 }] } })
+  globalThis.fetch = async (path) => {
+    if (path === '/api/cash-closes/ids') return jsonResponse({ ids: [22], total: 2 })
+    return jsonResponse({ ...emptyData(), cursors: { sale: 0, close: 24, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 }, has_more: false })
+  }
+  await syncOffline()
+  assert.ok(stateAt(key).base.cash_closes.some((close) => close.id === 23), 'una lista incompleta no borra nada')
 })

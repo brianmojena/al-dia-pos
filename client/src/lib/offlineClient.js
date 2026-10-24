@@ -231,6 +231,44 @@ const cursorsFromSnapshot = (snapshot) => {
   }
 }
 let syncing = null
+// La sincronización incremental nunca elimina filas: un cierre borrado en la
+// nube seguiría apareciendo en este dispositivo para siempre. Contrastar los
+// ids visibles retira los que ya no existen, sin tocar los cierres pendientes
+// (id negativo) ni los recién creados (ventana de gracia). En cajas compartidas
+// no se aplica: su snapshot incluye cierres de varios cajeros y el alcance del
+// endpoint es solo el de la sesión actual.
+const CASH_CLOSE_PURGE_GRACE_MS = 10 * 60_000
+async function dropMissingCashCloses(account, storageKey, request, stillCurrent, shared) {
+  if (shared) return
+  const state = await readState(account, storageKey)
+  if (!(state.base.cash_closes || []).some((close) => Number(close.id) > 0)) return
+  const res = await request('/api/cash-closes/ids')
+  if (!res.ok) return
+  const data = await res.json().catch(() => null)
+  if (!Array.isArray(data?.ids) || data.ids.length !== data.total || !stillCurrent()) return
+  const valid = new Set(data.ids.map(Number))
+  const cutoff = Date.now() - CASH_CLOSE_PURGE_GRACE_MS
+  let removed = 0
+  await updateAccount(storageKey, (current) => {
+    const pending = new Set((current.outbox || [])
+      .filter((op) => op.kind === 'close')
+      .map((op) => op.body?.client_close_id)
+      .filter(Boolean))
+    const rows = current.base.cash_closes || []
+    const kept = rows.filter((close) => {
+      const id = Number(close.id)
+      if (id < 0 || valid.has(id)) return true
+      if (close.client_close_id && pending.has(close.client_close_id)) return true
+      const closedAt = utcMillis(close.closed_at)
+      return closedAt != null && closedAt > cutoff
+    })
+    removed = rows.length - kept.length
+    if (!removed) return current
+    current.base.cash_closes = kept
+    return current
+  })
+  if (removed) broadcast()
+}
 export async function syncOffline() {
   if (isElectron() || navigator.onLine === false || !accountNow() || !getCachedUser()) return
   if (syncing) return syncing
@@ -375,6 +413,8 @@ export async function syncOffline() {
         if (!page.has_more) break
         cursors = page.cursors
       }
+      try { await dropMissingCashCloses(account, storageKey, request, stillCurrent, shared) } catch { /* la próxima sincronización lo reintenta */ }
+      if (!stillCurrent()) return
       requestPersistentStorage()
     } catch (error) {
       try { await updateAccount(storageKey, (s = initialState(account, shared)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
