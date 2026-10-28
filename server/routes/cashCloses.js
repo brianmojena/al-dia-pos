@@ -9,6 +9,8 @@ const { resolveRegisterId } = require('../lib/register');
 const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('../lib/payment');
 const { CashCloseCorrectionError, closeDetails, correctCashClose } = require('../lib/cashCloseCorrections');
 const { enqueueAuditJob } = require('../lib/auditJobs');
+const { operationOf, OperationError } = require('../lib/clientOperations');
+const { withdrawalScopeSql } = require('../lib/withdrawalScope');
 
 /**
  * Arqueo de caja por CAJA, no por tienda.
@@ -199,15 +201,25 @@ const purchasesByClientIds = async (executor, userId, ids, accountId = null) => 
   return result.rows;
 };
 
-// Las extracciones de caja abiertas: dinero que el dueño retiró y no fue
-// cubierto por ningún cierre todavía. Todas las extracciones de la tienda
-// (de cualquier caja y cualquier cajero) entran en el próximo cierre, sea
-// quién lo haga.
-const openWithdrawals = async (executor, userId) => {
+// El dueño consolida todas las abiertas; el cajero solo las de su gaveta y
+// las legadas atribuibles a su cuenta. Las ambiguas quedan para el dueño.
+const openWithdrawals = async (executor, userId, scope) => {
+  const withdrawalScope = withdrawalScopeSql(scope);
+  const sql = `SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL
+          AND ${withdrawalScope.sql} ORDER BY created_at ASC, id ASC`;
+  const args = [userId, ...withdrawalScope.args];
+  const result = await executor.execute({ sql, args });
+  return result.rows;
+};
+
+const openWithdrawalsByIds = async (executor, userId, scope, ids, idColumn) => {
+  if (ids.length === 0) return [];
+  const withdrawalScope = withdrawalScopeSql(scope);
+  const placeholders = ids.map(() => '?').join(',');
   const result = await executor.execute({
     sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL
-          ORDER BY created_at ASC, id ASC`,
-    args: [userId],
+          AND ${withdrawalScope.sql} AND ${idColumn} IN (${placeholders}) ORDER BY created_at ASC, id ASC`,
+    args: [userId, ...withdrawalScope.args, ...ids],
   });
   return result.rows;
 };
@@ -233,8 +245,15 @@ const describeOpenPeriod = async (executor, req, requestedRegisterId) => {
   const cashierAccountId = req.role === OWNER ? null : req.accountId;
   const sales = req.sharedDevice ? await sharedOpenRows(executor, 'sales', req) : await openSales(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
   const purchases = req.sharedDevice ? await sharedOpenRows(executor, 'currency_purchases', req) : await openPurchases(executor, req.userId, mode, registerId, closesWholeShop(req), cashierAccountId);
-  // Las extracciones siempre son de toda la tienda, independiente de la caja.
-  const withdrawals = await openWithdrawals(executor, req.userId);
+  // El dueño consolida todas; el cajero ve su gaveta y sus retiros legados.
+  // En un dispositivo compartido el registro identifica la gaveta con exactitud;
+  // no se mezclan filas legadas de la cuenta que lo usa.
+  const withdrawals = await openWithdrawals(executor, req.userId, {
+    isOwner: req.role === OWNER,
+    registerId,
+    accountId: req.sharedDevice ? null : cashierAccountId,
+    includeLegacy: !req.sharedDevice,
+  });
 
   if (mode === 'web') {
     const lastClose = await getLastCloseForRegister(executor, req.userId, registerId);
@@ -382,8 +401,11 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
   if (!Number.isInteger(closeId) || closeId <= 0) return res.status(400).json({ error: 'ID de cierre inválido' });
   const account = await describeAccount(getDb(), req);
   try {
+    const op = operationOf(req);
+    // operation_id no es un campo editable del cierre.
+    const { operation_id, ...body } = req.body;
     const result = await correctCashClose(getDb(), {
-      userId: req.userId, closeId, body: req.body, account,
+      userId: req.userId, closeId, body, account, op,
     });
     // Una corrección cambia la historia del cierre: se analiza como una
     // revisión nueva, conservando el informe anterior para auditoría.
@@ -396,7 +418,7 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
     }
     res.json(result);
   } catch (error) {
-    if (error instanceof CashCloseCorrectionError) return res.status(error.status).json({ error: error.message });
+    if (error instanceof CashCloseCorrectionError || error instanceof OperationError) return res.status(error.status).json({ error: error.message });
     throw error;
   }
 }));
@@ -432,24 +454,38 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const db = getDb();
+  const registerId = resolveRegisterId(req, requestedRegisterId);
+  const account = await describeAccount(db, req);
 
   // Idempotencia (camino rápido), igual que en ventas: un doble toque en
   // "Cerrar caja" no puede producir dos arqueos del mismo período.
   if (client_close_id) {
     const existing = await findByClientCloseId(db, req.userId, client_close_id);
     if (existing.rows[0]) {
-      if (req.sharedDevice && (existing.rows[0].register_id !== resolveRegisterId(req, 'web') || Number(existing.rows[0].account_id) !== Number(req.accountId))) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cajero' });
+      if (existing.rows[0].register_id !== registerId || Number(existing.rows[0].account_id) !== Number(account.id)) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cuenta' });
       return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
     }
   }
 
-  const registerId = resolveRegisterId(req, requestedRegisterId);
   const mode = modeFor(req, client_sale_ids, requestedRegisterId);
+  const clientWithdrawalIds = req.body.client_withdrawal_ids;
+  const coveredWithdrawalIds = req.body.covered_withdrawal_ids;
+  if (clientWithdrawalIds != null && (!Array.isArray(clientWithdrawalIds)
+      || clientWithdrawalIds.some((id) => typeof id !== 'string' || !id.trim())
+      || new Set(clientWithdrawalIds).size !== clientWithdrawalIds.length || mode !== 'desktop')) {
+    return res.status(400).json({ error: 'Extracciones del cierre inválidas' });
+  }
+  if (coveredWithdrawalIds != null && (!Array.isArray(coveredWithdrawalIds)
+      || coveredWithdrawalIds.some((id) => !Number.isInteger(id) || id <= 0)
+      || new Set(coveredWithdrawalIds).size !== coveredWithdrawalIds.length || mode !== 'web')) {
+    return res.status(400).json({ error: 'Extracciones del cierre inválidas' });
+  }
+  if (clientWithdrawalIds != null && coveredWithdrawalIds != null) {
+    return res.status(400).json({ error: 'Extracciones del cierre inválidas' });
+  }
 
   // Quién está cerrando: es la mitad del valor del arqueo. "Faltaron 220" no
   // se puede accionar; "faltaron 220 en el cierre de Yamila" sí.
-  const account = await describeAccount(db, req);
-
   // Leer las ventas abiertas y marcarlas como cerradas en la misma
   // transacción: si dos cierres de la misma caja llegaran a la vez, el segundo
   // encuentra las ventas ya marcadas y no las vuelve a contar.
@@ -500,9 +536,24 @@ router.post('/', asyncHandler(async (req, res) => {
       coveredPurchases = coveredPurchases.filter((purchase) => explicitPurchaseIds.includes(Number(purchase.id)));
     }
 
-    // Extracciones de caja: siempre se cogen todas las abiertas, de cualquier
-    // caja y cualquier cajero. No llevan lista explícita como las ventas.
-    const coveredWithdrawals = await openWithdrawals(tx, req.userId);
+    // Offline/web pueden fijar la lista de retiros que vieron al contar.
+    // Sin lista explícita se cubre el conjunto abierto del alcance actual.
+    const withdrawalScope = {
+      isOwner: req.role === OWNER,
+      registerId,
+      accountId: req.sharedDevice || req.role === OWNER ? null : req.accountId,
+      includeLegacy: !req.sharedDevice,
+    };
+    const coveredWithdrawals = clientWithdrawalIds != null
+      ? await openWithdrawalsByIds(tx, req.userId, withdrawalScope, clientWithdrawalIds, 'client_withdrawal_id')
+      : coveredWithdrawalIds != null
+        ? await openWithdrawalsByIds(tx, req.userId, withdrawalScope, coveredWithdrawalIds, 'id')
+        : await openWithdrawals(tx, req.userId, withdrawalScope);
+    const requestedWithdrawalCount = clientWithdrawalIds?.length ?? coveredWithdrawalIds?.length;
+    if (requestedWithdrawalCount != null && coveredWithdrawals.length !== requestedWithdrawalCount) {
+      await tx.rollback();
+      return res.status(409).json({ error: 'Una extracción de este cierre ya no está disponible. Revisa la caja antes de sincronizar.' });
+    }
 
     const summary = summarize(covered, coveredPurchases, coveredWithdrawals);
 
@@ -614,7 +665,7 @@ router.post('/', asyncHandler(async (req, res) => {
     if (client_close_id && isUniqueViolation(err)) {
       const existing = await findByClientCloseId(db, req.userId, client_close_id);
       if (existing.rows[0]) {
-        if (req.sharedDevice && (existing.rows[0].register_id !== resolveRegisterId(req, 'web') || Number(existing.rows[0].account_id) !== Number(req.accountId))) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cajero' });
+        if (existing.rows[0].register_id !== registerId || Number(existing.rows[0].account_id) !== Number(account.id)) return res.status(409).json({ error: 'Este identificador de cierre pertenece a otra caja o cuenta' });
         return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
       }
     }

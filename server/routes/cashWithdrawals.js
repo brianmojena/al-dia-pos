@@ -10,8 +10,9 @@ const { resolveRegisterId } = require('../lib/register');
 const { withdrawalFields } = require('../lib/payment');
 
 /**
- * Extracciones de caja: el dueño retira dinero en efectivo, transferencia,
- * dólares o euros. Solo el dueño puede crear o anular extracciones.
+ * Extracciones de caja:
+ * - El dueño retira dinero en efectivo, transferencia, dólares o euros, con nota opcional.
+ * - Los cajeros solo pueden anotar salidas en efectivo, con nota obligatoria (3+ caracteres).
  */
 
 const isUniqueViolation = (err) => {
@@ -25,10 +26,16 @@ const findByClientId = (db, userId, clientId) =>
     args: [userId, clientId],
   });
 
-router.get('/', requireOwner, asyncHandler(async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const db = getDb();
   let sql = 'SELECT * FROM cash_withdrawals WHERE user_id = ?';
   let args = [req.userId];
+
+  // El cajero solo ve las suyas
+  if (req.role !== OWNER) {
+    sql += ' AND account_id = ?';
+    args.push(req.accountId);
+  }
 
   if (req.query.date) {
     const dia = boundsForDate(req.query.date);
@@ -50,9 +57,19 @@ router.get('/', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  // No usamos requireOwner: devolvemos un mensaje diferente si no es dueño.
+  // Los cajeros solo pueden crear extracciones en efectivo con nota obligatoria.
   if (req.role !== OWNER) {
-    return res.status(403).json({ error: 'Solo el dueño puede extraer dinero' });
+    // Verificar que sea efectivo
+    const method = req.body?.method?.toLowerCase?.();
+    if (method !== 'efectivo') {
+      return res.status(403).json({ error: 'Los cajeros solo pueden sacar efectivo' });
+    }
+
+    // Verificar nota obligatoria (mínimo 3 caracteres)
+    const note = (req.body?.note || '').trim();
+    if (note.length < 3) {
+      return res.status(400).json({ error: 'Escribe para qué fue el dinero' });
+    }
   }
 
   let operationDate;
@@ -69,15 +86,23 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const db = getDb();
+  const account = await describeAccount(db, req);
+  const registerId = resolveRegisterId(req, requestedRegisterId);
+  const replayResponse = (row) => {
+    if (Number(row.account_id) !== Number(account.id) || row.register_id !== registerId) {
+      return { status: 409, body: { error: 'Este identificador de extracción pertenece a otra caja o cuenta' } };
+    }
+    return { status: 200, body: { ...row, idempotent_replay: true } };
+  };
 
   // Idempotencia (camino rápido), igual que en compras de divisa.
   if (client_withdrawal_id) {
     const existing = await findByClientId(db, req.userId, client_withdrawal_id);
-    if (existing.rows[0]) return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+    if (existing.rows[0]) {
+      const replay = replayResponse(existing.rows[0]);
+      return res.status(replay.status).json(replay.body);
+    }
   }
-
-  const account = await describeAccount(db, req);
-  const registerId = resolveRegisterId(req, requestedRegisterId);
 
   try {
     const inserted = await db.execute({
@@ -98,18 +123,16 @@ router.post('/', asyncHandler(async (req, res) => {
   } catch (err) {
     if (client_withdrawal_id && isUniqueViolation(err)) {
       const existing = await findByClientId(db, req.userId, client_withdrawal_id);
-      if (existing.rows[0]) return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
+      if (existing.rows[0]) {
+        const replay = replayResponse(existing.rows[0]);
+        return res.status(replay.status).json(replay.body);
+      }
     }
     throw err;
   }
 }));
 
 router.post('/:clientWithdrawalId/void', asyncHandler(async (req, res) => {
-  // No usamos requireOwner: devolvemos un mensaje diferente si no es dueño.
-  if (req.role !== OWNER) {
-    return res.status(403).json({ error: 'Solo el dueño puede extraer dinero' });
-  }
-
   const db = getDb();
   const { clientWithdrawalId } = req.params;
 
@@ -126,6 +149,12 @@ router.post('/:clientWithdrawalId/void', asyncHandler(async (req, res) => {
     }
 
     const row = withdrawal.rows[0];
+
+    // El cajero solo puede anular las suyas
+    if (req.role !== OWNER && Number(row.account_id) !== req.accountId) {
+      await tx.rollback();
+      return res.status(403).json({ error: 'Solo puedes anular tus propias salidas' });
+    }
 
     // Ya estaba anulada - idempotente
     if (row.voided_at) {

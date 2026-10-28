@@ -89,6 +89,86 @@ test('down-sync del escritorio', async (t) => {
     }
   });
 
+  await t.test('un estado remoto no cierra una venta local cuyo id colisiona y sin server_id', () => {
+    const ctx = startLocalDb();
+    try {
+      ownerSession();
+      const producto = crearProductoSincronizado(ctx.queries, { stock: 10 });
+      const pending = ctx.queries.createSaleLocal({ items: [{ product_id: producto.id, quantity: 1, unit_price: 100 }] });
+      const collisionId = Number(pending.id);
+      assert.ok(collisionId > 0);
+      assert.equal(ctx.db.prepare('SELECT server_id FROM sales WHERE id = ?').get(collisionId).server_id, null);
+
+      queries.applyServerDelta({ sales: [], sale_states: [{ id: collisionId, cash_close_id: 901, closed: 1 }],
+        cash_closes: [], inventory_counts: [], cursors: { sale: 0, sale_state: collisionId, close: 0, count: 0, close_correction: 0 }, has_more: false });
+
+      assert.equal(ctx.db.prepare('SELECT cash_close_id FROM sales WHERE id = ?').get(collisionId).cash_close_id, null,
+        'el estado solo se aplica a una fila que tenga ese server_id');
+      assert.equal(ctx.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE op_type = 'sale.create' AND status != 'synced'").get().n, 1,
+        'la operación local queda pendiente');
+    } finally {
+      ctx.close();
+    }
+  });
+
+  await t.test('estados remotos preservan ventas, compras y retiros de un cierre local pendiente', () => {
+    const ctx = startLocalDb();
+    try {
+      ownerSession();
+      const producto = crearProductoSincronizado(ctx.queries, { stock: 10 });
+      ctx.db.prepare("UPDATE outbox SET status = 'synced'").run();
+      const sale = ctx.queries.createSaleLocal({ items: [{ product_id: producto.id, quantity: 1, unit_price: 1000 }] });
+      const purchase = ctx.queries.createCurrencyPurchaseLocal({ foreign_currency: 'USD', foreign_amount: 1, exchange_rate: 350 });
+      const withdrawal = ctx.queries.createWithdrawalLocal({ method: 'efectivo', amount: 20, note: 'compra' });
+      ctx.db.prepare('UPDATE sales SET server_id = 501 WHERE id = ?').run(sale.id);
+      ctx.db.prepare('UPDATE currency_purchases SET server_id = 502 WHERE id = ?').run(purchase.id);
+      ctx.db.prepare('UPDATE cash_withdrawals SET server_id = 503 WHERE id = ?').run(withdrawal.id);
+      const close = ctx.queries.createCashCloseLocal({ opening_float: 0, counted_cash: 630 });
+      assert.ok(close.id > 0, 'el cierre offline usa su id AUTOINCREMENT positivo');
+
+      const delta = { sales: [], sale_states: [{ id: 501, cash_close_id: 900, closed: 1 }],
+        currency_purchases: [], purchase_states: [{ id: 502, cash_close_id: 900, closed: 1 }],
+        cash_withdrawals: [], withdrawal_states: [{ id: 503, cash_close_id: 900, voided_at: null, closed: 1, voided: 0 }],
+        cash_closes: [], inventory_counts: [], cursors: { sale: 0, sale_state: 501, purchase: 0,
+          purchase_state: 502, withdrawal: 0, withdrawal_state: 503, close: 0, count: 0,
+          correction: 0, close_correction: 0 }, has_more: false };
+      queries.applyServerDelta(delta);
+      for (const [table, row] of [['sales', sale], ['currency_purchases', purchase], ['cash_withdrawals', withdrawal]]) {
+        assert.equal(ctx.db.prepare(`SELECT cash_close_id FROM ${table} WHERE id = ?`).get(row.id).cash_close_id, close.id,
+          `${table} conserva el cierre local pendiente ante estados remotos`);
+      }
+
+      ctx.db.prepare('UPDATE sales SET cash_close_id = NULL WHERE id = ?').run(sale.id);
+      ctx.db.prepare('UPDATE currency_purchases SET cash_close_id = NULL WHERE id = ?').run(purchase.id);
+      ctx.db.prepare('UPDATE cash_withdrawals SET cash_close_id = NULL WHERE id = ?').run(withdrawal.id);
+      queries.applyServerDelta(delta);
+      for (const [table, row] of [['sales', sale], ['currency_purchases', purchase], ['cash_withdrawals', withdrawal]]) {
+        assert.equal(ctx.db.prepare(`SELECT cash_close_id FROM ${table} WHERE id = ?`).get(row.id).cash_close_id, close.id,
+          `${table} restaura su vínculo desde las referencias del outbox pendiente`);
+      }
+
+      ctx.db.prepare('UPDATE cash_closes SET server_id = 900 WHERE id = ?').run(close.id);
+      ctx.db.prepare("UPDATE outbox SET status = 'synced' WHERE op_type = 'cash_close.create' AND local_ref_id = ?").run(close.id);
+      queries.applyServerDelta(delta);
+      for (const [table, row] of [['sales', sale], ['currency_purchases', purchase], ['cash_withdrawals', withdrawal]]) {
+        assert.equal(ctx.db.prepare(`SELECT cash_close_id FROM ${table} WHERE id = ?`).get(row.id).cash_close_id, close.id,
+          `${table} mapea el cash_close_id remoto al cierre local conocido`);
+      }
+
+      queries.applyServerDelta({ ...delta,
+        sale_states: [{ id: 501, cash_close_id: null, closed: 0 }],
+        purchase_states: [{ id: 502, cash_close_id: null, closed: 0 }],
+        withdrawal_states: [{ id: 503, cash_close_id: null, voided_at: null, closed: 0, voided: 0 }],
+      });
+      for (const [table, row] of [['sales', sale], ['currency_purchases', purchase], ['cash_withdrawals', withdrawal]]) {
+        assert.equal(ctx.db.prepare(`SELECT cash_close_id FROM ${table} WHERE id = ?`).get(row.id).cash_close_id, null,
+          `${table} se reabre cuando el servidor elimina su vínculo confirmado`);
+      }
+    } finally {
+      ctx.close();
+    }
+  });
+
   await t.test('conserva la línea aunque el producto remoto no exista localmente', async () => {
     const ctx = startLocalDb();
     try {
@@ -220,6 +300,36 @@ test('down-sync del escritorio', async (t) => {
     }
   });
 
+  await t.test('al refrescar una venta existente aplica cierre del dueño y también reapertura', async () => {
+    const ctx = startLocalDb();
+    try {
+      ctx.queries.setSession({ user_id: 1, email: 'cajero@mitienda.cu', store_name: 'Tienda', plan: 'dev', token: 'token', role: 'cajero' });
+      const sale = { id: 72, client_sale_id: 'cached-sale', total: 100, payment_method: 'efectivo',
+        created_at: '2026-10-14 10:00:00', register_id: 'web:2', account_email: 'cajero@mitienda.cu',
+        cash_close_id: null, items: [] };
+      ctx.queries.applyServerDelta({ sales: [sale], cash_closes: [], inventory_counts: [],
+        currency_purchases: [], cash_withdrawals: [], cursors: { sale: 72 }, has_more: false });
+
+      let closed = true;
+      servidor = async (_method, path) => path === '/api/sync/snapshot'
+        ? { ok: true, status: 200, data: { sales: [{ ...sale, cash_close_id: closed ? 909 : null }],
+          cash_closes: [], currency_purchases: [], cash_withdrawals: [], purchase_states: [], withdrawal_states: [] } }
+        : path === '/api/products' ? catalog() : path === '/api/auth/me' ? me() : { ok: false, status: 404, data: null };
+      await syncOnce();
+      let row = ctx.db.prepare('SELECT cash_close_id FROM sales WHERE server_id = 72').get();
+      assert.notEqual(row.cash_close_id, null, 'la venta existente queda cerrada aunque no baje la fila del cierre');
+      assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, false);
+
+      closed = false;
+      await syncOnce();
+      row = ctx.db.prepare('SELECT cash_close_id FROM sales WHERE server_id = 72').get();
+      assert.equal(row.cash_close_id, null, 'una reapertura remota vuelve a abrir la venta');
+      assert.equal(ctx.queries.getCurrentCashPeriod().has_sales, true);
+    } finally {
+      ctx.close();
+    }
+  });
+
   await t.test('una página que la caja no puede aplicar queda informada, no en silencio', async () => {
     const ctx = startLocalDb();
     try {
@@ -249,8 +359,8 @@ test('down-sync del escritorio', async (t) => {
       ctx.queries.setSyncState('delta_after_count', 3);
       ctx.queries.setSyncState('delta_after_purchase', 9);
       ctx.queries.setSyncState('delta_after_correction', 4);
-      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, purchase: 9, withdrawal: 0, close: 7, count: 3, correction: 4, close_correction: 0 });
-      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, purchase: 0, withdrawal: 0, close: 0, count: 0, correction: 0, close_correction: 0 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(1), { sale: 50, sale_state: 0, purchase_state: 0, withdrawal_state: 0, purchase: 9, withdrawal: 0, close: 7, count: 3, correction: 4, close_correction: 0 });
+      assert.deepEqual(ctx.queries.prepareDeltaSession(2), { sale: 0, sale_state: 0, purchase_state: 0, withdrawal_state: 0, purchase: 0, withdrawal: 0, close: 0, count: 0, correction: 0, close_correction: 0 });
     } finally {
       ctx.close();
     }

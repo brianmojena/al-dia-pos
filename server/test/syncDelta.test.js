@@ -11,7 +11,7 @@ test('delta de sincronización', async (t) => {
     const empty = await ctx.api('GET', '/api/sync/delta?after_sale=0&after_close=0&after_count=0', { token });
     assert.equal(empty.status, 200);
     assert.deepEqual(empty.body.sales, []);
-    assert.deepEqual(empty.body.cursors, { correction: 0, close_correction: 0, sale: 0, close: 0, count: 0, purchase: 0, withdrawal: 0 });
+    assert.deepEqual(empty.body.cursors, { correction: 0, close_correction: 0, sale: 0, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0 });
     assert.equal(empty.body.has_more, false);
 
     const productId = await createProduct(ctx.api, token, { name: 'Pan', stock: 10, sale_price: 100 });
@@ -32,8 +32,13 @@ test('delta de sincronización', async (t) => {
     assert.equal(page.body.sales[0].register_id, 'web:1');
     assert.equal(page.body.has_more, true, 'una página llena pide confirmar la siguiente');
 
-    const next = await ctx.api('GET', `/api/sync/delta?after_sale=${page.body.cursors.sale}`, { token });
+    const close = await ctx.api('POST', '/api/cash-closes', { token, body: { opening_float: 0, counted_cash: 200 } });
+    assert.equal(close.status, 201);
+    await ctx.db.execute({ sql: 'UPDATE sales SET cash_close_id = ? WHERE id = ?', args: [close.body.id, sale.body.id] });
+
+    const next = await ctx.api('GET', `/api/sync/delta?after_sale=${page.body.cursors.sale}&after_sale_state=0`, { token });
     assert.deepEqual(next.body.sales, []);
+    assert.deepEqual(next.body.sale_states, [{ id: Number(sale.body.id), cash_close_id: Number(close.body.id), closed: 1 }]);
     assert.equal(next.body.cursors.sale, page.body.cursors.sale);
   });
 
@@ -49,6 +54,38 @@ test('delta de sincronización', async (t) => {
     assert.equal(delta.status, 200);
     assert.equal(delta.body.sales.length, 1);
     assert.equal(delta.body.sales[0].client_sale_id, 'new');
+  });
+
+  await t.test('max_bytes recorta páginas sin repetir ni saltar cursores de estado', async () => {
+    const token = await registerUser(ctx.api);
+    const productId = await createProduct(ctx.api, token, { name: 'Budget', stock: 30, sale_price: 10 });
+    const ids = [];
+    for (let i = 0; i < 18; i++) {
+      const created = await ctx.api('POST', '/api/sales', { token, body: {
+        client_sale_id: `budget-sale-${i}`,
+        items: [{ product_id: productId, quantity: 1, unit_price: 10 }],
+      } });
+      assert.equal(created.status, 201);
+      ids.push(Number(created.body.id));
+    }
+    const keys = ['sale', 'sale_state', 'close', 'count', 'purchase', 'purchase_state', 'withdrawal', 'withdrawal_state', 'correction', 'close_correction'];
+    let cursors = Object.fromEntries(keys.map((key) => [key, 0]));
+    const observed = new Set();
+    let pages = 0;
+    for (;;) {
+      const params = new URLSearchParams({ limit: '500', max_bytes: '3000', since: '' });
+      for (const key of keys) params.set(`after_${key}`, String(cursors[key]));
+      const page = await ctx.api('GET', `/api/sync/delta?${params}`, { token });
+      assert.equal(page.status, 200);
+      assert.ok(Buffer.byteLength(JSON.stringify(page.body)) <= 3000, 'cada página respeta el presupuesto');
+      for (const state of page.body.sale_states) observed.add(Number(state.id));
+      cursors = page.body.cursors;
+      pages++;
+      assert.ok(pages < 20, 'los cursores deben terminar');
+      if (!page.body.has_more) break;
+    }
+    assert.ok(pages > 1, 'el presupuesto forzó paginación');
+    assert.deepEqual([...observed].sort((a, b) => a - b), ids.sort((a, b) => a - b));
   });
 
   await t.test('tenant y permisos', async () => {

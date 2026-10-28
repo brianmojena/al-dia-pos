@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, Check, CheckCircle2, Copy, KeyRound, MonitorSmartphone, RefreshCw, ShieldCheck, Users } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
-import { installSharedDevice, getSharedDevice, refreshSharedEnrollment, hashPin } from '../lib/sharedDevice.js'
+import { installSharedDevice, getSharedDevice, refreshSharedEnrollment, hashPin, isOwnerPin, centralFields } from '../lib/sharedDevice.js'
 import { canReplaceSharedDevice } from '../lib/offlineClient.js'
 import { formatDateTime } from '../lib/dates'
 
@@ -33,6 +33,8 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
   const [rows,        setRows]        = useState({})
   const [name,        setName]        = useState('')
   const [continuous,  setContinuous]  = useState(false)
+  const [central,     setCentral]     = useState(false)
+  const [owner,       setOwner]       = useState({ name: '', pin: '', confirm: '' })
   const [showForm,    setShowForm]    = useState(!getSharedDevice())
   const [loading,     setLoading]     = useState(true)
   const [error,       setError]       = useState('')
@@ -71,6 +73,12 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
     if (!name.trim()) return 'Ponle un nombre a la caja (por ejemplo, "Tablet mostrador").'
     if (name.trim().length > 80) return 'El nombre de la caja es demasiado largo.'
     if (!selected.length) return 'Elige al menos un cajero autorizado.'
+    if (central) {
+      if (!owner.name.trim()) return 'Escribe el nombre visible del dueño.'
+      if (owner.name.trim().length > 60) return 'El nombre visible del dueño es demasiado largo.'
+      if (!isOwnerPin(owner.pin)) return 'El PIN del dueño debe tener exactamente 8 dígitos.'
+      if (owner.pin !== owner.confirm) return 'La confirmación del PIN del dueño no coincide.'
+    }
     for (const c of selected) {
       const row = rows[c.id]
       const label = row.display_name.trim() || c.email
@@ -102,12 +110,15 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
           name: name.trim(),
           continuous,
           cashiers: selected.map((c) => ({ id: c.id, display_name: rows[c.id].display_name.trim() })),
+          ...centralFields(central, owner.name),
         }),
       })
       const bundle = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(bundle.error || 'No se pudo crear la caja compartida')
 
       const pins = Object.fromEntries(selected.map((c) => [c.id, rows[c.id].pin]))
+      // El dueño es miembro con id = tienda; su PIN se usa solo para instalar aquí.
+      if (central) pins[shop.id] = owner.pin
       try {
         const finalGate = await canReplaceSharedDevice()
         if (!finalGate.allowed) throw new Error(finalGate.error)
@@ -142,9 +153,10 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
     try {
       const cashiers = []
       for (const c of selected) cashiers.push({ id: c.id, display_name: rows[c.id].display_name.trim(), pin: await hashPin(rows[c.id].pin) })
+      const ownerPin = central ? await hashPin(owner.pin) : null
       const res = await apiFetch('/api/admin/shared-devices', {
         method: 'POST',
-        body: JSON.stringify({ owner_id: shop.id, name: name.trim(), continuous, cashiers, enroll: true }),
+        body: JSON.stringify({ owner_id: shop.id, name: name.trim(), continuous, cashiers, enroll: true, ...centralFields(central, owner.name, ownerPin) }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || 'No se pudo generar el código de activación')
@@ -275,6 +287,7 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
               type="checkbox"
               checked={continuous}
               onChange={(e) => setContinuous(e.target.checked)}
+              disabled={central}
               className="mt-0.5 w-5 h-5 accent-[#007AFF]"
             />
             <span className="min-w-0">
@@ -288,6 +301,56 @@ export default function SharedDeviceSetup({ shop, onInstalled }) {
               </span>
             </span>
           </label>
+
+          <label className="flex items-start gap-3 bg-white border border-gray-200 rounded-2xl px-4 py-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={central}
+              onChange={(e) => { setCentral(e.target.checked); if (e.target.checked) setContinuous(true) }}
+              className="mt-0.5 w-5 h-5 accent-[#007AFF]"
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-gray-900">Caja centralizada (incluye al dueño)</span>
+              <span className="block text-xs text-gray-500 mt-0.5">
+                Un solo aparato para el dueño y los cajeros, cada uno con su PIN. Obliga a caja continua.
+              </span>
+            </span>
+          </label>
+
+          {central && (
+            <div className="bg-white border border-gray-100 rounded-2xl p-3 space-y-2">
+              <input
+                value={owner.name}
+                onChange={(e) => setOwner({ ...owner, name: e.target.value })}
+                placeholder="Nombre del dueño en el selector"
+                aria-label="Nombre visible del dueño"
+                maxLength={60}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  aria-label="PIN del dueño"
+                  value={owner.pin}
+                  onChange={(e) => setOwner({ ...owner, pin: e.target.value.replace(/\D/g, '').slice(0, 8) })}
+                  inputMode="numeric"
+                  placeholder="PIN (8 dígitos)"
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm tracking-widest focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+                />
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  aria-label="Confirmar PIN del dueño"
+                  value={owner.confirm}
+                  onChange={(e) => setOwner({ ...owner, confirm: e.target.value.replace(/\D/g, '').slice(0, 8) })}
+                  inputMode="numeric"
+                  placeholder="Repite el PIN"
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm tracking-widest focus:outline-none focus:border-[#007AFF] focus:ring-1 focus:ring-[#007AFF] transition-colors"
+                />
+              </div>
+            </div>
+          )}
 
           <div>
             <div className="flex items-center gap-2 mb-2">

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { withOperation } = require('../lib/clientOperations');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
 const { stockChangeStatement } = require('../lib/stockLog');
@@ -160,7 +161,7 @@ const optionalNumber = (value) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
-router.post('/import', requireOwner, asyncHandler(async (req, res) => {
+router.post('/import', requireOwner, asyncHandler((req, res) => withOperation(req, res, async (db, res) => {
   const { items } = req.body;
   const addStock = req.body.stock_mode === 'sumar';
   if (!Array.isArray(items) || items.length === 0) {
@@ -202,7 +203,6 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Hay filas con errores; no se importó nada', errors });
   }
 
-  const db = getDb();
   const account = await describeAccount(db, req);
   const existingResult = await db.execute({
     sql: 'SELECT id, name, stock, unit, track_stock FROM products WHERE user_id = ?',
@@ -278,7 +278,7 @@ router.post('/import', requireOwner, asyncHandler(async (req, res) => {
 
   await db.batch(statements, 'write');
   res.json({ created, updated, total: clean.length });
-}));
+})));
 
 router.put('/:id', asyncHandler(async (req, res) => {
   if (req.role !== 'dueño' && Object.keys(req.body).some((key) => !['sale_price', 'add_stock', 'operation_id'].includes(key))) {

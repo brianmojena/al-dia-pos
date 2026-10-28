@@ -36,3 +36,19 @@ test('el detalle confirmado de Caja renderiza su estado de carga real', async ()
     await vite.close()
   }
 })
+
+test('Caja.jsx contiene la sección de salidas de efectivo', async () => {
+  const fs = await import('fs')
+  const path = await import('path')
+
+  const filePath = path.resolve('src/pages/Caja.jsx')
+  const content = fs.readFileSync(filePath, 'utf-8')
+
+  // Verificar que se añadieron los elementos de salidas
+  assert.match(content, /Dinero que sacaste de la caja/, 'debe contener el título de sección de salidas')
+  assert.match(content, /Anotar salida de efectivo/, 'debe contener el botón para anotar salida')
+  assert.match(content, /handleWithdrawalSubmit/, 'debe contener el manejador de envío de salida')
+  assert.match(content, /handleVoidWithdrawal/, 'debe contener el manejador de anulación')
+  assert.match(content, /Salidas anotadas:/, 'debe mostrar el total de salidas anotadas')
+  assert.match(content, /!isOwner/, 'la sección solo debe mostrarse para cajeros, no dueños')
+})

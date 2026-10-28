@@ -1,8 +1,7 @@
 /**
  * Cruce de inventario con cierre de caja.
  *
- * Compara el último arqueo de inventario contra la diferencia de efectivo
- * del cierre para detectar ventas sin registrar o duplicadas.
+ * Compara un arqueo con el cierre y muestra los límites de esa evidencia.
  */
 
 const number = (value) => {
@@ -24,7 +23,10 @@ const abs = (value) => Math.abs(number(value));
  * @param {number} params.productsTotal - Productos con control de stock y existencias (los que el arqueo debía cubrir)
  * @returns {Object} { available, verdict, message, ...métricas }
  */
-export function evaluateCrossCheck({ close, count, items, productsTotal }) {
+export function evaluateCrossCheck({
+  close, count, items, productsTotal, adjustments = [], uncountedSoldProducts = [],
+  linkedSalesCount = 0, stockTrackingHistoryKnown = true,
+}) {
   if (!close || !count) {
     return {
       available: false,
@@ -64,12 +66,31 @@ export function evaluateCrossCheck({ close, count, items, productsTotal }) {
   value_missing = round2(value_missing);
   value_extra = round2(value_extra);
   const net_missing_value = round2(value_missing - value_extra);
+  const adjustmentsBeforeCount = adjustments.filter((row) => String(row.created_at) <= String(count.counted_at));
+  const adjustmentsAfterCount = adjustments.filter((row) => String(row.created_at) > String(count.counted_at));
+  const adjustmentUnits = (rows, sign) => round2(rows.reduce((total, row) => {
+    const delta = number(row.stock_after) - number(row.stock_before);
+    return total + (sign > 0 ? Math.max(delta, 0) : Math.max(-delta, 0));
+  }, 0));
 
   const cash_difference = number(close.difference);
   const minutes_before_close = Math.round(
     (new Date(close.closed_at) - new Date(count.counted_at)) / (1000 * 60)
   );
   const counted_by = count.account_email || null;
+  const closed_by = close.account_email || null;
+  const countedAfterClose = minutes_before_close < 0;
+  const timingUncertain = Number(linkedSalesCount) > 0 && minutes_before_close !== 0;
+  const limitations = [];
+  if (!stockTrackingHistoryKnown) {
+    limitations.push('no se conserva el historial de qué productos tenían control de stock; los omitidos se filtran por el estado actual');
+  }
+  if (countedAfterClose) {
+    limitations.push('el conteo se hizo después del cierre y puede incluir movimientos posteriores');
+  } else if (timingUncertain) {
+    limitations.push('el conteo y las ventas vinculadas al cierre no son simultáneos; las fechas offline no siempre reflejan el orden físico');
+  }
+  const limitationNote = limitations.length ? ` Limitación: ${limitations.join('; ')}.` : '';
   const count_id = count.id;
   const counted_at = count.counted_at;
 
@@ -80,31 +101,27 @@ export function evaluateCrossCheck({ close, count, items, productsTotal }) {
   if (coverage < 0.8 && productsTotal > 0) {
     verdict = 'parcial';
     const covered = Math.round(coverage * 100);
-    message = `El arqueo cubrió ${products_counted} de ${productsTotal} productos (${covered}%); no se puede concluir con tan poca cobertura.`;
-  } else if (units_missing === 0 && units_extra === 0) {
+    message = `El arqueo cubrió ${products_counted} de ${productsTotal} productos (${covered}%); no se puede concluir con tan poca cobertura.${limitationNote}`;
+  } else if (units_missing === 0 && units_extra === 0 && adjustments.length === 0
+      && uncountedSoldProducts.length === 0 && limitations.length === 0) {
     verdict = 'cuadra';
-    if (cash_difference < -0.5) {
-      message = 'El inventario cuadra con las ventas registradas: no hay ventas sin registrar ni duplicadas. La diferencia de caja viene del efectivo (vuelto, gastos sin anotar o conteo).';
-    } else {
-      message = 'El inventario cuadra con las ventas registradas.';
-    }
-  } else if (
-    cash_difference < -0.5
-    && net_missing_value > 0
-    && net_missing_value >= 0.6 * abs(cash_difference)
-    && net_missing_value <= 1.5 * abs(cash_difference)
-  ) {
-    verdict = 'respaldo';
-    const missingRounded = Math.round(net_missing_value);
-    const cashRounded = Math.round(abs(cash_difference));
-    message = `Faltan mercancías por ${missingRounded} CUP y el faltante de caja es ${cashRounded} CUP: probablemente hay ventas sin registrar.`;
+    message = 'Las líneas incluidas en el arqueo coinciden con el stock esperado. Esto no demuestra que no haya ventas duplicadas o sin registrar.';
+  } else if (units_missing === 0 && units_extra === 0) {
+    verdict = 'parcial';
+    const reasons = [];
+    if (adjustments.length) reasons.push(`${adjustments.length} ajuste(s) de stock desde el conteo anterior`);
+    if (uncountedSoldProducts.length) reasons.push(`${uncountedSoldProducts.length} producto(s) vendido(s) en el período sin línea contada`);
+    if (!reasons.length) reasons.push('el alcance temporal o del control de stock es incompleto');
+    message = `Las líneas contadas coinciden, pero el cruce es incierto: ${reasons.join(' y ')}. No permite concluir que no haya ventas duplicadas o sin registrar.${limitationNote}`;
   } else {
     verdict = 'diferencias';
     const unitsMissingRounded = Math.round(units_missing);
     const unitsExtraRounded = Math.round(units_extra);
     const netRounded = Math.round(net_missing_value);
     const cashRounded = Math.round(abs(cash_difference));
-    message = `El inventario tiene diferencias (${unitsMissingRounded} unidades faltan, ${unitsExtraRounded} sobran, valor neto ${netRounded} CUP) que no coinciden con la diferencia de caja de ${cashRounded} CUP; revisar ventas duplicadas, sin registrar o mercancía dañada o regalada.`;
+    const adjustmentNote = adjustments.length ? ` Hay ${adjustments.length} ajuste(s) de stock previos en el período.` : '';
+    const omittedNote = uncountedSoldProducts.length ? ` Hay ${uncountedSoldProducts.length} producto(s) vendido(s) sin línea contada.` : '';
+    message = `El arqueo tiene diferencias (${unitsMissingRounded} unidades faltan, ${unitsExtraRounded} sobran; valor neto de mercancía ${netRounded} CUP). La diferencia de caja es ${cashRounded} CUP; la coincidencia de valores no demuestra una causa ni ventas duplicadas o sin registrar.${adjustmentNote}${omittedNote}${limitationNote}`;
   }
 
   return {
@@ -121,6 +138,22 @@ export function evaluateCrossCheck({ close, count, items, productsTotal }) {
     cash_difference,
     minutes_before_close,
     counted_by,
+    closed_by,
+    linked_sales_count: Number(linkedSalesCount) || 0,
+    counted_after_close: countedAfterClose,
+    timing_uncertain: timingUncertain,
+    stock_tracking_history_known: stockTrackingHistoryKnown,
+    uncounted_sold_products: uncountedSoldProducts.map((row) => ({
+      product_id: row.product_id,
+      product_name: row.product_name,
+      quantity_sold: number(row.quantity_sold),
+    })),
+    uncounted_sold_products_count: uncountedSoldProducts.length,
+    stock_adjustments_count: adjustments.length,
+    stock_adjustments_before_count: adjustmentsBeforeCount.length,
+    stock_adjustments_after_count: adjustmentsAfterCount.length,
+    stock_adjustment_units_in: adjustmentUnits(adjustments, 1),
+    stock_adjustment_units_out: adjustmentUnits(adjustments, -1),
     count_id,
     counted_at,
   };
@@ -170,17 +203,74 @@ export async function computeInventoryCrossCheck(db, close) {
 
   const items = itemsResult.rows || [];
 
-  // El arqueo solo lista los productos con existencias: uno en cero no hay
-  // nada que contar. La cobertura se mide contra los que tienen stock (o ya
-  // entraron en este arqueo), no contra todo el catálogo.
+  // No usar stock actual para reconstruir un cierre histórico: una existencia
+  // actual de cero no elimina productos que debieron entrar en aquel conteo.
   const productsResult = await db.execute({
-    sql: `SELECT COUNT(*) AS n FROM products
-           WHERE user_id = ? AND track_stock = 1
-             AND (stock > 0 OR id IN (SELECT product_id FROM inventory_count_items WHERE count_id = ?))`,
-    args: [userId, count.id],
+    sql: `SELECT COUNT(DISTINCT product_id) AS n FROM (
+            SELECT p.id AS product_id FROM products p
+             WHERE p.user_id = ? AND p.track_stock = 1
+               AND datetime(p.created_at) <= datetime(?)
+            UNION SELECT product_id FROM inventory_count_items WHERE count_id = ?
+            UNION SELECT si.product_id FROM sale_items si
+              JOIN sales s ON s.id = si.sale_id
+              JOIN products p ON p.id = si.product_id AND p.user_id = s.user_id AND p.track_stock = 1
+             WHERE s.user_id = ? AND si.product_id IS NOT NULL
+               AND s.cash_close_id = ?
+          )`,
+    args: [userId, count.counted_at, count.id, userId, close.id],
   });
 
   const productsTotal = Number(productsResult.rows?.[0]?.n) || 0;
 
-  return evaluateCrossCheck({ close, count, items, productsTotal });
+  const previousCountResult = await db.execute({
+    sql: `SELECT counted_at FROM inventory_counts
+           WHERE user_id = ? AND (counted_at < ? OR (counted_at = ? AND id < ?))
+           ORDER BY counted_at DESC, id DESC LIMIT 1`,
+    args: [userId, count.counted_at, count.counted_at, count.id],
+  });
+  const previousCountAt = previousCountResult.rows?.[0]?.counted_at || close.opened_at || count.counted_at;
+  const adjustmentPeriodEnd = String(count.counted_at) > String(close.closed_at)
+    ? count.counted_at : close.closed_at;
+
+  const adjustmentsResult = await db.execute({
+    sql: `SELECT id, product_id, product_name, stock_before, stock_after, created_at
+            FROM stock_entries
+           WHERE user_id = ? AND kind = 'correccion'
+             AND datetime(created_at) >= datetime(?)
+             AND datetime(created_at) <= datetime(?)
+           ORDER BY created_at ASC, id ASC`,
+    args: [userId, previousCountAt, adjustmentPeriodEnd],
+  });
+
+  const linkedSalesResult = await db.execute({
+    sql: 'SELECT COUNT(*) AS n FROM sales WHERE user_id = ? AND cash_close_id = ?',
+    args: [userId, close.id],
+  });
+
+  const uncountedSoldResult = await db.execute({
+    sql: `SELECT si.product_id, MAX(si.product_name) AS product_name,
+                 SUM(si.quantity * COALESCE(si.pack_size, 1)) AS quantity_sold
+            FROM sale_items si JOIN sales s ON s.id = si.sale_id
+            JOIN products p ON p.id = si.product_id AND p.user_id = s.user_id AND p.track_stock = 1
+           WHERE s.user_id = ? AND s.cash_close_id = ?
+             AND si.product_id IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM inventory_count_items ici
+                WHERE ici.count_id = ? AND ici.product_id = si.product_id
+             )
+           GROUP BY si.product_id ORDER BY product_name COLLATE NOCASE`,
+    args: [userId, close.id, count.id],
+  });
+
+  return evaluateCrossCheck({
+    close,
+    count,
+    items,
+    productsTotal,
+    adjustments: adjustmentsResult.rows || [],
+    uncountedSoldProducts: uncountedSoldResult.rows || [],
+    linkedSalesCount: Number(linkedSalesResult.rows?.[0]?.n) || 0,
+    // products.track_stock se conserva solo en su estado actual, sin historial.
+    stockTrackingHistoryKnown: false,
+  });
 }

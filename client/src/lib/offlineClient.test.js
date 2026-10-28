@@ -82,23 +82,27 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
       account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null,
       total: 300, payment_method: 'efectivo', created_at: '2026-10-14 10:00:00',
       profit: 250, items: [{ id: 1, product_name: 'Pan', quantity: 1, unit_price: 300, unit_cost: 50 }] };
-    seedState(key, { base: { ...emptyData(), cash_close_coverage_version: 1, products: [], sales: [syncedSale] }, outbox: [], initialized: true, nextId: -1 });
+    seedState(key, { base: { ...emptyData(), cash_close_coverage_version: 1, products: [], sales: [syncedSale],
+      cash_withdrawals: [{ id: 61, client_withdrawal_id: 'synced-withdrawal', account_id: 2, account_email: 'cajero@test.local',
+        register_id: 'web:2', cash_close_id: null, voided_at: null, method: 'efectivo', amount: 0, created_at: '2026-10-14 09:00:00' }] }, outbox: [], initialized: true, nextId: -1 });
     const saved = await write('/api/cash-closes', { client_close_id: 'offline-cash-close', register_id: 'web', opening_float: 1000, counted_cash: 1300 });
     assert.equal(saved.status, 202);
     const provisional = await saved.json();
     assert.equal(provisional.expected_cash, 1300);
     assert.equal(provisional.difference, 0);
     assert.deepEqual(stateAt(key).outbox[0].body.covered_sale_ids, [51]);
+    assert.deepEqual(stateAt(key).outbox[0].withdrawalIds, [61]);
 
     navigator.onLine = true;
     const confirmed = { ...provisional, id: 80, pending: false, expected_cash: 1300, difference: 0, sales_count: 1 };
     const laterSale = { id: 52, client_sale_id: 'arrived-after-count', account_id: 2,
       account_email: 'cajero@test.local', register_id: 'web:2', cash_close_id: null,
       total: 75, payment_method: 'efectivo', created_at: '2026-10-14 10:05:00', items: [] };
-    let uploadedCoverage;
+    let uploadedCoverage, uploadedWithdrawalCoverage;
     globalThis.fetch = async (path, options = {}) => {
       if (path === '/api/cash-closes') {
         uploadedCoverage = JSON.parse(options.body).covered_sale_ids;
+        uploadedWithdrawalCoverage = JSON.parse(options.body).covered_withdrawal_ids;
         return jsonResponse(confirmed);
       }
       assert.ok(path.startsWith('/api/sync/snapshot'));
@@ -106,6 +110,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     };
     await syncOffline();
     assert.deepEqual(uploadedCoverage, [51], 'la venta llegada tras el conteo queda fuera del cierre');
+    assert.deepEqual(uploadedWithdrawalCoverage, [61], 'el servidor recibe la cobertura exacta de retiros del conteo');
     assert.equal((await localSyncStatus()).pending, 0);
     const history = await (await apiFetch('/api/cash-closes')).json();
     assert.equal(history[0].client_close_id, 'offline-cash-close');
@@ -251,16 +256,16 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
       assert.equal(url.searchParams.get('max_bytes'), String(512 * 1024))
       pages++
       if (pages === 1) {
-        for (const key of ['after_sale', 'after_close', 'after_count', 'after_purchase', 'after_withdrawal', 'after_correction', 'after_close_correction']) assert.equal(url.searchParams.get(key), '0')
+        for (const key of ['after_sale', 'after_sale_state', 'after_close', 'after_count', 'after_purchase', 'after_purchase_state', 'after_withdrawal', 'after_withdrawal_state', 'after_correction', 'after_close_correction']) assert.equal(url.searchParams.get(key), '0')
         return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 19, sale_price: 10, purchase_price: 6 }], sales: [sale],
-          cursors: { sale: 100, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 }, has_more: true })
+          cursors: { sale: 100, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 0, close_correction: 0 }, has_more: true })
       }
       assert.equal(url.searchParams.get('after_sale'), '100')
       assert.equal(url.searchParams.get('after_correction'), '0')
       return jsonResponse({ ...emptyData(), products: [{ id: 10, name: 'Pan 1', stock: 19, sale_price: 10, purchase_price: 6 }],
         cash_closes: [{ id: 80, client_close_id: 'cloud-close', covered_sale_ids: [100] }],
         sale_corrections: [{ sale_id: 100, sale: null, client_sale_id: 'cloud-sale' }],
-        cursors: { sale: 100, close: 80, count: 0, purchase: 0, withdrawal: 0, correction: 1, close_correction: 0 }, has_more: false })
+        cursors: { sale: 100, sale_state: 0, close: 80, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 1, close_correction: 0 }, has_more: false })
     }
     await syncOffline()
     assert.equal(pages, 2)
@@ -268,7 +273,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     assert.equal(state.base.products[0].stock, 19)
     assert.equal(state.base.sales.length, 0, 'la anulación descargada elimina la venta local')
     assert.equal(state.base.cash_closes[0].id, 80)
-    assert.deepEqual(state.cursors, { sale: 100, close: 80, count: 0, purchase: 0, withdrawal: 0, correction: 1, close_correction: 0 })
+    assert.deepEqual(state.cursors, { sale: 100, sale_state: 0, close: 80, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 1, close_correction: 0 })
     assert.match(calls[0], /after_sale=0/)
     assert.match(calls[1], /after_sale=100/)
   })
@@ -606,13 +611,13 @@ test('una instalación anterior completa una última carga entera y luego usa cu
     return jsonResponse({
       ...emptyData(), products: [{ id: 10, name: 'Pan', stock: 20, sale_price: 10, purchase_price: 6 }],
       sales: [{ id: 700, client_sale_id: 'legacy-sale', total: 50, payment_method: 'efectivo', created_at: '2024-01-01T12:00:00Z', items: [] }],
-      cursors: { sale: 700, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 },
+      cursors: { sale: 700, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 0, close_correction: 0 },
       has_more: false,
     })
   }
   await syncOffline()
   assert.equal(new URL(urls[0], 'http://local').searchParams.get('since'), null, 'la base existente no se recorta en la actualización')
-  assert.deepEqual(stateAt(key).cursors, { sale: 700, close: 0, count: 0, purchase: 0, withdrawal: 0, correction: 0, close_correction: 0 })
+  assert.deepEqual(stateAt(key).cursors, { sale: 700, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 0, close_correction: 0 })
   urls.length = 0
   await syncOffline()
   assert.equal(new URL(urls[0], 'http://local').searchParams.get('after_sale'), '700')

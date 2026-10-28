@@ -7,6 +7,7 @@ const numberParam = (value, fallback = 0) => {
   const n = Number(value);
   return Number.isInteger(n) && n >= 0 ? n : fallback;
 };
+const byteSize = (value) => Buffer.byteLength(JSON.stringify(value));
 
 const loadItems = async (db, table, foreignKey, ids) => {
   if (ids.length === 0) return [];
@@ -30,14 +31,19 @@ const attachItems = (rows, items, key, itemKey) => {
 
 router.get('/delta', asyncHandler(async (req, res) => {
   const afterSale = numberParam(req.query.after_sale);
+  const afterSaleState = numberParam(req.query.after_sale_state);
   const afterClose = numberParam(req.query.after_close);
   const afterCount = numberParam(req.query.after_count);
   const afterPurchase = numberParam(req.query.after_purchase);
+  const afterPurchaseState = numberParam(req.query.after_purchase_state);
   const afterWithdrawal = numberParam(req.query.after_withdrawal);
+  const afterWithdrawalState = numberParam(req.query.after_withdrawal_state);
   const afterCorrection = numberParam(req.query.after_correction);
   const afterCloseCorrection = numberParam(req.query.after_close_correction);
   const rawLimit = numberParam(req.query.limit, 500);
   const limit = Math.min(rawLimit || 500, 500);
+  const rawMaxBytes = numberParam(req.query.max_bytes, 512 * 1024);
+  const maxBytes = Math.min(rawMaxBytes || 512 * 1024, 2 * 1024 * 1024);
   const since = typeof req.query.since === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
     ? req.query.since : null;
   const db = getDb();
@@ -50,6 +56,11 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterSale, since, limit] : [req.userId, afterSale, limit],
   });
+  const saleStates = 'after_sale_state' in req.query ? (await db.execute({
+    sql: `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM sales WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+    args: [req.userId, afterSaleState, limit],
+  })).rows : [];
   const closes = await db.execute({
     sql: `SELECT * FROM cash_closes WHERE user_id = ? AND id > ?
             ${since ? 'AND closed_at >= ?' : ''}
@@ -69,6 +80,11 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
   });
+  const purchaseStates = 'after_purchase_state' in req.query ? (await db.execute({
+    sql: `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM currency_purchases WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+    args: [req.userId, afterPurchaseState, limit],
+  })).rows : [];
 
   // Las extracciones nuevas avanzan por cursor. Las que siguen abiertas y ya
   // estaban antes del cursor se mandan aparte, como recordatorio: así una
@@ -80,6 +96,13 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterWithdrawal, since, limit] : [req.userId, afterWithdrawal, limit],
   });
+  const withdrawalStates = 'after_withdrawal_state' in req.query ? (await db.execute({
+    sql: `SELECT id, cash_close_id, voided_at,
+                 CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed,
+                 CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided
+          FROM cash_withdrawals WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+    args: [req.userId, afterWithdrawalState, limit],
+  })).rows : [];
   const openWithdrawals = await db.execute({
     sql: `SELECT * FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND id <= ?
           ORDER BY id DESC LIMIT 200`,
@@ -170,27 +193,60 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const countRows = attachItems(counts.rows, countItems, 'id', 'count_id');
   const last = (rows, cursor) => rows.length ? Number(rows[rows.length - 1].id) : cursor;
 
-  res.json({
+  const payload = {
     sales: saleRows,
+    sale_states: saleStates,
     cash_closes: closeRows,
     inventory_counts: countRows,
     currency_purchases: purchases.rows,
+    purchase_states: purchaseStates,
     cash_withdrawals: allWithdrawals,
+    withdrawal_states: withdrawalStates,
     sale_corrections: correctionRows,
     cash_close_corrections: closeCorrectionRows,
     cursors: {
       correction: last(corrections, afterCorrection),
       close_correction: last(closeCorrections, afterCloseCorrection),
       purchase: last(purchases.rows, afterPurchase),
+      purchase_state: last(purchaseStates, afterPurchaseState),
       withdrawal: last(withdrawals.rows, afterWithdrawal),
+      withdrawal_state: last(withdrawalStates, afterWithdrawalState),
       sale: last(sales.rows, afterSale),
+      sale_state: last(saleStates, afterSaleState),
       close: last(closes.rows, afterClose),
       count: last(counts.rows, afterCount),
     },
-    has_more: sales.rows.length === limit || closes.rows.length === limit || counts.rows.length === limit
+    has_more: sales.rows.length === limit || saleStates.length === limit || closes.rows.length === limit || counts.rows.length === limit
+      || purchaseStates.length === limit || withdrawalStates.length === limit
       || purchases.rows.length === limit || withdrawals.rows.length === limit
       || corrections.length === limit || closeCorrections.length === limit,
-  });
+  };
+  const pageArrays = ['sales', 'sale_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
+    'purchase_states', 'cash_withdrawals', 'withdrawal_states', 'sale_corrections', 'cash_close_corrections'];
+  const wasTrimmed = new Set();
+  while (byteSize(payload) > maxBytes) {
+    const key = pageArrays.filter((name) => payload[name].length > 1)
+      .map((name) => ({ name, size: byteSize(payload[name]) }))
+      .sort((a, b) => b.size - a.size)[0]?.name;
+    if (!key) break;
+    payload[key].pop();
+    wasTrimmed.add(key);
+  }
+  const cursorFor = (rows, old) => rows.length ? Number(rows[rows.length - 1].id) : old;
+  for (const [key, cursor, after] of [
+    ['sales', 'sale', afterSale], ['sale_states', 'sale_state', afterSaleState],
+    ['cash_closes', 'close', afterClose], ['inventory_counts', 'count', afterCount],
+    ['currency_purchases', 'purchase', afterPurchase], ['purchase_states', 'purchase_state', afterPurchaseState],
+    ['withdrawal_states', 'withdrawal_state', afterWithdrawalState],
+    ['sale_corrections', 'correction', afterCorrection], ['cash_close_corrections', 'close_correction', afterCloseCorrection],
+  ]) if (wasTrimmed.has(key)) payload.cursors[cursor] = cursorFor(payload[key], after);
+  if (wasTrimmed.has('cash_withdrawals')) {
+    const includedNew = payload.cash_withdrawals.filter((row) => Number(row.id) > afterWithdrawal);
+    payload.cursors.withdrawal = cursorFor(includedNew, afterWithdrawal);
+    if (includedNew.length < withdrawals.rows.length) payload.has_more = true;
+  }
+  if ([...wasTrimmed].some((key) => key !== 'cash_withdrawals')) payload.has_more = true;
+  res.json(payload);
 }));
 
 module.exports = router;

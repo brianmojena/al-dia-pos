@@ -21,7 +21,7 @@ router.get('/shops/:ownerId/cashiers', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { owner_id, name, cashiers, continuous = false } = req.body;
+  const { owner_id, name, cashiers, continuous = false, central = false, owner: ownerMember } = req.body;
   const ownerId = Number(owner_id);
   // enroll=true: no se instala en este navegador; se devuelve un código de un
   // solo uso para activar la caja en otro aparato (ver routes/sharedEnroll.js).
@@ -30,8 +30,17 @@ router.post('/', asyncHandler(async (req, res) => {
     || typeof continuous !== 'boolean' || !Array.isArray(cashiers) || !cashiers.length || cashiers.length > 20
     || cashiers.some((c) => !Number.isInteger(c?.id) || c.id <= 0 || typeof c.display_name !== 'string' || !c.display_name.trim() || c.display_name.trim().length > 60)
     || new Set(cashiers.map((c) => c.id)).size !== cashiers.length) return res.status(400).json({ error: 'Nombre, modalidad o cajeros inválidos' });
+  // Caja centralizada: un solo aparato con el dueño dentro. Exige caja continua
+  // (un solo arqueo) y un miembro «owner». Un miembro dueño NUNCA se acepta en
+  // un aparato no central. El PIN del dueño (8 dígitos) viaja ya derivado, así
+  // que su longitud solo puede validarse en el cliente del administrador.
+  if (typeof central !== 'boolean' || (central && !continuous) || (central !== (ownerMember != null))
+    || (central && (typeof ownerMember?.display_name !== 'string' || !ownerMember.display_name.trim() || ownerMember.display_name.trim().length > 60))) {
+    return res.status(400).json({ error: 'Caja centralizada inválida: requiere caja continua y un dueño' });
+  }
   if (req.body.enroll !== undefined && typeof req.body.enroll !== 'boolean') return res.status(400).json({ error: 'Modo de activación inválido' });
   // La activación remota exige el PIN ya cifrado: el servidor nunca lo ve en claro.
+  if (enroll && central && !validPin(ownerMember.pin)) return res.status(400).json({ error: 'El dueño necesita un PIN cifrado para generar el código' });
   if (enroll && cashiers.some((c) => !validPin(c.pin))) return res.status(400).json({ error: 'Cada cajero necesita un PIN cifrado para generar el código' });
   const db = getDb();
   const code = enroll ? generateEnrollCode() : null;
@@ -44,12 +53,16 @@ router.post('/', asyncHandler(async (req, res) => {
     const marks = cashiers.map(() => '?').join(',');
     const members = (await tx.execute({ sql: `SELECT id FROM users WHERE owner_id = ? AND role = 'cajero' AND id IN (${marks})`, args: [ownerId, ...cashiers.map((c) => c.id)] })).rows;
     if (members.length !== cashiers.length) { await tx.rollback(); return res.status(400).json({ error: 'Todos los cajeros deben pertenecer a esta tienda' }); }
-    device = { id: randomUUID(), owner_id: ownerId, name: name.trim(), continuous: continuous ? 1 : 0, version: 1, active: 1, expires_at: new Date(Date.now() + DURATION_MS).toISOString() };
+    if (central && !enroll && (await tx.execute({ sql: 'SELECT 1 FROM shared_devices WHERE owner_id = ? AND active = 1 AND central = 1', args: [ownerId] })).rows.length) {
+      await tx.rollback(); return res.status(409).json({ error: 'Esta tienda ya tiene una caja centralizada activa' });
+    }
+    device = { id: randomUUID(), owner_id: ownerId, name: name.trim(), continuous: continuous ? 1 : 0, central: central ? 1 : 0, version: 1, active: 1, expires_at: new Date(Date.now() + DURATION_MS).toISOString() };
     // Una tienda tiene una sola caja compartida activa: al activar una nueva,
     // la anterior queda retirada para que sus accesos dejen de valer.
     if (enroll) await tx.execute({ sql: 'UPDATE shared_devices SET active = 0 WHERE owner_id = ? AND active = 1', args: [ownerId] });
-    await tx.execute({ sql: 'INSERT INTO shared_devices (id, owner_id, name, continuous, version, active, expires_at, created_by, enroll_code_hash, enroll_expires_at, enroll_used) VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?, ?, 0)', args: [device.id, ownerId, device.name, device.continuous, device.expires_at, req.accountId, enroll ? hashEnrollCode(code) : null, enrollExpiresAt] });
+    await tx.execute({ sql: 'INSERT INTO shared_devices (id, owner_id, name, continuous, central, version, active, expires_at, created_by, enroll_code_hash, enroll_expires_at, enroll_used) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, 0)', args: [device.id, ownerId, device.name, device.continuous, device.central, device.expires_at, req.accountId, enroll ? hashEnrollCode(code) : null, enrollExpiresAt] });
     for (const member of cashiers) await tx.execute({ sql: 'INSERT INTO shared_device_cashiers (device_id, account_id, display_name, pin_salt, pin_hash, pin_iterations) VALUES (?, ?, ?, ?, ?, ?)', args: [device.id, member.id, member.display_name.trim(), enroll ? member.pin.salt : null, enroll ? member.pin.hash : null, enroll ? member.pin.iterations : null] });
+    if (central) await tx.execute({ sql: "INSERT INTO shared_device_cashiers (device_id, account_id, display_name, member_role, pin_salt, pin_hash, pin_iterations) VALUES (?, ?, ?, 'dueño', ?, ?, ?)", args: [device.id, ownerId, ownerMember.display_name.trim(), enroll ? ownerMember.pin.salt : null, enroll ? ownerMember.pin.hash : null, enroll ? ownerMember.pin.iterations : null] });
     await tx.commit();
   } catch (error) { await tx.rollback().catch(() => {}); throw error; }
   if (enroll) return res.status(201).json({ code, code_expires_at: enrollExpiresAt, device: publicDevice(device) });

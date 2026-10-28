@@ -123,11 +123,49 @@ export function applyChanges(base, page) {
   if (page.current_period !== undefined) base.current_period = page.current_period
   if (page.current_periods !== undefined) base.current_periods = page.current_periods
   if (page.shared_device !== undefined) base.shared_device = page.shared_device
+  const reconcileState = (key, states, { withdrawal = false } = {}) => {
+    if (!Array.isArray(states) || !states.length) return
+    copy(key)
+    for (const state of states) {
+      const row = base[key].find((entry) => Number(entry.id) === Number(state.id))
+      if (!row) continue
+      // Prefer the real close link; older servers only send the closed bit.
+      // A pending local close remains authoritative until its outbox is acked.
+      if (Object.hasOwn(state, 'cash_close_id')) {
+        if (!(Number(row.cash_close_id) < 0)) row.cash_close_id = state.cash_close_id
+        delete row.server_closed
+      } else {
+        row.server_closed = Number(state.closed) === 1
+      }
+      if (withdrawal) {
+        if (Object.hasOwn(state, 'voided_at')) row.voided_at = state.voided_at
+        else row.server_voided = Number(state.voided) === 1
+      }
+    }
+  }
   if (Array.isArray(page.rejected_sales)) base.rejected_sales = page.rejected_sales
   if (page.sales?.length) { copy('sales'); for (const sale of page.sales) upsert(base.sales, sale, 'client_sale_id') }
   if (page.inventory_counts?.length) { copy('inventory_counts'); for (const count of page.inventory_counts) upsert(base.inventory_counts, count, 'client_count_id') }
   if (page.currency_purchases?.length) { copy('currency_purchases'); for (const purchase of page.currency_purchases) upsert(base.currency_purchases, purchase, 'client_purchase_id') }
   if (page.cash_withdrawals?.length) { copy('cash_withdrawals'); for (const withdrawal of page.cash_withdrawals) upsert(base.cash_withdrawals, withdrawal, 'client_withdrawal_id') }
+  for (const [key, rows, withdrawal = false] of [
+    ['sales', page.sales, false], ['currency_purchases', page.currency_purchases, false], ['cash_withdrawals', page.cash_withdrawals, true],
+  ]) for (const incoming of rows || []) {
+    const row = base[key].find((entry) => Number(entry.id) === Number(incoming.id)
+      || (incoming.client_sale_id && entry.client_sale_id === incoming.client_sale_id)
+      || (incoming.client_purchase_id && entry.client_purchase_id === incoming.client_purchase_id)
+      || (incoming.client_withdrawal_id && entry.client_withdrawal_id === incoming.client_withdrawal_id))
+    if (!row || !Object.hasOwn(incoming, 'cash_close_id')) continue
+    if (!(Number(row.cash_close_id) < 0)) row.cash_close_id = incoming.cash_close_id
+    delete row.server_closed
+    if (withdrawal) {
+      row.voided_at = incoming.voided_at ?? null
+      delete row.server_voided
+    }
+  }
+  reconcileState('sales', page.sale_states)
+  reconcileState('currency_purchases', page.purchase_states)
+  reconcileState('cash_withdrawals', page.withdrawal_states, { withdrawal: true })
   const covered = { sales: new Map(), currency_purchases: new Map(), cash_withdrawals: new Map() }
   if (page.cash_closes?.length) {
     copy('cash_closes')
@@ -233,11 +271,34 @@ const productById = (data, id) => {
   assert(p, 'Producto no encontrado')
   return p
 }
-export function openSales(data, account, wholeShop = false) {
-  return data.sales.filter((s) => s.cash_close_id == null && (wholeShop || (!data.shared_device && !s.register_id) || s.register_id === registerFor(account, data.shared_device)))
+export function openSales(data, account, wholeShop = false, email = null) {
+  const accountId = Number(account.split(':')[1])
+  const belongsToAccount = (row) => Number(row.account_id) === accountId
+    || (row.account_id == null && email && row.account_email === email)
+  const scoped = (row) => wholeShop || (data.shared_device
+    ? row.register_id === registerFor(account, data.shared_device)
+    : belongsToAccount(row) && (row.register_id === registerFor(account) || row.register_id == null))
+  return data.sales.filter((s) => s.cash_close_id == null && !s.server_closed && scoped(s))
 }
-export function openPurchases(data, account, wholeShop = false) {
-  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && (wholeShop || (!data.shared_device && !p.register_id) || p.register_id === registerFor(account, data.shared_device)))
+export function openPurchases(data, account, wholeShop = false, email = null) {
+  const accountId = Number(account.split(':')[1])
+  const belongsToAccount = (row) => Number(row.account_id) === accountId
+    || (row.account_id == null && email && row.account_email === email)
+  const scoped = (row) => wholeShop || (data.shared_device
+    ? row.register_id === registerFor(account, data.shared_device)
+    : belongsToAccount(row) && (row.register_id === registerFor(account) || row.register_id == null))
+  return (data.currency_purchases || []).filter((p) => p.cash_close_id == null && !p.server_closed && scoped(p))
+}
+export function openWithdrawals(data, account, wholeShop = false, email = null) {
+  const accountId = Number(account.split(':')[1])
+  const register = registerFor(account, data.shared_device)
+  return (data.cash_withdrawals || []).filter((w) => {
+    if (w.cash_close_id != null || w.voided_at != null || w.server_closed || w.server_voided) return false
+    if (wholeShop) return true
+    if (data.shared_device) return w.register_id === register
+    const ownAccount = Number(w.account_id) === accountId || (w.account_id == null && email && w.account_email === email)
+    return w.register_id === register || (w.register_id == null && ownAccount)
+  })
 }
 export function prepareOperation(data, method, path, body, ctx) {
   const owner = ctx.user.role !== 'cajero'
@@ -371,8 +432,14 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), cup_amount: purchaseCup(op.body.foreign_amount, op.body.exchange_rate), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, pending: true }
   } else if (path === '/api/cash-withdrawals') {
-    assert(owner, 'Solo el dueño puede extraer dinero')
     op.kind = 'withdrawal'
+    if (!owner) {
+      // Cajeros: solo efectivo y con nota obligatoria
+      assert(body.method === 'efectivo', 'Los cajeros solo pueden sacar efectivo')
+      const note = body.note == null ? null : String(body.note).trim()
+      assert(note && note.length >= 3, 'Escribe para qué fue el dinero')
+      body.note = note
+    }
     op.body.client_withdrawal_id ||= ctx.newId()
     const existing = (data.cash_withdrawals || []).find((w) => w.client_withdrawal_id === op.body.client_withdrawal_id)
     if (existing) return { ...op, kind: 'noop', result: existing }
@@ -384,13 +451,17 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, voided_at: null, pending: true }
   } else if (/^\/api\/cash-withdrawals\/[\w-]+\/void$/.test(path)) {
-    assert(owner, 'Solo el dueño puede anular extracciones')
     op.kind = 'withdrawal_void'
     const withdrawalId = path.split('/')[3]
     const withdrawal = (data.cash_withdrawals || []).find((w) => w.client_withdrawal_id === withdrawalId)
     assert(withdrawal, 'Extracción no encontrada')
     if (withdrawal.voided_at) return { ...op, kind: 'noop', result: { ...withdrawal, voided_at: withdrawal.voided_at } }
     assert(withdrawal.cash_close_id == null, 'Esta extracción ya entró en un cierre de caja y no se puede anular')
+    if (!owner) {
+      // Cajero: solo puede anular las suyas
+      const accountId = Number(ctx.account.split(':')[1])
+      assert(Number(withdrawal.account_id) === accountId, 'Solo puedes anular tus propias salidas')
+    }
     op.withdrawal_id = withdrawalId
     op.result = { ...withdrawal, voided_at: now }
   } else if (path === '/api/inventory-counts') {
@@ -415,9 +486,9 @@ export function prepareOperation(data, method, path, body, ctx) {
     if (existing) return { ...op, kind: 'noop', result: existing }
     assert(number(body.counted_cash) && number(body.opening_float ?? 0), 'El efectivo debe ser mayor o igual a 0')
     assert(number(body.counted_usd ?? 0) && number(body.counted_eur ?? 0), 'Los dólares o euros contados no son válidos')
-    const covered = openSales(data, ctx.account, owner)
-    const coveredPurchases = openPurchases(data, ctx.account, owner)
-    const coveredWithdrawals = (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)
+    const covered = openSales(data, ctx.account, owner, ctx.user.email)
+    const coveredPurchases = openPurchases(data, ctx.account, owner, ctx.user.email)
+    const coveredWithdrawals = openWithdrawals(data, ctx.account, owner, ctx.user.email)
     op.saleIds = covered.map((s) => s.id)
     op.purchaseIds = coveredPurchases.map((p) => p.id)
     op.withdrawalIds = coveredWithdrawals.map((w) => w.id)
@@ -515,21 +586,28 @@ export function readLocal(data, path, account, user) {
   }
   if (route === '/api/products') return [...data.products].sort((a, b) => a.name.localeCompare(b.name))
   if (route === '/api/cash-closes/current') {
-    const sales = [...openSales(data, account, owner), ...openPurchases(data, account, owner)]
-    const withdrawals = (data.cash_withdrawals || []).filter((w) => w.cash_close_id == null && w.voided_at == null)
+    const sales = [...openSales(data, account, owner, user.email), ...openPurchases(data, account, owner, user.email)]
+    const withdrawals = openWithdrawals(data, account, owner, user.email)
     const prior = newest(data.cash_closes.filter((c) => c.register_id === registerFor(account, data.shared_device)), 'closed_at')[0]
     const register = registerFor(account, data.shared_device)
     const period = data.current_periods?.[register] || (!data.shared_device || data.current_period?.register_id === register ? data.current_period : null)
     return { opened_at: prior?.closed_at || period?.opened_at || sales[0]?.created_at || withdrawals[0]?.created_at || null, has_sales: sales.length > 0 || withdrawals.length > 0 || (!prior && !!period?.has_sales), is_first_close: !prior && (period?.is_first_close ?? true) }
   }
+  if (route === '/api/cash-withdrawals') {
+    if (!owner) {
+      // Cajero: solo sus propias salidas
+      const accountId = Number(account.split(':')[1])
+      const filtered = (data.cash_withdrawals || []).filter((w) => Number(w.account_id) === accountId && (!url.searchParams.has('date') || businessDate(w.created_at) === url.searchParams.get('date')))
+      if (url.searchParams.has('open')) return newest(filtered.filter((w) => w.cash_close_id == null && !w.server_closed && !w.server_voided), 'created_at')
+      return newest(filtered, 'created_at')
+    }
+    const filtered = (data.cash_withdrawals || []).filter((w) => !url.searchParams.has('date') || businessDate(w.created_at) === url.searchParams.get('date'))
+    if (url.searchParams.has('open')) return newest(filtered.filter((w) => w.cash_close_id == null && !w.server_closed && !w.server_voided), 'created_at')
+    return newest(filtered, 'created_at')
+  }
   assert(owner, 'Solo el dueño puede ver esto')
   if (route === '/api/products/day-stock') return dailyStockFor(data, businessDate())
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
-  if (route === '/api/cash-withdrawals') {
-    const filtered = (data.cash_withdrawals || []).filter((w) => !url.searchParams.has('date') || businessDate(w.created_at) === url.searchParams.get('date'))
-    if (url.searchParams.has('open')) return newest(filtered.filter((w) => w.cash_close_id == null), 'created_at')
-    return newest(filtered, 'created_at')
-  }
   if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
   if (route === '/api/sales/rejected') return data.rejected_sales.filter((s) => !s.reviewed_at)
   if (route === '/api/inventory-counts') return newest(data.inventory_counts, 'counted_at')

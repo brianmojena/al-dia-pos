@@ -5,6 +5,7 @@ const { asyncHandler } = require('../lib/asyncHandler');
 const { describeAccount } = require('../lib/account');
 const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
+const { withdrawalScopeSql } = require('../lib/withdrawalScope');
 const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
 const { dailyStock } = require('../lib/dailyStock');
 const { syncChanges, isPaginated } = require('../lib/syncChanges');
@@ -20,7 +21,7 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
       await tx.commit();
       return res.json(page);
     }
-    if (req.sharedDevice) {
+    if (req.sharedDevice && req.role !== 'dueño') {
       const snapshot = await require('../lib/sharedSnapshot').sharedSnapshot(tx, req);
       await tx.commit();
       return res.json(snapshot);
@@ -31,12 +32,20 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
       ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'
       : '';
     const scopeArgs = req.role === 'cajero' ? [req.accountId, req.accountId] : [];
-    const open = (await tx.execute({ sql: `SELECT created_at FROM sales WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL)${cashierScope} ORDER BY created_at LIMIT 1`, args: [req.userId, register, ...scopeArgs] })).rows[0];
-    const openPurchase = (await tx.execute({ sql: `SELECT created_at FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL)${cashierScope} ORDER BY created_at LIMIT 1`, args: [req.userId, register, ...scopeArgs] })).rows[0];
-    const openWithdrawal = (await tx.execute({ sql: 'SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at LIMIT 1', args: [req.userId] })).rows[0];
-    const last = (await tx.execute({ sql: 'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1', args: [req.userId, register] })).rows[0];
+    const isOwner = req.role === 'dueño';
+    const open = (await tx.execute({ sql: `SELECT created_at FROM sales WHERE user_id = ? AND cash_close_id IS NULL${isOwner ? '' : ' AND (register_id = ? OR register_id IS NULL)'}${cashierScope} ORDER BY created_at LIMIT 1`, args: isOwner ? [req.userId] : [req.userId, register, ...scopeArgs] })).rows[0];
+    const openPurchase = (await tx.execute({ sql: `SELECT created_at FROM currency_purchases WHERE user_id = ? AND cash_close_id IS NULL${isOwner ? '' : ' AND (register_id = ? OR register_id IS NULL)'}${cashierScope} ORDER BY created_at LIMIT 1`, args: isOwner ? [req.userId] : [req.userId, register, ...scopeArgs] })).rows[0];
+    const withdrawalAccess = withdrawalScopeSql({ isOwner, registerId: register, accountId: req.accountId, includeLegacy: !req.sharedDevice });
+    const withdrawalScope = isOwner ? '' : ` AND ${withdrawalAccess.sql}`;
+    const withdrawalArgs = isOwner ? [] : withdrawalAccess.args;
+    const openWithdrawal = (await tx.execute({
+      sql: `SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL${withdrawalScope} ORDER BY created_at LIMIT 1`,
+      args: [req.userId, ...withdrawalArgs],
+    })).rows[0];
+    const last = (await tx.execute({ sql: `SELECT closed_at FROM cash_closes WHERE user_id = ?${isOwner ? '' : ' AND register_id = ?'} ORDER BY closed_at DESC LIMIT 1`, args: isOwner ? [req.userId] : [req.userId, register] })).rows[0];
     const snapshot = { products, cash_close_coverage_version: 1, current_period: { opened_at: last?.closed_at || open?.created_at || openPurchase?.created_at || openWithdrawal?.created_at || null, has_sales: !!(open || openPurchase || openWithdrawal), is_first_close: !last } };
     if (req.role === 'dueño') {
+      if (req.sharedDevice) snapshot.shared_device = req.sharedDevice;
       snapshot.daily_stock = await dailyStock(tx, req.userId);
       snapshot.sales = (await tx.execute({ sql: 'SELECT * FROM sales WHERE user_id = ? ORDER BY id', args: [req.userId] })).rows;
       const items = (await tx.execute({ sql: 'SELECT i.* FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.user_id = ? ORDER BY i.id', args: [req.userId] })).rows;
@@ -78,8 +87,8 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
               ORDER BY created_at DESC, id DESC`,
         args: [req.userId, req.accountId, req.accountId],
       })).rows;
-      // Las compras abiertas de su caja cuentan en el arqueo. Las extracciones
-      // son globales por contrato: cualquier cierre absorbe todas las abiertas.
+      // Las compras y extracciones del cajero se limitan a su caja y a su
+      // cuenta legacy cuando la fila no tiene register_id.
       snapshot.currency_purchases = (await tx.execute({
         sql: `SELECT id, client_purchase_id, foreign_currency, foreign_amount,
                      exchange_rate, cup_amount, created_at, register_id,
@@ -88,12 +97,25 @@ router.get('/snapshot', asyncHandler(async (req, res) => {
                 AND (register_id = ? OR register_id IS NULL)${cashierScope} ORDER BY created_at DESC`,
         args: [req.userId, register, ...scopeArgs],
       })).rows;
+      snapshot.purchase_states = (await tx.execute({
+        sql: `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+              FROM currency_purchases WHERE user_id = ? AND (register_id = ? OR register_id IS NULL)${cashierScope}
+              ORDER BY id`,
+        args: [req.userId, register, ...scopeArgs],
+      })).rows;
       snapshot.cash_withdrawals = (await tx.execute({
-        sql: `SELECT id, client_withdrawal_id, method, amount,
+        sql: `SELECT id, client_withdrawal_id, method, amount, register_id, account_id, account_email,
                      created_at, cash_close_id, voided_at
-              FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL
+              FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL${withdrawalScope}
               ORDER BY created_at DESC`,
-        args: [req.userId],
+        args: [req.userId, ...withdrawalArgs],
+      })).rows;
+      snapshot.withdrawal_states = (await tx.execute({
+        sql: `SELECT id, cash_close_id, voided_at,
+                     CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed,
+                     CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided
+              FROM cash_withdrawals WHERE user_id = ?${withdrawalScope} ORDER BY id`,
+        args: [req.userId, ...withdrawalArgs],
       })).rows;
       const ids = snapshot.sales.map((sale) => Number(sale.id));
       if (ids.length) {

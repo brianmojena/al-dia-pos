@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { withOperation } = require('../lib/clientOperations');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
 const { parseUnit, validQuantity, roundQty } = require('../lib/units');
@@ -57,7 +58,7 @@ const findByName = async (db, userId, name, exceptId = null) => {
   return rows.find((r) => normalizeName(r.name) === key && Number(r.id) !== Number(exceptId)) || null;
 };
 
-router.post('/', asyncHandler(async (req, res) => {
+router.post('/', asyncHandler((req, res) => withOperation(req, res, async (db, res) => {
   const name = cleanName(req.body.name);
   const unit = parseUnit(req.body.unit);
   if (unit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
@@ -68,7 +69,6 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!validQuantity(quantity, unit)) {
     return res.status(400).json({ error: unit ? 'La cantidad debe ser un número mayor o igual a 0 (hasta 3 decimales)' : 'La cantidad debe ser un entero mayor o igual a 0' });
   }
-  const db = getDb();
   if (await findByName(db, req.userId, name)) {
     return res.status(409).json({ error: 'Ya hay un artículo con ese nombre en el almacén' });
   }
@@ -80,7 +80,7 @@ router.post('/', asyncHandler(async (req, res) => {
   await db.execute(logChange(req.userId, account, 'alta', name, `cantidad ${roundQty(quantity)}, costo ${cost}`));
   const row = await db.execute({ sql: 'SELECT * FROM warehouse_items WHERE id = ?', args: [Number(inserted.lastInsertRowid)] });
   res.status(201).json(row.rows[0]);
-}));
+})));
 
 /**
  * Carga masiva del almacén (solo la cuenta principal). Mismo criterio que la
@@ -96,13 +96,12 @@ const optionalNumber = (value) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
-router.post('/import', asyncHandler(async (req, res) => {
+router.post('/import', asyncHandler((req, res) => withOperation(req, res, async (db, res) => {
   const { items } = req.body;
   const addQty = req.body.stock_mode === 'sumar';
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'No hay artículos para importar' });
   if (items.length > MAX_IMPORT_ROWS) return res.status(400).json({ error: `Máximo ${MAX_IMPORT_ROWS} artículos por importación` });
 
-  const db = getDb();
   const existingRows = (await db.execute({ sql: 'SELECT * FROM warehouse_items WHERE user_id = ?', args: [req.userId] })).rows;
   const existing = new Map();
   for (const row of existingRows) if (!existing.has(normalizeName(row.name))) existing.set(normalizeName(row.name), row);
@@ -158,10 +157,9 @@ router.post('/import', asyncHandler(async (req, res) => {
   statements.push(logChange(req.userId, account, 'importación', `${clean.length} artículos`, `${created} nuevos, ${updated} actualizados${addQty ? ' (cantidades sumadas)' : ''}`));
   await db.batch(statements, 'write');
   res.json({ created, updated, total: clean.length });
-}));
+})));
 
-router.put('/:id', asyncHandler(async (req, res) => {
-  const db = getDb();
+router.put('/:id', asyncHandler((req, res) => withOperation(req, res, async (db, res) => {
   const found = await db.execute({ sql: 'SELECT * FROM warehouse_items WHERE id = ? AND user_id = ?', args: [req.params.id, req.userId] });
   const existing = found.rows[0];
   if (!existing) return res.status(404).json({ error: 'Artículo no encontrado' });
@@ -210,7 +208,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
   ], 'write');
   const row = await db.execute({ sql: 'SELECT * FROM warehouse_items WHERE id = ?', args: [existing.id] });
   res.json(row.rows[0]);
-}));
+})));
 
 router.delete('/:id', asyncHandler(async (req, res) => {
   const db = getDb();

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { TrendingUp, DollarSign, ShoppingBag, AlertTriangle, RefreshCw, Banknote, Smartphone, Users, ChevronRight, Package, X, ArrowUpFromLine } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import { useAuth } from '../context/AuthContext'
 import PaymentBadge from '../components/PaymentBadge'
 import ShopRatesCard from '../components/ShopRatesCard'
 import { formatTime, formatDateTime } from '../lib/dates'
@@ -17,6 +18,7 @@ const methodLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', USD:
 const holdingKey = { efectivo: 'cash', transferencia: 'transfer', USD: 'usd', EUR: 'eur' }
 
 export default function Dashboard() {
+  const { user } = useAuth()
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -219,11 +221,19 @@ export default function Dashboard() {
               {data.open_withdrawals.map((w) => {
                 const label = methodLabel[w.method]
                 const formattedAmount = w.method === 'USD' ? `− $ ${fmtMoney(w.amount)}` : w.method === 'EUR' ? `− € ${fmtMoney(w.amount)}` : fmt(Math.round(w.amount))
+                const isCashierWithdrawal = w.account_email && w.account_email !== user?.email
                 return (
                   <div key={w.client_withdrawal_id} className="flex items-start justify-between py-2 border-b border-gray-100 last:border-0 gap-2">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900">{label}</p>
-                      {w.note && <p className="text-xs text-gray-500 truncate">{w.note}</p>}
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <p className="text-sm font-medium text-gray-900">{label}</p>
+                        {isCashierWithdrawal && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
+                            Cajero · {w.account_email}
+                          </span>
+                        )}
+                      </div>
+                      {w.note && <p className={`text-xs truncate ${isCashierWithdrawal ? 'font-medium text-gray-900' : 'text-gray-500'}`}>{w.note}</p>}
                       <p className="text-xs text-gray-400 mt-0.5">{formatDateTime(w.created_at)}</p>
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">

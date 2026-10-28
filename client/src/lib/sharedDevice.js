@@ -39,8 +39,15 @@ async function derivePin(pin, salt, iterations = ITERATIONS) {
 // Cifra un PIN en este navegador. Lo usa la activación remota: el administrador
 // cifra los PIN aquí y solo viaja el hash, para que el aparato destino instale
 // la caja sin que nadie teclee un PIN.
+// Cajeros: 6 dígitos. Dueño (caja central): 8. La longitud exacta la valida el formulario.
+export const isOwnerPin = (pin) => /^\d{8}$/.test(pin)
+// Campos «central» del alta. Sin caja central devuelve {}: el payload queda igual que antes.
+export const centralFields = (central, ownerName, ownerPin) => (central
+  ? { central: true, owner: { display_name: ownerName.trim(), ...(ownerPin ? { pin: ownerPin } : {}) } }
+  : {})
+
 export async function hashPin(pin) {
-  if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) throw new Error('Cada cajero necesita un PIN de 6 dígitos.')
+  if (typeof pin !== 'string' || !/^\d{6}(\d{2})?$/.test(pin)) throw new Error('Cada PIN debe tener 6 dígitos (8 para el dueño).')
   if (!globalThis.crypto?.subtle) throw new Error('Abre la aplicación mediante una conexión segura para configurar los PIN.')
   const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
   return { salt, hash: await derivePin(pin, salt), iterations: ITERATIONS }
@@ -139,7 +146,7 @@ export async function installSharedDevice(bundle, pins) {
       : null
     if (!pin) {
       const raw = pins?.[member.id]
-      if (typeof raw !== 'string' || !/^\d{6}$/.test(raw)) throw new Error('Cada cajero necesita un PIN de 6 dígitos.')
+      if (typeof raw !== 'string' || !/^\d{6}(\d{2})?$/.test(raw)) throw new Error('Cada PIN debe tener 6 dígitos (8 para el dueño).')
       const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
       pin = { salt, hash: await derivePin(raw, salt), iterations: ITERATIONS }
     }

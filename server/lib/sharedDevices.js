@@ -10,7 +10,7 @@ const ENROLL_CODE_TTL_MS = 30 * 60 * 1000;
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LENGTH = 12;
 
-const publicDevice = (d) => ({ id: d.id, owner_id: Number(d.owner_id), name: d.name, continuous: Number(d.continuous) === 1, expires_at: d.expires_at });
+const publicDevice = (d) => ({ id: d.id, owner_id: Number(d.owner_id), name: d.name, continuous: Number(d.continuous) === 1, central: Number(d.central) === 1, expires_at: d.expires_at });
 
 // El código de activación se guarda cifrado (SHA-256): quien lea la base no
 // puede activar la caja con él. Solo se acepta en minúsculas/espacios de más,
@@ -28,26 +28,33 @@ function generateEnrollCode() {
 const registerOf = (device, accountId) => `shared:${device.id}${device.continuous ? '' : `:${accountId}`}`;
 const sharedOperationMatches = (req, row) => !req.sharedDevice || (row.register_id === registerOf(req.sharedDevice, req.accountId) && Number(row.account_id) === Number(req.accountId));
 const sharedSaleResponse = (req, row) => {
-  if (!req.sharedDevice) return row;
+  // El dueño en una caja central ve la ganancia; el cajero no.
+  if (!req.sharedDevice || req.role === 'dueño') return row;
   const { profit, ...safe } = row;
   return safe;
 };
+
+// Miembro válido: cajero de la tienda, o la cuenta dueña SOLO si el aparato es
+// central. El rol sale de la base (member_role + users), nunca del JWT.
+const MEMBER_OK = `((m.member_role = 'cajero' AND u.owner_id = ? AND u.role = 'cajero')
+  OR (m.member_role = 'dueño' AND ? = 1 AND u.id = ? AND u.owner_id IS NULL))`;
 
 async function enrollment(db, device, { withPins = false } = {}) {
   const shop = (await db.execute({ sql: 'SELECT * FROM users WHERE id = ? AND owner_id IS NULL', args: [device.owner_id] })).rows[0];
   if (!shop) throw new Error('Tienda no encontrada');
   const rows = (await db.execute({
-    sql: `SELECT u.*, m.display_name, m.pin_salt, m.pin_hash, m.pin_iterations FROM shared_device_cashiers m JOIN users u ON u.id = m.account_id
-          WHERE m.device_id = ? AND m.active = 1 AND u.owner_id = ? AND u.role = 'cajero' ORDER BY u.id`,
-    args: [device.id, device.owner_id],
+    sql: `SELECT u.*, m.display_name, m.member_role, m.pin_salt, m.pin_hash, m.pin_iterations FROM shared_device_cashiers m JOIN users u ON u.id = m.account_id
+          WHERE m.device_id = ? AND m.active = 1 AND ${MEMBER_OK} ORDER BY u.id`,
+    args: [device.id, device.owner_id, Number(device.central) === 1 ? 1 : 0, device.owner_id],
   })).rows;
   return {
     device: publicDevice(device),
     cashiers: rows.map((row) => {
       const cashier = {
-        id: Number(row.id), email: row.email, display_name: row.display_name,
+        id: Number(row.id), email: row.email, display_name: row.display_name, role: row.member_role,
         user: publicUser(row, shop),
-        token: jwt.sign({ userId: Number(device.owner_id), accountId: Number(row.id), role: 'cajero', deviceId: device.id,
+        token: jwt.sign({ userId: Number(device.owner_id), accountId: Number(row.id), role: row.member_role, deviceId: device.id,
+          ...(row.member_role === 'dueño' ? { deviceMode: 'central' } : {}),
           deviceVersion: Number(device.version), exp: Math.floor(Date.parse(device.expires_at) / 1000) }, JWT_SECRET),
       };
       // El PIN ya viene cifrado por el navegador del administrador: solo la
@@ -81,14 +88,15 @@ async function validateSharedToken(payload) {
   const db = getDb();
   const row = (await db.execute({ sql: 'SELECT * FROM shared_devices WHERE id = ?', args: [payload.deviceId] })).rows[0];
   if (!row || !row.active || Number(row.version) !== Number(payload.deviceVersion)
-    || Number(row.owner_id) !== Number(payload.userId) || payload.role !== 'cajero') {
+    || Number(row.owner_id) !== Number(payload.userId) || (payload.role !== 'cajero' && payload.role !== 'dueño')
+    || (payload.role === 'dueño' && Number(row.central) !== 1)) {
     return { status: 403, code: 'DEVICE_REVOKED', error: 'El acceso de esta caja fue retirado. Contacta al administrador.' };
   }
   if (Date.parse(row.expires_at) <= Date.now()) return { status: 401, code: 'DEVICE_EXPIRED', error: 'Los accesos de esta caja vencieron. Contacta al administrador para renovarlos.' };
   const member = (await db.execute({
     sql: `SELECT u.id FROM shared_device_cashiers m JOIN users u ON u.id = m.account_id
-          WHERE m.device_id = ? AND m.account_id = ? AND m.active = 1 AND u.owner_id = ? AND u.role = 'cajero'`,
-    args: [row.id, payload.accountId, row.owner_id],
+          WHERE m.device_id = ? AND m.account_id = ? AND m.active = 1 AND m.member_role = ? AND ${MEMBER_OK}`,
+    args: [row.id, payload.accountId, payload.role, row.owner_id, Number(row.central) === 1 ? 1 : 0, row.owner_id],
   })).rows[0];
   if (!member) return { status: 403, code: 'MEMBER_REVOKED', error: 'Este cajero ya no está autorizado en la caja.' };
   return { device: publicDevice(row), row };

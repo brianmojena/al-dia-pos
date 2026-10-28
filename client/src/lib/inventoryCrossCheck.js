@@ -54,6 +54,30 @@ export const crossCheckRows = (check) => {
     })
   }
 
+  if (check.closed_by) {
+    const label = accountLabel(check.closed_by) || check.closed_by
+    rows.push({ label: 'Cierre realizado por', value: label })
+  }
+
+  if (check.uncounted_sold_products_count > 0) {
+    const products = Array.isArray(check.uncounted_sold_products)
+      ? check.uncounted_sold_products.map((product) => product.product_name).filter(Boolean)
+      : []
+    rows.push({
+      label: 'Productos vendidos sin contar',
+      value: products.length ? products.join(', ') : String(check.uncounted_sold_products_count),
+      tone: 'text-amber-700',
+    })
+  }
+
+  if (check.stock_adjustments_count > 0) {
+    rows.push({
+      label: 'Ajustes de stock desde conteo anterior',
+      value: `${check.stock_adjustments_count} · +${check.stock_adjustment_units_in || 0} / −${check.stock_adjustment_units_out || 0} unidades`,
+      tone: 'text-amber-700',
+    })
+  }
+
   // Línea 2: Productos contados
   if (check.products_counted != null && check.products_total != null) {
     rows.push({

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate, applyChanges } from './offlineModel.js'
+import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate, applyChanges, openSales, openPurchases, openWithdrawals } from './offlineModel.js'
 import { monthCsv } from './offlineExport.js'
 import { summarizeCashierSales } from './cashierSalesSummary.js'
 import { withdrawalSplit } from './payment.js'
@@ -183,20 +183,20 @@ test('la cobertura exacta incluye todas las ventas abiertas aunque superen 200',
   assert.equal(close.body.covered_sale_ids.length, 237)
   assert.equal(close.result.expected_cash, 237)
 })
-test('cierre offline conserva mezcla de pagos, compras y extracciones globales', () => {
+test('cierre offline conserva mezcla de pagos, compras y retiros solo de su register', () => {
   const state = fixture(), cashier = { ...user, id: 2, role: 'cajero', email: 'cashier@test.local' }
   state.base.sales = [
     { id: 201, client_sale_id: 'cash-300', account_id: 2, register_id: 'web:2', cash_close_id: null, total: 300, payment_method: 'efectivo' },
     { id: 202, client_sale_id: 'mixed-200', account_id: 2, register_id: 'web:2', cash_close_id: null, total: 200, payment_method: 'mixto', transfer_amount: 50 },
   ]
-  state.base.currency_purchases = [{ id: 31, client_purchase_id: 'usd-buy', register_id: 'web:2', cash_close_id: null, foreign_currency: 'USD', foreign_amount: 1, cup_amount: 100 }]
+  state.base.currency_purchases = [{ id: 31, client_purchase_id: 'usd-buy', account_id: 2, account_email: cashier.email, register_id: 'web:2', cash_close_id: null, foreign_currency: 'USD', foreign_amount: 1, cup_amount: 100 }]
   state.base.cash_withdrawals = [{ id: 41, client_withdrawal_id: 'owner-withdrawal', register_id: 'web:1', cash_close_id: null, method: 'efectivo', amount: 50, voided_at: null }]
-  const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 1300, opening_float: 1000 }, { user: cashier, account: '1:2' })
-  assert.equal(close.result.expected_cash, 1300, '1000 + 300 + (200−50) − 100 − 50')
+  const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 1350, opening_float: 1000 }, { user: cashier, account: '1:2' })
+  assert.equal(close.result.expected_cash, 1350, '1000 + 300 + (200−50) − 100; excluye el retiro de otro register')
   assert.equal(close.result.difference, 0)
   assert.deepEqual(close.body.covered_sale_ids, [201, 202])
   assert.deepEqual(close.body.covered_purchase_ids, [31])
-  assert.deepEqual(close.withdrawalIds, [41], 'la extracción global se conserva sin ampliar permisos')
+  assert.deepEqual(close.withdrawalIds, [], 'no cubre retiros del dueño en otro register')
 })
 test('reintentar el mismo client_sale_id no duplica ni descuenta stock otra vez', () => {
   const state = fixture(), sale = sell(state)
@@ -384,13 +384,73 @@ test('anular extracción restaura holdings, pero no si ya entró en cierre', () 
   assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w2.result.client_withdrawal_id}/void`, {}), /ya entró en un cierre/)
 })
 
-test('cajero no puede extraer dinero', () => {
+test('cajero puede extraer solo efectivo con nota obligatoria', () => {
   const state = fixture()
   const cashier = { ...user, role: 'cajero' }
-  assert.throws(() => add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 }, { user: cashier }), /Solo el dueño/)
-  // Create a withdrawal first
-  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 })
-  assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w.result.client_withdrawal_id}/void`, {}, { user: cashier }), /Solo el dueño/)
+
+  // Sin nota falla
+  assert.throws(() => add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 }, { user: cashier }), /Escribe para qué fue/)
+
+  // Nota muy corta falla
+  assert.throws(() => add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100, note: 'ab' }, { user: cashier }), /Escribe para qué fue/)
+
+  // USD falla aunque tenga nota
+  assert.throws(() => add(state, 'POST', '/api/cash-withdrawals', { method: 'USD', amount: 100, note: 'prueba' }, { user: cashier }), /Los cajeros solo pueden sacar efectivo/)
+
+  // Con nota válida funciona
+  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 50, note: 'cambio menudo' }, { user: cashier, account: '1:2' })
+  assert.equal(w.kind, 'withdrawal')
+  assert.equal(w.result.method, 'efectivo')
+  assert.equal(w.result.amount, 50)
+  assert.equal(w.result.note, 'cambio menudo')
+
+  // El dueño sigue pudiendo extraer sin nota (si los campos son válidos)
+  const ownerW = add(state, 'POST', '/api/cash-withdrawals', { method: 'transferencia', amount: 100, note: '' })
+  assert.equal(ownerW.kind, 'withdrawal')
+  assert.equal(ownerW.result.method, 'transferencia')
+})
+
+test('cajero anula solo sus propias salidas', () => {
+  const state = fixture()
+  const cashier = { ...user, role: 'cajero' }
+
+  // Cajero crea su extracción
+  const w1 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 50, note: 'cambio' }, { user: cashier, account: '1:2' })
+
+  // Dueño crea la suya
+  const w2 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 100 })
+
+  // Cajero anula la suya
+  const void1 = add(state, 'POST', `/api/cash-withdrawals/${w1.result.client_withdrawal_id}/void`, {}, { user: cashier, account: '1:2' })
+  assert.equal(void1.kind, 'withdrawal_void')
+  assert.ok(void1.result.voided_at)
+
+  // Cajero NO puede anular la del dueño
+  assert.throws(() => add(state, 'POST', `/api/cash-withdrawals/${w2.result.client_withdrawal_id}/void`, {}, { user: cashier, account: '1:2' }), /Solo puedes anular tus propias salidas/)
+})
+
+test('cierre del cajero cubre sus salidas y del dueño pero no la de otro cajero', () => {
+  const state = fixture()
+  const cashier1 = { ...user, id: 2, role: 'cajero', email: 'cashier1@test.local' }
+  const cashier2 = { ...user, id: 3, role: 'cajero', email: 'cashier2@test.local' }
+
+  // Dueño crea una extracción
+  const ownerW = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 50, note: 'fondo inicial' })
+
+  // Cajero1 crea una extracción
+  const w1 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 30, note: 'cambio' }, { user: cashier1, account: '1:2' })
+
+  // Cajero2 crea una extracción
+  const w2 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 20, note: 'otro' }, { user: cashier2, account: '1:3' })
+
+  // Venta para dar dinero
+  sell(state, 1, { user: cashier1, account: '1:2' })
+
+  // Cierre del cajero1 solo cubre su retiro, sin incorporar dueño ni cajero2.
+  const c1Close = add(state, 'POST', '/api/cash-closes', { counted_cash: 0, opening_float: 0 }, { user: cashier1, account: '1:2' })
+  assert.deepEqual(c1Close.withdrawalIds, [w1.result.id])
+  assert.equal(ownerW.result.cash_close_id, null)
+  assert.equal(w2.result.cash_close_id, null)
 })
 
 
@@ -432,4 +492,89 @@ test('applyChanges conserva las líneas al recibir una corrección de pago sin i
   assert.equal(base.sales[0].payment_method, 'transferencia')
   assert.equal(base.sales[0].items[0].product_id, 10, 'el cliente conserva las líneas que no reenvía el servidor')
   assert.equal(base.cash_closes[0].id, 81)
+})
+
+test('la reconciliación compacta cierra y reabre ventas sin quitar operaciones pendientes', () => {
+  const state = fixture()
+  const cashier = { ...user, id: 2, role: 'cajero', email: 'cashier@test.local' }
+  state.base.sales = [
+    { id: 41, client_sale_id: 'old-sale', account_id: 2, register_id: 'web:2', cash_close_id: null, total: 100 },
+    { id: 42, client_sale_id: 'other-sale', account_id: 3, register_id: 'web:3', cash_close_id: null, total: 200 },
+  ]
+  const pendingClose = add(state, 'POST', '/api/cash-closes', { counted_cash: 0 }, { user: cashier, account: '1:2' })
+  const queued = state.outbox.find((op) => op.id === pendingClose.id)
+  assert.ok(queued)
+
+  applyChanges(state.base, { sale_states: [{ id: 41, cash_close_id: 901, closed: 1 }] })
+  assert.equal(openSales(state.base, '1:2', false, cashier.email).length, 0)
+  assert.equal(state.base.sales.find((sale) => sale.id === 41).cash_close_id, 901, 'se conserva el enlace real sin descargar el cierre privado')
+  assert.equal(state.base.sales.find((sale) => sale.id === 42).server_closed, undefined, 'otra cuenta no se toca')
+  assert.equal(state.base.sales.find((sale) => sale.id === 41).server_closed, undefined)
+  assert.ok(state.outbox.includes(queued), 'la reconciliación no borra el cierre offline pendiente')
+
+  applyChanges(state.base, { sale_states: [{ id: 41, cash_close_id: null, closed: 0 }] })
+  assert.equal(openSales(state.base, '1:2', false, cashier.email).length, 1, 'una reapertura vuelve al período')
+  assert.ok(state.outbox.includes(queued))
+})
+
+test('el estado del dueño restaura una venta aunque se haya retirado el cierre de caché', () => {
+  const data = { ...emptyData(), sales: [{ id: 71, client_sale_id: 'owner-sale', cash_close_id: 901, total: 80 }],
+    cash_closes: [{ id: 901, client_close_id: 'deleted-close' }] }
+  data.cash_closes = [] // dropMissingCashCloses retiró el cierre eliminado
+  assert.equal(openSales(data, '1:1', true).length, 0)
+  applyChanges(data, { sale_states: [{ id: 71, cash_close_id: null, closed: 0 }] })
+  assert.equal(openSales(data, '1:1', true).length, 1)
+})
+
+test('cierres offline solo cubren ventas/compras de la cuenta y retiros del register o legado propio', () => {
+  const email = 'cashier@test.local'
+  const data = { ...emptyData(), sales: [
+    { id: 1, account_id: 2, register_id: 'web:2', cash_close_id: null },
+    { id: 2, account_id: 3, register_id: 'web:2', cash_close_id: null },
+    { id: 3, account_id: null, account_email: email, register_id: null, cash_close_id: null },
+    { id: 4, account_id: null, register_id: null, cash_close_id: null },
+    { id: 5, account_id: 2, account_email: email, register_id: 'web:other', cash_close_id: null },
+  ], currency_purchases: [
+    { id: 11, account_id: 2, account_email: email, register_id: 'web:2', cash_close_id: null },
+    { id: 12, account_id: 3, register_id: 'web:2', cash_close_id: null },
+    { id: 13, account_id: 2, account_email: email, register_id: 'web:other', cash_close_id: null },
+  ], cash_withdrawals: [
+    { id: 21, account_id: 2, register_id: 'web:2', cash_close_id: null },
+    { id: 22, account_id: 1, register_id: 'web:1', cash_close_id: null },
+    { id: 23, account_id: 2, register_id: null, account_email: email, cash_close_id: null },
+    { id: 24, account_id: null, register_id: null, cash_close_id: null },
+  ] }
+  assert.deepEqual(openSales(data, '1:2', false, email).map((row) => row.id), [1, 3])
+  assert.deepEqual(openPurchases(data, '1:2', false, email).map((row) => row.id), [11])
+  assert.deepEqual(openWithdrawals(data, '1:2', false, email).map((row) => row.id), [21, 23])
+  assert.equal(openWithdrawals(data, '1:1', true, 'owner@test.local').length, 4, 'dueño consolida todas las cuentas')
+})
+
+test('GET /api/cash-withdrawals: cajero solo ve las suyas, dueño ve todas', () => {
+  const state = fixture()
+  const cashier1 = { ...user, id: 2, role: 'cajero', email: 'cashier1@test.local' }
+  const cashier2 = { ...user, id: 3, role: 'cajero', email: 'cashier2@test.local' }
+
+  // Dueño crea una extracción
+  const ownerW = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 50, note: 'fondo' })
+
+  // Cajero1 crea una extracción
+  const w1 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 30, note: 'cambio' }, { user: cashier1, account: '1:2' })
+
+  // Cajero2 crea una extracción
+  const w2 = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 20, note: 'otro' }, { user: cashier2, account: '1:3' })
+
+  const data = project(state)
+
+  // Dueño ve todas
+  const ownerAll = readLocal(data, '/api/cash-withdrawals', '1:1', user)
+  assert.deepEqual(ownerAll.map((w) => w.id), [ownerW.result.id, w1.result.id, w2.result.id])
+
+  // Cajero1 solo ve la suya
+  const c1All = readLocal(data, '/api/cash-withdrawals', '1:2', cashier1)
+  assert.deepEqual(c1All.map((w) => w.id), [w1.result.id])
+
+  // Cajero2 solo ve la suya
+  const c2All = readLocal(data, '/api/cash-withdrawals', '1:3', cashier2)
+  assert.deepEqual(c2All.map((w) => w.id), [w2.result.id])
 })

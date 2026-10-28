@@ -77,6 +77,21 @@ test('crossCheckRows incluye todos los datos cuando están disponibles', () => {
   assert.equal(rows[4].tone, 'text-red-600')
 })
 
+test('crossCheckRows muestra productos omitidos, ajustes y distingue quién cerró', () => {
+  const rows = crossCheckRows({
+    available: true,
+    closed_by: 'dueno@tienda.cu',
+    uncounted_sold_products_count: 1,
+    uncounted_sold_products: [{ product_name: 'Agotado' }],
+    stock_adjustments_count: 6,
+    stock_adjustment_units_in: 22,
+    stock_adjustment_units_out: 20,
+  })
+  assert(rows.some((row) => row.label === 'Cierre realizado por' && row.value.includes('dueno')))
+  assert(rows.some((row) => row.label === 'Productos vendidos sin contar' && row.value.includes('Agotado')))
+  assert(rows.some((row) => row.label === 'Ajustes de stock desde conteo anterior' && row.value.includes('22')))
+})
+
 test('crossCheckRows oculta filas Faltan y Sobran cuando son 0', () => {
   const check = {
     available: true,

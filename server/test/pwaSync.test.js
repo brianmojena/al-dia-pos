@@ -108,10 +108,7 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
     assert.ok(limited.body.cash_closes.some((close) => close.id === cashierSaleClose.body.id));
     assert.equal('corrected_at' in limited.body.cash_closes[0], false);
     assert.equal('original_difference' in limited.body.cash_closes[0], false);
-    assert.equal(limited.body.cash_withdrawals[0].amount, 5, 'la cobertura de extracción global se conserva');
-    assert.equal('account_email' in limited.body.cash_withdrawals[0], false);
-    assert.equal('note' in limited.body.cash_withdrawals[0], false);
-    assert.equal('withdrawn_at' in limited.body.cash_withdrawals[0], false);
+    assert.deepEqual(limited.body.cash_withdrawals, [], 'el cajero no absorbe ni descarga la extracción de la caja del dueño');
     const cashierOwnerId = (await ctx.db.execute({ sql: 'SELECT user_id FROM sales WHERE id = ?', args: [cashierSale.body.id] })).rows[0].user_id;
     for (let i = 0; i < 205; i++) {
       await ctx.db.execute({

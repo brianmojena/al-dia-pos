@@ -1,5 +1,6 @@
 const { resolveRegisterId } = require('./register');
 const { registerOf } = require('./sharedDevices');
+const { withdrawalScopeSql } = require('./withdrawalScope');
 const { dailyStock } = require('./dailyStock');
 
 const DEFAULT_LIMIT = 200;
@@ -9,13 +10,28 @@ const MAX_MAX_BYTES = 2 * 1024 * 1024;
 
 const CURSOR_PARAMS = {
   sale: 'after_sale',
+  sale_state: 'after_sale_state',
   close: 'after_close',
   count: 'after_count',
   purchase: 'after_purchase',
+  purchase_state: 'after_purchase_state',
   withdrawal: 'after_withdrawal',
+  withdrawal_state: 'after_withdrawal_state',
   correction: 'after_correction',
   close_correction: 'after_close_correction',
+  warehouse: 'after_warehouse',
+  warehouse_state: 'after_warehouse_state',
+  warehouse_transfer: 'after_warehouse_transfer',
+  stock_entry: 'after_stock_entry',
 };
+// Cursores S5 (almacén y entradas de stock): solo se atienden si el cliente
+// los envía, así el cliente web actual no ve campos nuevos.
+const OWNER_EXTRA = [
+  ['warehouse', 'warehouse_items', 'SELECT * FROM warehouse_items'],
+  ['warehouse_state', 'warehouse_states', 'SELECT id, name, unit, cost, quantity FROM warehouse_items'],
+  ['warehouse_transfer', 'warehouse_transfers', 'SELECT * FROM warehouse_transfers'],
+  ['stock_entry', 'stock_entries', 'SELECT * FROM stock_entries'],
+];
 
 const intParam = (value, fallback = 0) => {
   const n = Number(value);
@@ -107,21 +123,21 @@ function withCoverage(closes, covered) {
   }));
 }
 
-async function currentPeriod(tx, req, register, extraScope, scopeArgs) {
+async function currentPeriod(tx, req, register, extraScope, scopeArgs, withdrawalScope = '', withdrawalArgs = [], wholeShop = false) {
   const userId = req.userId;
   const first = async (table) => (await query(tx,
     `SELECT created_at FROM ${table}
-      WHERE user_id = ? AND cash_close_id IS NULL AND (register_id = ? OR register_id IS NULL)${extraScope}
+      WHERE user_id = ? AND cash_close_id IS NULL${wholeShop ? '' : ' AND (register_id = ? OR register_id IS NULL)'}${extraScope}
       ORDER BY created_at LIMIT 1`,
-    [userId, register, ...scopeArgs]))[0];
+    wholeShop ? [userId, ...scopeArgs] : [userId, register, ...scopeArgs]))[0];
   const openSale = await first('sales');
   const openPurchase = await first('currency_purchases');
   const openWithdrawal = (await query(tx,
-    'SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at LIMIT 1',
-    [userId]))[0];
+    `SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL${withdrawalScope} ORDER BY created_at LIMIT 1`,
+    [userId, ...withdrawalArgs]))[0];
   const last = (await query(tx,
-    'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1',
-    [userId, register]))[0];
+    `SELECT closed_at FROM cash_closes WHERE user_id = ?${wholeShop ? '' : ' AND register_id = ?'} ORDER BY closed_at DESC LIMIT 1`,
+    wholeShop ? [userId] : [userId, register]))[0];
   return {
     opened_at: last?.closed_at || openSale?.created_at || openPurchase?.created_at || openWithdrawal?.created_at || null,
     has_sales: !!(openSale || openPurchase || openWithdrawal),
@@ -135,17 +151,18 @@ async function sharedPeriods(tx, req, device) {
   const periods = {};
   for (const member of members) {
     const register = registerOf(device, member.account_id);
-    const scope = '(register_id = ? OR register_id LIKE ?)';
     const first = async (table) => (await query(tx,
       `SELECT created_at FROM ${table}
-        WHERE user_id = ? AND cash_close_id IS NULL AND ${scope}
+        WHERE user_id = ? AND cash_close_id IS NULL AND register_id = ?
         ORDER BY created_at LIMIT 1`,
-      [req.userId, register, `shared:${device.id}:%`]))[0];
+      [req.userId, register]))[0];
     const openSale = await first('sales');
     const openPurchase = await first('currency_purchases');
+    const withdrawalAccess = withdrawalScopeSql({ registerId: register, accountId: null, includeLegacy: false });
     const openWithdrawal = (await query(tx,
-      'SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at LIMIT 1',
-      [req.userId]))[0];
+      `SELECT created_at FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND voided_at IS NULL
+        AND ${withdrawalAccess.sql} ORDER BY created_at LIMIT 1`,
+      [req.userId, ...withdrawalAccess.args]))[0];
     const last = (await query(tx,
       'SELECT closed_at FROM cash_closes WHERE user_id = ? AND register_id = ? ORDER BY closed_at DESC LIMIT 1',
       [req.userId, register]))[0];
@@ -215,13 +232,18 @@ async function syncChanges(tx, req) {
     return { sql: '', args: [] };
   };
   const owner = req.role === 'dueño';
-  const shared = req.sharedDevice;
+  // El dueño en una caja central recibe la proyección COMPLETA de dueño; la
+  // reducida es solo para cajeros de un aparato compartido.
+  const shared = owner ? null : req.sharedDevice;
   const cashier = !owner && !shared;
   const register = resolveRegisterId(req, 'web');
   const cashierScope = cashier
     ? ' AND (account_id = ? OR (account_id IS NULL AND account_email = (SELECT email FROM users WHERE id = ?)))'
     : '';
   const cashierArgs = cashier ? [req.accountId, req.accountId] : [];
+  const withdrawalAccess = withdrawalScopeSql({ isOwner: owner, registerId: register, accountId: req.accountId, includeLegacy: !shared });
+  const withdrawalScope = owner ? '' : ` AND ${withdrawalAccess.sql}`;
+  const withdrawalArgs = owner ? [] : withdrawalAccess.args;
 
   let products = [];
   if (!history) {
@@ -236,12 +258,12 @@ async function syncChanges(tx, req) {
   let sales = [];
   const saleWindow = windowFilter('created_at', 'cash_close_id');
   if (shared) {
-    const scope = [req.userId, `shared:${shared.id}`, `shared:${shared.id}:%`, cursors.sale, ...saleWindow.args, limit];
+    const scope = [req.userId, register, cursors.sale, ...saleWindow.args, limit];
     sales = await query(tx,
       `SELECT id, client_sale_id, total, payment_method, transfer_amount, foreign_currency,
               foreign_amount, exchange_rate, shop_rate, cash_received, created_at, register_id,
               account_id, account_email, cash_close_id
-        FROM sales WHERE user_id = ? AND (register_id = ? OR register_id LIKE ?)
+        FROM sales WHERE user_id = ? AND register_id = ?
           AND id > ?${saleWindow.sql} ORDER BY id ASC LIMIT ?`, scope);
   } else if (cashier) {
     sales = await query(tx,
@@ -271,6 +293,46 @@ async function syncChanges(tx, req) {
     sales = sales.map((sale) => ({ ...sale, items: itemsFor(sale) }));
   }
 
+  // Compact, account-scoped reconciliation for rows already cached by the
+  // cashier. It reveals only the close link, never close details or totals. The client
+  // resets this independent cursor after a full scan so a reopen is observed.
+  let saleStates = [];
+  if ((owner || cashier || shared) && !history && 'after_sale_state' in req.query) {
+    saleStates = shared
+      ? await query(tx,
+        `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM sales WHERE user_id = ? AND register_id = ?
+            AND id > ? ORDER BY id ASC LIMIT ?`,
+        [req.userId, register, cursors.sale_state, limit])
+      : await query(tx,
+        `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM sales WHERE user_id = ?${owner ? '' : cashierScope} AND id > ? ORDER BY id ASC LIMIT ?`,
+        owner ? [req.userId, cursors.sale_state, limit] : [req.userId, ...cashierArgs, cursors.sale_state, limit]);
+  }
+  let purchaseStates = [];
+  if ((owner || cashier || shared) && !history && 'after_purchase_state' in req.query) {
+    purchaseStates = shared
+      ? await query(tx,
+        `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM currency_purchases WHERE user_id = ? AND register_id = ?
+            AND id > ? ORDER BY id ASC LIMIT ?`,
+        [req.userId, register, cursors.purchase_state, limit])
+      : await query(tx,
+        `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
+          FROM currency_purchases WHERE user_id = ?${owner ? '' : `${cashierScope} AND (register_id = ? OR register_id IS NULL)`}
+            AND id > ? ORDER BY id ASC LIMIT ?`,
+        owner ? [req.userId, cursors.purchase_state, limit] : [req.userId, ...cashierArgs, register, cursors.purchase_state, limit]);
+  }
+  let withdrawalStates = [];
+  if ((owner || cashier || shared) && !history && 'after_withdrawal_state' in req.query) {
+    withdrawalStates = await query(tx,
+      `SELECT id, cash_close_id, voided_at,
+              CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed,
+              CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided
+        FROM cash_withdrawals WHERE user_id = ?${owner ? '' : withdrawalScope} AND id > ? ORDER BY id ASC LIMIT ?`,
+      owner ? [req.userId, cursors.withdrawal_state, limit] : [req.userId, ...withdrawalArgs, cursors.withdrawal_state, limit]);
+  }
+
   let closes;
   const closeWindow = windowFilter('closed_at');
   if (cashier) {
@@ -285,9 +347,9 @@ async function syncChanges(tx, req) {
         ORDER BY id ASC LIMIT ?`, [req.userId, cursors.close, ...closeWindow.args, ...cashierArgs, limit]);
   } else if (shared) {
     closes = await query(tx,
-      `SELECT * FROM cash_closes WHERE user_id = ? AND (register_id = ? OR register_id LIKE ?)
+      `SELECT * FROM cash_closes WHERE user_id = ? AND register_id = ?
         AND id > ?${closeWindow.sql} ORDER BY id ASC LIMIT ?`,
-      [req.userId, `shared:${shared.id}`, `shared:${shared.id}:%`, cursors.close, ...closeWindow.args, limit]);
+      [req.userId, register, cursors.close, ...closeWindow.args, limit]);
   } else {
     closes = await query(tx,
       `SELECT * FROM cash_closes WHERE user_id = ? AND id > ?${closeWindow.sql} ORDER BY id ASC LIMIT ?`,
@@ -317,9 +379,9 @@ async function syncChanges(tx, req) {
   const purchaseWindow = windowFilter('created_at', 'cash_close_id');
   if (shared) {
     purchases = await query(tx,
-      `SELECT * FROM currency_purchases WHERE user_id = ? AND (register_id = ? OR register_id LIKE ?)
+      `SELECT * FROM currency_purchases WHERE user_id = ? AND register_id = ?
         AND id > ?${purchaseWindow.sql} ORDER BY id ASC LIMIT ?`,
-      [req.userId, `shared:${shared.id}`, `shared:${shared.id}:%`, cursors.purchase, ...purchaseWindow.args, limit]);
+      [req.userId, register, cursors.purchase, ...purchaseWindow.args, limit]);
   } else if (cashier) {
     // Sin ventana solo llegan las abiertas; las cerradas van en la cobertura.
     const open = history || since ? '' : ' AND cash_close_id IS NULL';
@@ -347,14 +409,14 @@ async function syncChanges(tx, req) {
   } else {
     const open = history || since ? '' : ' AND cash_close_id IS NULL';
     withdrawals = await query(tx,
-      `SELECT id, client_withdrawal_id, method, amount, created_at, cash_close_id, voided_at
-        FROM cash_withdrawals WHERE user_id = ?${open} AND id > ?${withdrawalWindow.sql}
-        ORDER BY id ASC LIMIT ?`, [req.userId, cursors.withdrawal, ...withdrawalWindow.args, limit]);
+      `SELECT id, client_withdrawal_id, method, amount, register_id, account_id, account_email, created_at, cash_close_id, voided_at
+        FROM cash_withdrawals WHERE user_id = ?${open} AND id > ?${withdrawalWindow.sql}${withdrawalScope}
+        ORDER BY id ASC LIMIT ?`, [req.userId, cursors.withdrawal, ...withdrawalWindow.args, ...withdrawalArgs, limit]);
   }
   const reminders = history ? [] : await query(tx,
-    `SELECT ${owner ? '*' : 'id, client_withdrawal_id, method, amount, created_at, cash_close_id, voided_at'}
-      FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND id <= ?
-      ORDER BY id DESC LIMIT 200`, [req.userId, cursors.withdrawal]);
+    `SELECT ${owner ? '*' : 'id, client_withdrawal_id, method, amount, register_id, account_id, account_email, created_at, cash_close_id, voided_at'}
+      FROM cash_withdrawals WHERE user_id = ? AND cash_close_id IS NULL AND id <= ?${owner ? '' : withdrawalScope}
+      ORDER BY id DESC LIMIT 200`, [req.userId, cursors.withdrawal, ...withdrawalArgs]);
   const newWithdrawals = withdrawals.length;
   const withdrawalMap = new Map();
   for (const row of withdrawals) withdrawalMap.set(Number(row.id), row);
@@ -369,10 +431,10 @@ async function syncChanges(tx, req) {
       [req.userId, cursors.correction, ...correctionWindow.args, limit]);
   } else {
     const saleScope = shared
-      ? "(json_extract(before, '$.register_id') = ? OR json_extract(before, '$.register_id') LIKE ?)"
+      ? "json_extract(before, '$.register_id') = ?"
       : "(json_extract(before, '$.account_id') = ? OR (json_extract(before, '$.account_id') IS NULL AND json_extract(before, '$.account_email') = (SELECT email FROM users WHERE id = ?)))";
     const args = shared
-      ? [req.userId, cursors.correction, `shared:${shared.id}`, `shared:${shared.id}:%`, ...correctionWindow.args, limit]
+      ? [req.userId, cursors.correction, register, ...correctionWindow.args, limit]
       : [req.userId, cursors.correction, req.accountId, req.accountId, ...correctionWindow.args, limit];
     corrections = await query(tx,
       `SELECT id, action, sale_id, client_sale_id, cash_close_id, created_at, before, close_after
@@ -399,10 +461,10 @@ async function syncChanges(tx, req) {
       [req.userId, cursors.close_correction, ...closeCorrectionWindow.args, limit]);
   } else {
     const closeScope = shared
-      ? 'SELECT id FROM cash_closes WHERE user_id = ? AND (register_id = ? OR register_id LIKE ?)'
+      ? 'SELECT id FROM cash_closes WHERE user_id = ? AND register_id = ?'
       : `SELECT id FROM cash_closes WHERE user_id = ?${cashierScope}`;
     const args = shared
-      ? [req.userId, cursors.close_correction, req.userId, `shared:${shared.id}`, `shared:${shared.id}:%`, ...closeCorrectionWindow.args, limit]
+      ? [req.userId, cursors.close_correction, req.userId, register, ...closeCorrectionWindow.args, limit]
       : [req.userId, cursors.close_correction, req.userId, ...cashierArgs, ...closeCorrectionWindow.args, limit];
     closeCorrections = await query(tx,
       `SELECT id, cash_close_id, correction_revision, account_id, account_email,
@@ -439,6 +501,9 @@ async function syncChanges(tx, req) {
   const payload = {
     products,
     sales,
+    sale_states: saleStates,
+    purchase_states: purchaseStates,
+    withdrawal_states: withdrawalStates,
     cash_closes: closes,
     currency_purchases: purchases,
     cash_withdrawals: withdrawals,
@@ -453,9 +518,16 @@ async function syncChanges(tx, req) {
     payload.rejected_sales = rejectedSales;
     payload.cashiers = cashiers;
     payload.daily_stock = daily;
-    payload.current_period = await currentPeriod(tx, req, register, '', []);
+    payload.current_period = await currentPeriod(tx, req, register, '', [], '', [], true);
+    if (req.sharedDevice) {
+      // Dueño en caja central: el período es el de la gaveta única del aparato.
+      const periods = await sharedPeriods(tx, req, req.sharedDevice);
+      payload.shared_device = req.sharedDevice;
+      payload.current_periods = periods;
+      payload.current_period = periods[register] || payload.current_period;
+    }
   } else if (cashier) {
-    payload.current_period = await currentPeriod(tx, req, register, cashierScope, cashierArgs);
+    payload.current_period = await currentPeriod(tx, req, register, cashierScope, cashierArgs, withdrawalScope, withdrawalArgs);
   } else {
     const periods = await sharedPeriods(tx, req, shared);
     payload.shared_device = shared;
@@ -463,33 +535,59 @@ async function syncChanges(tx, req) {
     payload.current_period = periods[registerOf(shared, req.accountId)];
   }
 
+  // S5: solo el dueño (también en caja central) y, para lo del almacén, solo con
+  // el almacén habilitado. Los borrados se informan con warehouse_live_ids.
+  const extra = {};
+  if (owner && !history) {
+    const shopRow = (await query(tx, 'SELECT warehouse_enabled FROM users WHERE id = ?', [req.userId]))[0];
+    const warehouseOn = Number(shopRow?.warehouse_enabled ?? 1) !== 0;
+    for (const [key, name, sql] of OWNER_EXTRA) {
+      if (!(CURSOR_PARAMS[key] in req.query)) continue;
+      if (!warehouseOn && key !== 'stock_entry') continue;
+      extra[key] = { name, rows: await query(tx, `${sql} WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`, [req.userId, cursors[key], limit]) };
+      payload[name] = extra[key].rows;
+    }
+    // Una pasada completa de estados (cursor 0) trae también los ids vivos: lo que
+    // el cliente tenga y no esté aquí fue borrado.
+    if (extra.warehouse_state && cursors.warehouse_state === 0) {
+      payload.warehouse_live_ids = (await query(tx, 'SELECT id FROM warehouse_items WHERE user_id = ? ORDER BY id', [req.userId])).map((r) => Number(r.id));
+    }
+  }
+  const extraCursors = () => Object.fromEntries(Object.entries(extra).map(([key, e]) => [key, cursorsFor(payload[e.name], cursors[key])]));
+  const extraFull = () => Object.values(extra).some((e) => e.rows.length === limit);
+  const extraNames = Object.values(extra).map((e) => e.name);
+
   const buildCursors = () => ({
     sale: cursorsFor(sales, cursors.sale),
+    sale_state: cursorsFor(saleStates, cursors.sale_state),
+    purchase_state: cursorsFor(purchaseStates, cursors.purchase_state),
+    withdrawal_state: cursorsFor(withdrawalStates, cursors.withdrawal_state),
     close: cursorsFor(closes, cursors.close),
     count: cursorsFor(counts, cursors.count),
     purchase: cursorsFor(purchases, cursors.purchase),
     withdrawal: cursorsFor(withdrawals.filter((row) => Number(row.id) > cursors.withdrawal), cursors.withdrawal),
     correction: cursorsFor(corrections, cursors.correction),
     close_correction: cursorsFor(closeCorrections, cursors.close_correction),
+    ...extraCursors(),
   });
-  const buildHasMore = (trimmed) => sales.length === limit || closes.length === limit || counts.length === limit
+  const buildHasMore = (trimmed) => sales.length === limit || saleStates.length === limit || purchaseStates.length === limit || withdrawalStates.length === limit || closes.length === limit || counts.length === limit
     || purchases.length === limit || newWithdrawals === limit
     || corrections.length === limit || closeCorrections.length === limit
-    || trimmed.size > 0;
+    || extraFull() || trimmed.size > 0;
 
   // El presupuesto incluye también cursores y bandera; si no, una página justa
   // se pasa por unas decenas de bytes al añadir la metadata.
   payload.cursors = buildCursors();
   payload.has_more = true;
   let trimmed = trimToBudget(payload, [
-    'sales', 'cash_closes', 'inventory_counts', 'currency_purchases',
-    'cash_withdrawals', 'sale_corrections', 'cash_close_corrections',
+    'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
+    'cash_withdrawals', 'sale_corrections', 'cash_close_corrections', ...extraNames,
   ], maxBytes);
   payload.cursors = buildCursors();
   payload.has_more = buildHasMore(trimmed);
   if (byteSize(payload) > maxBytes) {
     trimmed = trimToBudget(payload, [
-      'sales', 'cash_closes', 'inventory_counts', 'currency_purchases',
+      'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
       'cash_withdrawals', 'sale_corrections', 'cash_close_corrections',
     ], maxBytes);
     payload.cursors = buildCursors();

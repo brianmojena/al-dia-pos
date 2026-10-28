@@ -347,9 +347,9 @@ test('extracción de caja en la caja de escritorio', async (t) => {
       const db = ctx.db;
       db.prepare(`
         INSERT INTO cash_withdrawals
-          (server_id, client_withdrawal_id, origin, method, amount, voided_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(55, 'web-55', 'server', 'efectivo', 800, null);
+          (server_id, client_withdrawal_id, origin, register_id, account_email, method, amount, voided_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(55, 'web-55', 'server', ctx.queries.getRegisterId(), 'cajero@tienda.cu', 'efectivo', 800, null);
 
       // El cajero hace un cierre - debe restar la extracción del servidor
       ctx.queries.setSession({

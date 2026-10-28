@@ -117,6 +117,31 @@ test('flujo de auditoría', async (t) => {
     const skipped = await processAuditJob(ctx.db, claimed[0], { callModel: null });
     assert.equal(skipped.status, 'skipped');
 
+    const { PROMPT_VERSION } = await import('../lib/audit/auditRules.mjs');
+    await ctx.db.execute({
+      sql: "UPDATE audit_reports SET prompt_version = '2026-10-22.1' WHERE cash_close_id = ? AND source_revision = 0",
+      args: [close.body.id],
+    });
+    await ctx.db.execute({
+      sql: "UPDATE audit_jobs SET status = 'failed' WHERE cash_close_id = ? AND source_revision = 0",
+      args: [close.body.id],
+    });
+
+    // La lectura de un informe histórico no lo reescribe ni lo migra.
+    let historical = await ctx.api('GET', '/api/audit/reports', { token: ownerToken });
+    assert.equal(historical.body.find((report) => report.source_revision === 0).prompt_version, '2026-10-22.1');
+
+    // Si se reencola explícitamente, el procesador regenera la revisión vieja
+    // con las reglas actuales sin crear un segundo informe.
+    const retriedOld = await ctx.api('POST', '/api/admin/audit/jobs/retry-failed', { token: ownerToken });
+    assert.equal(retriedOld.status, 200);
+    claimed = await claimAuditJobs(ctx.db, 5);
+    assert.equal(claimed.length, 1);
+    const regenerated = await processAuditJob(ctx.db, claimed[0], { callModel: null });
+    assert.equal(regenerated.status, 'ready');
+    historical = await ctx.api('GET', '/api/audit/reports', { token: ownerToken });
+    assert.equal(historical.body.find((report) => report.source_revision === 0).prompt_version, PROMPT_VERSION);
+
     const finalReports = await ctx.api('GET', '/api/audit/reports', { token: ownerToken });
     assert.equal(finalReports.body.length, 2);
   });

@@ -11,6 +11,7 @@ const { notifySale } = require('../lib/push');
 const { roundQty, validQuantity, lineUnits } = require('../lib/units');
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('../lib/payment');
 const { correctSale, parseCorrection, CorrectionError } = require('../lib/saleCorrections');
+const { operationOf, OperationError } = require('../lib/clientOperations');
 const { sharedOperationMatches, sharedSaleResponse } = require('../lib/sharedDevices');
 
 const isUniqueViolation = (err) => {
@@ -212,10 +213,11 @@ router.post('/:id/correct', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const account = await describeAccount(db, req);
   try {
-    const result = await correctSale(db, { userId: req.userId, saleId: req.params.id, body: req.body, account });
+    const op = operationOf(req);
+    const result = await correctSale(db, { userId: req.userId, saleId: req.params.id, body: req.body, account, op });
     res.json(result);
   } catch (error) {
-    if (error instanceof CorrectionError) return res.status(error.status).json({ error: error.message });
+    if (error instanceof CorrectionError || error instanceof OperationError) return res.status(error.status).json({ error: error.message });
     throw error;
   }
 }));

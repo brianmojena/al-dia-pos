@@ -74,6 +74,17 @@ test('un cierre cuadrado no genera señales ni llamadas a la IA', () => {
   assert.deepEqual(report.findings, []);
 });
 
+test('el informe separa quién cerró de quién registró las ventas', () => {
+  const snapshot = rules.buildAuditSnapshot({
+    close: baseClose({ account_id: 10, account_email: 'dueno@test.local' }),
+    sales: [sale({ account_id: 14, account_email: 'cajero@test.local' })],
+  });
+  assert.equal(snapshot.metrics.close.closing_actor_label, 'Cajero 1');
+  assert.equal(snapshot.metrics.period.sales_operators.length, 1);
+  assert.equal(snapshot.metrics.period.sales_operators[0].label, 'Cajero 2');
+  assert.notEqual(snapshot.metrics.period.sales_operators[0].label, snapshot.metrics.close.closing_actor_label);
+});
+
 test('un faltante pequeño queda en revisión, no en riesgo alto', () => {
   const snapshot = rules.buildAuditSnapshot({
     close: baseClose({ counted_cash: 4950, difference: -50 }),
@@ -115,7 +126,8 @@ test('dos faltantes previos más el actual disparan el patrón crítico S03', ()
   const signal = snapshot.signals.find((item) => item.id === 'S03');
   assert.ok(signal);
   assert.equal(signal.severity, 'critical');
-  assert.match(signal.evidence, /3 faltantes/);
+  assert.match(signal.evidence, /3 cierres con faltantes/);
+  assert.match(signal.evidence, /no identifica quién registró sus ventas/);
 });
 
 test('un descuadre atípico para el cajero dispara S04', () => {
@@ -380,18 +392,18 @@ test('S18: inventario cuadra pero hay faltante de caja (info)', () => {
   assert.ok(signal);
   assert.equal(signal.id, 'S18');
   assert.equal(signal.severity, 'info');
-  assert.match(signal.title, /Inventario cuadra/);
+  assert.match(signal.title, /Inventario contado sin diferencias/);
 });
 
-test('S18: inventario con diferencias respaldadas por faltante (warning)', () => {
+test('S18: coincidencia de valores no atribuye causalidad y no suma mercancía como efectivo', () => {
   const snapshot = rules.buildAuditSnapshot({
     close: baseClose({ difference: -500 }),
     sales: [sale()],
     context: {
       inventoryCheck: {
         available: true,
-        verdict: 'respaldo',
-        message: 'Faltan mercancías por 400 CUP y el faltante de caja es 500 CUP: probablemente hay ventas sin registrar.',
+        verdict: 'diferencias',
+        message: 'El valor de mercancía y el faltante de caja coinciden parcialmente; no demuestra causa.',
         net_missing_value: 400,
         cash_difference: -500,
       },
@@ -401,7 +413,8 @@ test('S18: inventario con diferencias respaldadas por faltante (warning)', () =>
   assert.ok(signal);
   assert.equal(signal.id, 'S18');
   assert.equal(signal.severity, 'warning');
-  assert.match(signal.title, /respaldado/);
+  assert.match(signal.title, /diferencias/);
+  assert.equal(signal.amount, null);
 });
 
 test('S18: inventario con diferencias no respaldadas (warning)', () => {

@@ -90,7 +90,10 @@ test('el cierre continuo agrupa a todos los actores y nunca absorbe otro registr
       { id: 3, client_sale_id: 'ajena', account_id: CASHIER_A, register_id: 'shared:otra-caja', cash_close_id: null, total: 999, payment_method: 'efectivo', created_at: '2026-10-14T10:02:00Z' },
       { id: 4, client_sale_id: 'legacy', account_id: CASHIER_A, register_id: null, cash_close_id: null, total: 888, payment_method: 'efectivo', created_at: '2026-10-14T10:03:00Z' },
     ],
-    cash_withdrawals: [{ id: 90, method: 'efectivo', amount: 50, cash_close_id: null, voided_at: null, register_id: 'web:1' }],
+    cash_withdrawals: [
+      { id: 90, method: 'efectivo', amount: 50, cash_close_id: null, voided_at: null, register_id: 'web:1' },
+      { id: 91, method: 'efectivo', amount: 50, cash_close_id: null, voided_at: null, register_id: `shared:${TENANT}`, account_id: CASHIER_B },
+    ],
   }
   const op = prepareOperation(data, 'POST', '/api/cash-closes',
     { client_close_id: 'close-continuo', opening_float: 0, counted_cash: 150 },
@@ -99,7 +102,8 @@ test('el cierre continuo agrupa a todos los actores y nunca absorbe otro registr
   assert.equal(op.result.register_id, `shared:${TENANT}`)
   assert.equal(op.body.register_id, `shared:${TENANT}`)
   assert.equal(op.result.sales_count, 2)
-  assert.ok(op.withdrawalIds.includes(90), 'la extraccion del dueño entra en el cierre compartido')
+  assert.deepEqual(op.withdrawalIds, [91], 'solo la salida de esta gaveta compartida entra, aunque la haya registrado B')
+  assert.equal(op.result.expected_cash, 150)
 })
 
 test('el cierre no continuo cubre solo al actor activo y su registro', () => {

@@ -3,8 +3,9 @@ const assert = require('node:assert/strict');
 const { startTestServer, registerUser, createProduct, createCashier } = require('./helpers');
 
 const CURSOR_PARAMS = [
-  ['sale', 'after_sale'], ['close', 'after_close'], ['count', 'after_count'],
-  ['purchase', 'after_purchase'], ['withdrawal', 'after_withdrawal'],
+  ['sale', 'after_sale'], ['sale_state', 'after_sale_state'], ['close', 'after_close'], ['count', 'after_count'],
+  ['purchase', 'after_purchase'], ['purchase_state', 'after_purchase_state'],
+  ['withdrawal', 'after_withdrawal'], ['withdrawal_state', 'after_withdrawal_state'],
   ['correction', 'after_correction'], ['close_correction', 'after_close_correction'],
 ];
 
@@ -212,5 +213,89 @@ test('sincronización incremental paginada: cursores, bytes, correcciones y alca
     assert.equal(page.body.daily_stock, undefined);
     assert.equal(page.body.has_more, false);
     assert.ok(oldOpen.rowsAffected >= 1 && oldClosed.rowsAffected >= 1);
+  });
+
+  await t.test('el dueño cierra ventas descargadas y el cajero refresca sin datos del cierre', async () => {
+    const cashierB = await createCashier(ctx.api, token, { email: 'sync-b@test.local' });
+    const makeSale = (auth, id) => ctx.api('POST', '/api/sales', { token: auth, body: {
+      client_sale_id: id, items: [{ product_id: product, quantity: 1, unit_price: 10 }],
+    } });
+    const saleA = await makeSale(cashier.token, 'sync-sale-a');
+    const saleB = await makeSale(cashierB.token, 'sync-sale-b');
+    assert.equal(saleA.status, 201);
+    assert.equal(saleB.status, 201);
+
+    const initial = await ctx.api('GET', pagePath({}, { limit: 500 }), { token: cashier.token });
+    assert.ok(initial.body.sales.some((row) => row.client_sale_id === 'sync-sale-a'));
+    const ownerCached = await ctx.api('GET', pagePath({}, { limit: 500 }), { token });
+    assert.ok(ownerCached.body.sales.some((row) => row.client_sale_id === 'sync-sale-a'));
+    const advanced = { ...initial.body.cursors, sale_state: 0 };
+    const closeResult = await ctx.api('POST', '/api/cash-closes', {
+      token, body: { opening_float: 0, counted_cash: 0 },
+    });
+    assert.equal(closeResult.status, 201);
+
+    const refreshed = await ctx.api('GET', pagePath(advanced, { limit: 500 }), { token: cashier.token });
+    assert.equal(refreshed.body.sales.some((row) => Number(row.id) === Number(saleA.body.id)), false,
+      'el cursor de ventas ya puede estar avanzado');
+    assert.equal(refreshed.body.sale_states.some((row) => Number(row.id) === Number(saleA.body.id) && row.closed === 1), true);
+    assert.equal(refreshed.body.sale_states.some((row) => Number(row.id) === Number(saleB.body.id)), false);
+    assert.equal(refreshed.body.cash_closes.some((row) => Number(row.id) === Number(closeResult.body.id)), false);
+    const state = refreshed.body.sale_states.find((row) => Number(row.id) === Number(saleA.body.id));
+    assert.equal(Number(state.cash_close_id), Number(closeResult.body.id));
+    assert.deepEqual(Object.keys(state).sort(), ['cash_close_id', 'closed', 'id']);
+    assert.equal(refreshed.body.current_period.has_sales, false);
+
+    const laterSale = await sale('sync-sale-after-owner-close', cashier.token);
+    assert.equal(laterSale.status, 201);
+    const ownerDelta = await ctx.api('GET', pagePath({}, { limit: 500 }), { token });
+    assert.equal(ownerDelta.body.current_period.has_sales, true,
+      'el período del dueño incluye la venta abierta en la gaveta del cajero');
+    assert.equal(ownerDelta.body.current_period.opened_at, closeResult.body.closed_at,
+      'la apertura del dueño parte del cierre global más reciente');
+    const ownerSnapshot = await ctx.api('GET', '/api/sync/snapshot', { token });
+    assert.equal(ownerSnapshot.body.current_period.has_sales, true);
+    assert.equal(ownerSnapshot.body.current_period.opened_at, closeResult.body.closed_at,
+      'el snapshot PWA mantiene el mismo período global que el preview del cierre');
+
+    const ownerAfterClose = await ctx.api('GET', pagePath({ ...ownerCached.body.cursors, sale_state: 0 }, { limit: 500 }), { token });
+    assert.equal(ownerAfterClose.body.sale_states.find((state) => Number(state.id) === Number(saleA.body.id)).cash_close_id,
+      Number(closeResult.body.id), 'el dueño PWA recibe el vínculo de cierre en el cursor de estado');
+    await ctx.db.execute({ sql: 'UPDATE sales SET cash_close_id = NULL WHERE id = ?', args: [saleA.body.id] });
+    await ctx.db.execute({ sql: 'DELETE FROM cash_closes WHERE id = ?', args: [closeResult.body.id] });
+    const ownerAfterDelete = await ctx.api('GET', pagePath({ ...ownerCached.body.cursors, sale_state: 0 }, { limit: 500 }), { token });
+    assert.equal(ownerAfterDelete.body.sales.some((row) => Number(row.id) === Number(saleA.body.id)), false,
+      'el cursor de venta ya está avanzado');
+    assert.equal(ownerAfterDelete.body.sale_states.find((state) => Number(state.id) === Number(saleA.body.id)).cash_close_id, null,
+      'el estado del dueño permite restaurar la venta tras borrar el cierre cacheado');
+
+    const ownerWithdrawal = await ctx.api('POST', '/api/cash-withdrawals', { token, body: {
+      client_withdrawal_id: 'sync-owner-withdrawal', method: 'efectivo', amount: 25,
+    } });
+    assert.equal(ownerWithdrawal.status, 201);
+    const ownCashier = await ctx.db.execute({ sql: 'SELECT id, email FROM users WHERE email = ?', args: [cashier.email] });
+    const otherCashier = await ctx.db.execute({ sql: 'SELECT id, email FROM users WHERE email = ?', args: [cashierB.email] });
+    const legacyIds = [];
+    for (const [label, account] of [['legacy-own', ownCashier.rows[0]], ['legacy-other', otherCashier.rows[0]]]) {
+      const inserted = await ctx.db.execute({
+        sql: `INSERT INTO cash_withdrawals (user_id, client_withdrawal_id, method, amount, account_id, account_email, created_at)
+              VALUES (?, ?, 'efectivo', 5, ?, ?, '2026-10-27 10:00:00')`,
+        args: [ownerId, label, Number(account.id), account.email],
+      });
+      legacyIds.push(Number(inserted.lastInsertRowid));
+    }
+    const emailFallback = await ctx.db.execute({
+      sql: `INSERT INTO cash_withdrawals (user_id, client_withdrawal_id, method, amount, account_id, account_email, created_at)
+            VALUES (?, 'legacy-email-own', 'efectivo', 5, NULL, ?, '2026-10-27 10:01:00')`,
+      args: [ownerId, ownCashier.rows[0].email],
+    });
+    legacyIds.push(Number(emailFallback.lastInsertRowid));
+    const cashierSnapshot = await ctx.api('GET', '/api/sync/snapshot', { token: cashier.token });
+    assert.equal(cashierSnapshot.status, 200);
+    assert.deepEqual(cashierSnapshot.body.cash_withdrawals.map((row) => row.client_withdrawal_id).sort(), ['legacy-email-own', 'legacy-own']);
+    assert.equal(cashierSnapshot.body.current_period.has_sales, true, 'el legado propio sí participa en has_sales');
+    assert.equal(cashierSnapshot.body.cash_withdrawals.some((row) => row.client_withdrawal_id === 'sync-owner-withdrawal'), false);
+    assert.equal(cashierSnapshot.body.cash_withdrawals.some((row) => row.client_withdrawal_id === 'legacy-other'), false);
+    assert.deepEqual(cashierSnapshot.body.withdrawal_states.map((state) => state.id).sort((a, b) => a - b), legacyIds.filter((id) => id !== legacyIds[1]).sort((a, b) => a - b));
   });
 });

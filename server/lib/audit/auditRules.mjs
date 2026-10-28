@@ -10,7 +10,7 @@
  * calcula saldos ni diferencias.
  */
 
-export const PROMPT_VERSION = '2026-10-22.1';
+export const PROMPT_VERSION = '2026-10-27.1';
 
 export const SEVERITY_ORDER = { ok: 0, info: 1, warning: 2, critical: 3 };
 
@@ -273,11 +273,19 @@ export function buildAuditSnapshot({
       correction_revision: Number(close.correction_revision) || 0,
       shared_register: String(close.register_id || '').startsWith('shared:'),
       closing_cashier_label: closingLabel,
+      closing_actor_label: closingLabel,
     },
     period: {
       hours: periodHours,
       sales_count: sales.length,
       total_sales: sum(sales, (sale) => sale.total),
+      // Separar de forma explícita la persona que registró ventas de quien
+      // cerró la caja: el autor del cierre no se atribuye ventas por defecto.
+      sales_operators: ordered.filter((cashier) => cashier.sales_count > 0).map((cashier) => ({
+        label: cashier.label,
+        sales_count: cashier.sales_count,
+        sales_total: cashier.sales_total,
+      })),
       cash_sales: cashSales,
       transfer_sales: transferSales,
       usd_sales: usdSales,
@@ -345,10 +353,23 @@ export function buildAuditSnapshot({
         value_missing: context.inventoryCheck.value_missing ?? null,
         value_extra: context.inventoryCheck.value_extra ?? null,
         net_missing_value: context.inventoryCheck.net_missing_value ?? null,
+        value_basis: 'valoración de mercancía; no equivale a efectivo',
         cash_difference: context.inventoryCheck.cash_difference ?? null,
         minutes_before_close: context.inventoryCheck.minutes_before_close ?? null,
         counted_at: context.inventoryCheck.counted_at ?? null,
         count_id: context.inventoryCheck.count_id ?? null,
+        closed_by: context.inventoryCheck.closed_by ? closingLabel : null,
+        uncounted_sold_products: context.inventoryCheck.uncounted_sold_products ?? [],
+        uncounted_sold_products_count: context.inventoryCheck.uncounted_sold_products_count ?? 0,
+        stock_adjustments_count: context.inventoryCheck.stock_adjustments_count ?? 0,
+        stock_adjustments_before_count: context.inventoryCheck.stock_adjustments_before_count ?? 0,
+        stock_adjustments_after_count: context.inventoryCheck.stock_adjustments_after_count ?? 0,
+        stock_adjustment_units_in: context.inventoryCheck.stock_adjustment_units_in ?? 0,
+        stock_adjustment_units_out: context.inventoryCheck.stock_adjustment_units_out ?? 0,
+        linked_sales_count: context.inventoryCheck.linked_sales_count ?? 0,
+        counted_after_close: context.inventoryCheck.counted_after_close ?? false,
+        timing_uncertain: context.inventoryCheck.timing_uncertain ?? false,
+        stock_tracking_history_known: context.inventoryCheck.stock_tracking_history_known ?? null,
       } : null,
     },
   };
@@ -420,8 +441,8 @@ export function buildAuditSnapshot({
     signals.push(signal({
       id: 'S03',
       severity: recentShortfalls >= limits.repeatedShortfallsCritical ? 'critical' : 'warning',
-      title: 'Patrón de faltantes del cajero',
-      evidence: `${closingCashier.label} acumula ${recentShortfalls} faltantes en ${recentCloses} cierres de los últimos 30 días (saldo ${recentDifference} CUP).`,
+      title: 'Patrón de faltantes en cierres realizados por la misma persona',
+      evidence: `${closingCashier.label} registró ${recentShortfalls} cierres con faltantes entre ${recentCloses} cierres de los últimos 30 días (saldo acumulado ${recentDifference} CUP). Esto describe cierres, no identifica quién registró sus ventas.`,
       amount: abs(recentDifference),
       currency: 'CUP',
       subjectLabel: closingCashier.label,
@@ -433,7 +454,7 @@ export function buildAuditSnapshot({
       id: 'S04',
       severity: 'warning',
       title: 'Descuadre fuera del comportamiento habitual',
-      evidence: `El faltante de este cierre está ${abs(closingCashier.z_score)} desviaciones por debajo del promedio de ${closingCashier.label}.`,
+      evidence: `El faltante de este cierre está ${abs(closingCashier.z_score)} desviaciones por debajo del promedio de cierres registrados por ${closingCashier.label}; esto no identifica quién registró las ventas.`,
       amount: abs(diff),
       currency: 'CUP',
       subjectLabel: closingCashier.label,
@@ -588,11 +609,11 @@ export function buildAuditSnapshot({
 
     if (verdict === 'respaldo') {
       severity = 'warning';
-      title = 'Faltante respaldado por inventario';
+      title = 'Diferencias de inventario y caja por conciliar';
     } else if (verdict === 'cuadra') {
       if (abs(cash_difference) > limits.squareCash) {
         severity = 'info';
-        title = 'Inventario cuadra: la diferencia es de efectivo';
+        title = 'Inventario contado sin diferencias; caja por conciliar';
       }
     } else if (verdict === 'diferencias') {
       severity = 'warning';
@@ -609,7 +630,11 @@ export function buildAuditSnapshot({
     // Un arqueo incompleto solo merece aviso si la caja tampoco cuadró: en un
     // cierre limpio sería ruido en cada informe.
     const isExplicitVerdict = verdict === 'respaldo' || verdict === 'diferencias'
-      || (verdict === 'parcial' && abs(cash_difference) > limits.squareCash);
+      || (verdict === 'parcial' && (abs(cash_difference) > limits.squareCash
+        || Number(inventoryCheck.stock_adjustments_count) > 0
+        || Number(inventoryCheck.uncounted_sold_products_count) > 0
+        || inventoryCheck.timing_uncertain === true
+        || inventoryCheck.stock_tracking_history_known === false));
 
     if (hasInventoryDifference || isExplicitVerdict) {
       signals.push(signal({
@@ -617,7 +642,9 @@ export function buildAuditSnapshot({
         severity,
         title,
         evidence: message,
-        amount: abs(net_missing_value),
+        // La valoración del inventario es mercancía, no una pérdida de
+        // efectivo. La coincidencia entre ambas cifras tampoco demuestra causa.
+        amount: null,
         currency: 'CUP',
       }));
     }
@@ -652,7 +679,7 @@ const CAUSES = {
   S15: 'Diferencia en billetes de dólares o euros; revisar el conteo de divisa.',
   S16: 'Ventas antiguas sin cerrar; el efectivo puede estar fuera del arqueo.',
   S17: 'Dos cierres de la misma caja muy seguidos; puede ser un doble cierre del mismo período.',
-  S18: 'El cruce de inventario con el cierre de caja detecta discrepancias: posibles ventas sin registrar, duplicadas o mercancía dañada.',
+  S18: 'El cruce muestra diferencias de inventario; por sí solo no establece si hubo ventas sin registrar, duplicadas o mercancía dañada.',
 };
 
 const RECOMMENDATIONS = {

@@ -149,10 +149,13 @@ const cashierEdit = (op) => op.method === 'PUT' && (getSharedContext() ? getShar
 const priceAndStockOnly = ({ sale_price, add_stock }) => ({ ...(sale_price !== undefined && { sale_price }), ...(add_stock !== undefined && { add_stock }) })
 const CURSOR_PARAMS = {
   sale: 'after_sale',
+  sale_state: 'after_sale_state',
   close: 'after_close',
   count: 'after_count',
   purchase: 'after_purchase',
+  purchase_state: 'after_purchase_state',
   withdrawal: 'after_withdrawal',
+  withdrawal_state: 'after_withdrawal_state',
   correction: 'after_correction',
   close_correction: 'after_close_correction',
 }
@@ -222,10 +225,13 @@ const cursorsFromSnapshot = (snapshot) => {
   const max = (rows) => (rows || []).reduce((n, row) => Math.max(n, Number(row.id) || 0), 0)
   return {
     sale: max(snapshot.sales),
+    sale_state: 0,
     close: max(snapshot.cash_closes),
     count: max(snapshot.inventory_counts),
     purchase: max(snapshot.currency_purchases),
+    purchase_state: 0,
     withdrawal: max(snapshot.cash_withdrawals),
+    withdrawal_state: 0,
     correction: 0,
     close_correction: 0,
   }
@@ -333,7 +339,11 @@ export async function syncOffline() {
         if (shared && !credential) throw new Error('Falta la autorización del cajero original. Los cambios siguen guardados.')
         const path = op.kind === 'product' ? '/api/sync/product-operation' : op.path
         const body = op.kind === 'product' ? { operation_id: op.id, method: op.method, product_id: op.productId, product: cashierEdit(op) ? priceAndStockOnly(op.body) : op.body, expected: op.before } : { ...op.body }
-        if (op.kind === 'close' && op.coverageExact) { body.covered_sale_ids = op.saleIds; body.covered_purchase_ids = op.purchaseIds || [] }
+        if (op.kind === 'close' && op.coverageExact) {
+          body.covered_sale_ids = op.saleIds
+          body.covered_purchase_ids = op.purchaseIds || []
+          body.covered_withdrawal_ids = op.withdrawalIds || []
+        }
         const res = await request(path, { ...(credential ? { token: credential.token } : {}), method: op.kind === 'product' ? 'POST' : op.method, body: JSON.stringify(body) })
         const result = await res.json().catch(() => ({}))
         if (!res.ok) {
@@ -402,7 +412,7 @@ export async function syncOffline() {
         }
         await updateAccount(storageKey, (s = initialState(account, shared)) => {
           s.base = applyChanges(s.base, page)
-          s.cursors = page.cursors
+          s.cursors = { ...page.cursors, ...(page.has_more ? {} : { sale_state: 0, purchase_state: 0, withdrawal_state: 0 }) }
           s.initialized = true
           s.lastSynced = Date.now()
           s.syncError = ''

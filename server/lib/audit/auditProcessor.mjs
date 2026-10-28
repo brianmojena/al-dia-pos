@@ -201,7 +201,7 @@ async function fetchSnapshotInput(db, close) {
 
 async function existingReport(db, job) {
   return (await rows(db,
-    `SELECT id, status, model FROM audit_reports
+    `SELECT id, status, model, prompt_version FROM audit_reports
       WHERE user_id = ? AND cash_close_id = ? AND source_revision = ?`,
     [job.user_id, job.cash_close_id, job.source_revision]))[0] || null;
 }
@@ -237,7 +237,7 @@ export async function processAuditJob(db, job, { callModel = null, maxAttempts =
   const started = Date.now();
   try {
     const previous = await existingReport(db, job);
-    if (previous && previous.status === 'ready') {
+    if (previous && previous.status === 'ready' && previous.prompt_version === PROMPT_VERSION) {
       await markDone(db, job);
       return { status: 'skipped', reportId: previous.id };
     }

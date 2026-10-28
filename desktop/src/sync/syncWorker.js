@@ -340,6 +340,7 @@ async function pullDelta(session, summary) {
       const stats = applyServerDelta({
         sales: snapshot.sales || [], cash_closes: snapshot.cash_closes || [],
         inventory_counts: [], currency_purchases: snapshot.currency_purchases || [],
+        purchase_states: snapshot.purchase_states || [], withdrawal_states: snapshot.withdrawal_states || [],
         cash_withdrawals: snapshot.cash_withdrawals || [], sale_corrections: [],
         cursors: { sale: maxId(snapshot.sales), close: maxId(snapshot.cash_closes), count: 0,
           purchase: maxId(snapshot.currency_purchases), withdrawal: maxId(snapshot.cash_withdrawals), correction: 0 },
@@ -359,8 +360,10 @@ async function pullDelta(session, summary) {
     do {
       const query = new URLSearchParams({
         after_sale: String(cursors.sale), after_close: String(cursors.close),
+        after_sale_state: String(cursors.sale_state),
+        after_purchase_state: String(cursors.purchase_state), after_withdrawal_state: String(cursors.withdrawal_state),
         after_count: String(cursors.count), after_purchase: String(cursors.purchase),
-        after_withdrawal: String(cursors.withdrawal), after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500',
+        after_withdrawal: String(cursors.withdrawal), after_correction: String(cursors.correction), since: sinceLast60Days(), limit: '500', max_bytes: '524288',
       });
       query.set('after_close_correction', String(cursors.close_correction));
       const res = await apiRequest('GET', `/api/sync/delta?${query}`, { token: session.token });
@@ -379,6 +382,11 @@ async function pullDelta(session, summary) {
       more = res.data.has_more === true;
       pages++;
     } while (more && pages < 10);
+    if (!more && pages > 0) {
+      setSyncState('delta_after_sale_state', 0);
+      setSyncState('delta_after_purchase_state', 0);
+      setSyncState('delta_after_withdrawal_state', 0);
+    }
   } catch (err) {
     // Sin red es lo normal y no es un error: la próxima pasada retoma desde el
     // último cursor guardado. Cualquier otra cosa (una página que la base local

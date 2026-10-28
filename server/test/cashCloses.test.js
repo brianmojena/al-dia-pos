@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
-const { startTestServer, registerUser, createProduct } = require('./helpers');
+const { startTestServer, registerUser, createProduct, createCashier } = require('./helpers');
 
 /**
  * El arqueo de caja es la función que le da sentido comercial al POS frente al
@@ -155,6 +155,21 @@ test('cierre de caja', async (t) => {
       args: [clientCloseId],
     });
     assert.equal(Number(filas.rows[0].n), 1, 'solo puede existir una fila para ese client_close_id');
+  });
+
+  await t.test('un client_close_id usado por otro cajero no revela ni reusa el cierre', async () => {
+    const owner = await registerUser(ctx.api);
+    const { token: cashierA } = await createCashier(ctx.api, owner);
+    const { token: cashierB } = await createCashier(ctx.api, owner);
+    const first = await ctx.api('POST', '/api/cash-closes', {
+      token: cashierA, body: { client_close_id: 'close-replay-cross-account', register_id: 'web', counted_cash: 0 },
+    });
+    assert.equal(first.status, 201);
+    const replay = await ctx.api('POST', '/api/cash-closes', {
+      token: cashierB, body: { client_close_id: 'close-replay-cross-account', register_id: 'web', counted_cash: 900 },
+    });
+    assert.equal(replay.status, 409);
+    assert.match(replay.body.error, /otra caja o cuenta/);
   });
 
   await t.test('los cierres de una tienda no se ven ni afectan a otra', async () => {

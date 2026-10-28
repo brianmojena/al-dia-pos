@@ -104,3 +104,33 @@ test('PIN y autorización local de caja compartida', async (t) => {
     assert.equal(shared.isSharedLocked(), false)
   })
 })
+
+test('caja centralizada: PIN del dueño de 8 dígitos y payload', async (t) => {
+  await t.test('el PIN del dueño se deriva con hashPin y solo viaja el verificador', async () => {
+    const pin = await shared.hashPin('12345678')
+    assert.match(pin.salt, /^[a-f0-9]{32}$/)
+    assert.match(pin.hash, /^[a-f0-9]{64}$/)
+    assert.equal(pin.iterations, 210000)
+  })
+
+  await t.test('PIN de 7 dígitos o con letras se rechaza', async () => {
+    assert.equal(shared.isOwnerPin('1234567'), false)
+    assert.equal(shared.isOwnerPin('1234abcd'), false)
+    assert.equal(shared.isOwnerPin('123456789'), false)
+    assert.equal(shared.isOwnerPin('12345678'), true)
+    await assert.rejects(shared.hashPin('1234567'), /6 dígitos/)
+    await assert.rejects(shared.hashPin('1234abcd'), /6 dígitos/)
+  })
+
+  await t.test('sin caja central el payload no añade campos', () => {
+    assert.deepEqual(shared.centralFields(false, 'Dueña', '12345678'), {})
+  })
+
+  await t.test('con caja central el payload lleva central y owner (con o sin PIN)', () => {
+    assert.deepEqual(shared.centralFields(true, '  Dueña  '), { central: true, owner: { display_name: 'Dueña' } })
+    assert.deepEqual(
+      shared.centralFields(true, 'Dueña', { salt: 'a'.repeat(32), hash: 'b'.repeat(64), iterations: 210000 }),
+      { central: true, owner: { display_name: 'Dueña', pin: { salt: 'a'.repeat(32), hash: 'b'.repeat(64), iterations: 210000 } } },
+    )
+  })
+})

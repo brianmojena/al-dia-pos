@@ -76,6 +76,9 @@ function prepareDeltaSession(userId) {
     const reset = db.transaction(() => {
       setSyncState('delta_user_id', userId);
       setSyncState('delta_after_sale', 0);
+      setSyncState('delta_after_sale_state', 0);
+      setSyncState('delta_after_purchase_state', 0);
+      setSyncState('delta_after_withdrawal_state', 0);
       setSyncState('delta_after_purchase', 0);
       setSyncState('delta_after_withdrawal', 0);
       setSyncState('delta_after_close', 0);
@@ -87,6 +90,9 @@ function prepareDeltaSession(userId) {
   }
   return {
     sale: Number(getSyncState('delta_after_sale') || 0),
+    sale_state: Number(getSyncState('delta_after_sale_state') || 0),
+    purchase_state: Number(getSyncState('delta_after_purchase_state') || 0),
+    withdrawal_state: Number(getSyncState('delta_after_withdrawal_state') || 0),
     purchase: Number(getSyncState('delta_after_purchase') || 0),
     withdrawal: Number(getSyncState('delta_after_withdrawal') || 0),
     close: Number(getSyncState('delta_after_close') || 0),
@@ -827,18 +833,20 @@ function createWithdrawalLocal(body = {}) {
 
 function listWithdrawals({ date, open } = {}) {
   const db = getLocalDb();
+  const scope = isWholeShop() ? '1 = 1' : cashierWithdrawalScope;
+  const scopeArgs = isWholeShop() ? [] : withdrawalScopeArgs();
   if (open) {
     return db.prepare(
-      'SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL ORDER BY created_at DESC, id DESC'
-    ).all();
+      `SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL AND voided_at IS NULL AND ${scope} ORDER BY created_at DESC, id DESC`
+    ).all(...scopeArgs);
   }
   if (date) {
     const { start, end } = boundsForDate(date);
     return db.prepare(
-      'SELECT * FROM cash_withdrawals WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC, id DESC'
-    ).all(start, end);
+      `SELECT * FROM cash_withdrawals WHERE created_at >= ? AND created_at < ? AND ${scope} ORDER BY created_at DESC, id DESC`
+    ).all(start, end, ...scopeArgs);
   }
-  return db.prepare('SELECT * FROM cash_withdrawals ORDER BY created_at DESC, id DESC LIMIT 200').all();
+  return db.prepare(`SELECT * FROM cash_withdrawals WHERE ${scope} ORDER BY created_at DESC, id DESC LIMIT 200`).all(...scopeArgs);
 }
 
 /**
@@ -972,9 +980,11 @@ function getDashboard() {
   `).get();
   const inventory = { cost: round2(inv.cost), retail: round2(inv.retail), units: round3(inv.units) };
 
+  const wholeShop = isWholeShop();
   const openWithdrawals = db.prepare(
-    `SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL AND voided_at IS NULL ORDER BY created_at DESC, id DESC`
-  ).all();
+    `SELECT * FROM cash_withdrawals WHERE cash_close_id IS NULL AND voided_at IS NULL
+      ${wholeShop ? '' : `AND ${cashierWithdrawalScope}`} ORDER BY created_at DESC, id DESC`
+  ).all(...(wholeShop ? [] : withdrawalScopeArgs()));
 
   return { today: todayStats, holdings, inventory, lowStock, recentSales, audit: { offRateSales: offRate.n }, open_withdrawals: openWithdrawals };
 }
@@ -1002,28 +1012,34 @@ const getPeriodStart = (db) => {
 // La cuenta principal cuenta la tienda entera: además de lo hecho aquí, lo que
 // bajó de teléfonos y otras cajas y sigue sin cerrar. Un cajero, solo lo suyo.
 const isWholeShop = () => (getSession()?.role ?? null) !== 'cajero';
+const cashierAccountScope = ` (account_email = ? OR
+  (origin = 'local' AND register_id = ? AND account_email IS NULL)) `;
+const cashierWithdrawalScope = ` (register_id = ? OR
+  (register_id IS NULL AND (account_email = ? OR (origin = 'local' AND account_email IS NULL)))) `;
+const periodScopeArgs = () => [getSession()?.email, getRegisterId()];
+const withdrawalScopeArgs = () => [getRegisterId(), getSession()?.email];
 const periodSales = (db, wholeShop = false) =>
   db.prepare(
     `SELECT client_sale_id, total, payment_method, transfer_amount,
             foreign_currency, foreign_amount, exchange_rate, created_at
-     FROM sales WHERE ${wholeShop ? '1 = 1' : "(account_email = ? OR (origin = 'local' AND account_email IS NULL))"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
-  ).all(...(wholeShop ? [] : [getSession()?.email]));
+     FROM sales WHERE ${wholeShop ? '1 = 1' : cashierAccountScope} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all(...(wholeShop ? [] : periodScopeArgs()));
 
 // Compras de divisa de esta caja que ningún arqueo ha cubierto todavía.
 const periodPurchases = (db, wholeShop = false) =>
   db.prepare(
     `SELECT id, client_purchase_id, foreign_currency, foreign_amount, cup_amount, created_at
-     FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : "(account_email = ? OR (origin = 'local' AND account_email IS NULL))"} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
-  ).all(...(wholeShop ? [] : [getSession()?.email]));
+     FROM currency_purchases WHERE ${wholeShop ? '1 = 1' : cashierAccountScope} AND cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
+  ).all(...(wholeShop ? [] : periodScopeArgs()));
 
-// Extracciones de caja que ningún arqueo ha cubierto todavía.
-// El cierre toma TODAS (de cualquier origen) porque la dueña extrae por teléfono
-// pero el cajero cierra en la laptop: el cierre es de la tienda entera.
-const periodWithdrawals = (db) =>
+// Extracciones que ningún arqueo ha cubierto todavía. La dueña consolida la
+// tienda completa; el cajero usa su register y los registros legacy atribuibles
+// a su cuenta.
+const periodWithdrawals = (db, wholeShop = isWholeShop()) =>
   db.prepare(
     `SELECT id, client_withdrawal_id, method, amount, voided_at, created_at
-     FROM cash_withdrawals WHERE cash_close_id IS NULL ORDER BY created_at ASC, id ASC`
-  ).all();
+     FROM cash_withdrawals WHERE cash_close_id IS NULL AND voided_at IS NULL${wholeShop ? '' : ` AND ${cashierWithdrawalScope}`} ORDER BY created_at ASC, id ASC`
+  ).all(...(wholeShop ? [] : withdrawalScopeArgs()));
 
 
 /**
@@ -1039,7 +1055,7 @@ function getCurrentCashPeriod() {
   const periodStart = getPeriodStart(db);
   const sales = periodSales(db, isWholeShop());
   const purchases = periodPurchases(db, isWholeShop());
-  const withdrawals = periodWithdrawals(db);
+  const withdrawals = periodWithdrawals(db, isWholeShop());
   const isFirstClose = periodStart === BEGINNING_OF_TIME;
   const firstAt = [sales[0]?.created_at, purchases[0]?.created_at, withdrawals[0]?.created_at].filter(Boolean).sort()[0] ?? null;
 
@@ -1092,7 +1108,7 @@ function createCashCloseLocal({ counted_cash, opening_float = 0, note = null, co
     const wholeShop = isWholeShop();
     const sales = periodSales(db, wholeShop);
     const purchases = periodPurchases(db, wholeShop);
-    const withdrawals = periodWithdrawals(db);
+    const withdrawals = periodWithdrawals(db, wholeShop);
 
     // Una venta mixta aporta a los dos lados: su efectivo está en la gaveta.
     // Una en divisa deja sus billetes aparte y descuenta el vuelto en pesos.
@@ -1370,17 +1386,66 @@ const localProductForServerId = (db, serverId) => {
 
 /**
  * Aplica una página completa en una sola transacción. Las filas remotas son
- * solo historial: no descuentan stock, no generan outbox y los cierres remotos
- * nunca reciben el vínculo local `sales.cash_close_id`.
+ * no descuentan stock ni generan outbox. Su cobertura se enlaza con el cierre
+ * local correspondiente, preservando siempre cierres pendientes de confirmar.
  */
 // Una venta o compra bajada que el servidor ya tiene en un cierre deja de estar
-// abierta aquí. Si ese cierre todavía no bajó, queda -id_del_cierre_en_servidor
-// (cualquier valor que no sea NULL la saca del período) y se corrige al bajar el cierre.
+// abierta aquí. Si ese cierre todavía no bajó, queda un sentinel negativo
+// que la saca del período; la cobertura explícita enlaza el cierre al descargarlo.
 function markClosedOnServer(db, table, rowId, serverCloseId) {
   if (serverCloseId == null) return;
+  if (preservePendingLocalClose(db, table, rowId)) return;
+  const current = db.prepare(`SELECT cash_close_id FROM ${table} WHERE id = ?`).get(rowId)?.cash_close_id;
   const close = db.prepare('SELECT id FROM cash_closes WHERE server_id = ?').get(Number(serverCloseId));
-  db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE id = ? AND cash_close_id IS NULL`)
-    .run(close ? close.id : -Number(serverCloseId), rowId);
+  db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE id = ?
+    AND cash_close_id IS ?`).run(close ? close.id : -Number.MAX_SAFE_INTEGER, rowId, current ?? null);
+}
+
+function isPendingLocalClose(db, closeId) {
+  if (closeId == null || Number(closeId) < 0) return false;
+  const close = db.prepare('SELECT id, server_id, origin FROM cash_closes WHERE id = ?').get(Number(closeId));
+  if (close && close.origin === 'local' && close.server_id == null) return true;
+  return !!db.prepare(`SELECT 1 FROM outbox WHERE op_type = 'cash_close.create'
+    AND local_ref_id = ? AND status != 'synced' LIMIT 1`).get(Number(closeId));
+}
+
+function preservePendingLocalClose(db, table, rowId) {
+  const idColumn = { sales: 'client_sale_id', currency_purchases: 'client_purchase_id', cash_withdrawals: 'client_withdrawal_id' }[table];
+  const listKey = { sales: 'client_sale_ids', currency_purchases: 'client_purchase_ids', cash_withdrawals: 'client_withdrawal_ids' }[table];
+  const row = db.prepare(`SELECT cash_close_id, ${idColumn} AS client_id FROM ${table} WHERE id = ?`).get(rowId);
+  if (!row) return false;
+  if (isPendingLocalClose(db, row.cash_close_id)) return true;
+  if (row.client_id == null) return false;
+  const pending = db.prepare(`SELECT local_ref_id, payload FROM outbox
+    WHERE op_type = 'cash_close.create' AND status != 'synced'`).all();
+  for (const operation of pending) {
+    try {
+      const payload = JSON.parse(operation.payload || '{}');
+      if (Array.isArray(payload[listKey]) && payload[listKey].includes(row.client_id)) {
+        const localCloseId = Number(operation.local_ref_id);
+        if (!Number.isInteger(localCloseId) || localCloseId <= 0) continue;
+        db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE id = ?`).run(localCloseId, rowId);
+        return true;
+      }
+    } catch { /* una operación corrupta no puede atribuir cobertura */ }
+  }
+  return false;
+}
+
+// La reconciliación remota nunca reemplaza la cobertura de un cierre local
+// todavía pendiente, cuyo id positivo es AUTOINCREMENT y no un sentinel.
+function applyServerCloseState(db, table, rowId, state) {
+  if (preservePendingLocalClose(db, table, rowId)) return;
+  const hasCloseId = state && typeof state === 'object' && Object.hasOwn(state, 'cash_close_id');
+  if (hasCloseId && state.cash_close_id != null) {
+    markClosedOnServer(db, table, rowId, state.cash_close_id);
+    return;
+  }
+  const closed = hasCloseId ? false : state && typeof state === 'object'
+    ? Number(state.closed) === 1 || Number(state.voided) === 1
+    : Boolean(state);
+  db.prepare(`UPDATE ${table} SET cash_close_id = ? WHERE id = ?`)
+    .run(closed ? -Number.MAX_SAFE_INTEGER : null, rowId);
 }
 
 // Pasa a cerradas, con el id local de este cierre, las ventas, compras y
@@ -1426,6 +1491,8 @@ function applyServerDelta(page) {
       const existing = db.prepare('SELECT id, server_id FROM sales WHERE client_sale_id = ?').get(clientSaleId);
       if (existing) {
         if (existing.server_id == null) db.prepare('UPDATE sales SET server_id = ? WHERE id = ?').run(Number(sale.id), existing.id);
+        if (sale.cash_close_id != null) markClosedOnServer(db, 'sales', existing.id, sale.cash_close_id);
+        else applyServerCloseState(db, 'sales', existing.id, { cash_close_id: null });
         continue;
       }
       const result = insertSale.run(
@@ -1444,6 +1511,25 @@ function applyServerDelta(page) {
       }
       stats.sales++;
     }
+    for (const state of page.sale_states || []) {
+      const sale = db.prepare('SELECT id FROM sales WHERE server_id = ?').get(Number(state.id));
+      if (sale) applyServerCloseState(db, 'sales', sale.id, state);
+    }
+    for (const state of page.purchase_states || []) {
+      const purchase = db.prepare('SELECT id FROM currency_purchases WHERE server_id = ?').get(Number(state.id));
+      if (purchase) applyServerCloseState(db, 'currency_purchases', purchase.id, state);
+    }
+    for (const state of page.withdrawal_states || []) {
+      const withdrawal = db.prepare('SELECT id FROM cash_withdrawals WHERE server_id = ?').get(Number(state.id));
+      if (withdrawal) {
+        applyServerCloseState(db, 'cash_withdrawals', withdrawal.id, state);
+        if (Object.hasOwn(state, 'voided_at')) {
+          const pendingVoid = db.prepare(`SELECT 1 FROM outbox WHERE op_type = 'cash_withdrawal.void'
+            AND local_ref_id = ? AND status != 'synced' LIMIT 1`).get(withdrawal.id);
+          if (!pendingVoid) db.prepare('UPDATE cash_withdrawals SET voided_at = ? WHERE id = ?').run(state.voided_at, withdrawal.id);
+        }
+      }
+    }
 
     // Compras de divisa de otras cajas: solo historial; sin vínculo de cierre
     // local ni outbox (el arqueo local solo cubre origin = 'local').
@@ -1458,6 +1544,8 @@ function applyServerDelta(page) {
       const existing = db.prepare('SELECT id, server_id FROM currency_purchases WHERE client_purchase_id = ?').get(clientPurchaseId);
       if (existing) {
         if (existing.server_id == null) db.prepare('UPDATE currency_purchases SET server_id = ? WHERE id = ?').run(Number(purchase.id), existing.id);
+        if (purchase.cash_close_id != null) markClosedOnServer(db, 'currency_purchases', existing.id, purchase.cash_close_id);
+        else applyServerCloseState(db, 'currency_purchases', existing.id, { cash_close_id: null });
         continue;
       }
       const purchaseRow = insertPurchase.run(
@@ -1487,9 +1575,8 @@ function applyServerDelta(page) {
             .run(withdrawal.voided_at, existing.id);
         }
         // Marcar como cubierta si el servidor dice que lo está
-        if (withdrawal.cash_close_id) {
-          markClosedOnServer(db, 'cash_withdrawals', existing.id, withdrawal.cash_close_id);
-        }
+        if (withdrawal.cash_close_id != null) markClosedOnServer(db, 'cash_withdrawals', existing.id, withdrawal.cash_close_id);
+        else applyServerCloseState(db, 'cash_withdrawals', existing.id, { cash_close_id: null });
         continue;
       }
       const withdrawalRow = insertWithdrawal.run(
@@ -1591,6 +1678,9 @@ function applyServerDelta(page) {
     }
 
     setSyncState('delta_after_sale', page.cursors.sale);
+    if (page.cursors.sale_state != null) setSyncState('delta_after_sale_state', page.cursors.sale_state);
+    if (page.cursors.purchase_state != null) setSyncState('delta_after_purchase_state', page.cursors.purchase_state);
+    if (page.cursors.withdrawal_state != null) setSyncState('delta_after_withdrawal_state', page.cursors.withdrawal_state);
     // Un servidor anterior a esta función no manda el cursor de compras.
     if (page.cursors.purchase != null) setSyncState('delta_after_purchase', page.cursors.purchase);
     // Un servidor anterior a esta función no manda el cursor de extracciones.

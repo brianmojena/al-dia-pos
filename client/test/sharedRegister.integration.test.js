@@ -71,11 +71,13 @@ test('caja compartida: relevo offline, SQLite real y respuesta perdida', async (
   await unlockSharedCashier(a.id, '123456')
   await syncOffline()
   assert.equal((await localSyncStatus()).initialized, true)
+  assert.deepEqual(await read('/api/cash-withdrawals?open=1'), [], 'la caja compartida no incorpora retiros de la caja web del dueño')
   const sale = (id, quantity) => ({ client_sale_id: id, payment_method: 'efectivo', items: [{ product_id: product, quantity, unit_price: 100 }] })
   let close
 
   await t.test('A vende, B ve el stock descontado y cierra el acumulado sin conexión', async () => {
     navigator.onLine = false
+    await write('/api/cash-withdrawals', { client_withdrawal_id: 'shared-drawer-withdrawal', method: 'efectivo', amount: 50, note: 'Compra de esta caja' })
     await write('/api/sales', sale('shared-a-1', 2))
     lockSharedDevice()
     await unlockSharedCashier(b.id, '654321')
@@ -86,7 +88,7 @@ test('caja compartida: relevo offline, SQLite real y respuesta perdida', async (
     assert.equal((await read('/api/cash-closes/current?register_id=web')).has_sales, true)
     close = await write('/api/cash-closes', { client_close_id: 'shared-close-1', counted_cash: 250, opening_float: 0 })
     assert.equal(Number(close.sales_count), 2)
-    assert.equal(Number(close.expected_cash), 250, 'se descuenta la extracción del dueño desde su teléfono')
+    assert.equal(Number(close.expected_cash), 250, 'se descuenta la salida de esta gaveta, sin tomar la de la caja web del dueño')
     await unlockSharedCashier(a.id, '123456')
     await write('/api/sales', sale('shared-a-after-close', 1))
     assert.equal((await read('/api/products'))[0].stock, 6)
@@ -104,6 +106,9 @@ test('caja compartida: relevo offline, SQLite real y respuesta perdida', async (
     assert.equal(Number(closes[0].account_id), b.id)
     assert.equal(Number(closes[0].expected_cash), 250)
     assert.equal(Number(closes[0].withdrawn_cash), 50)
+    const withdrawalRows = (await ctx.db.execute('SELECT client_withdrawal_id, cash_close_id FROM cash_withdrawals ORDER BY id')).rows
+    assert.equal(withdrawalRows.find((w) => w.client_withdrawal_id === 'shared-drawer-withdrawal').cash_close_id, closes[0].id)
+    assert.equal(withdrawalRows.find((w) => w.client_withdrawal_id === 'owner-phone-withdrawal').cash_close_id, null, 'el retiro del dueño sigue pendiente para su cierre consolidado')
     assert.equal(Number(closes[0].sales_count), 2)
     const summary = await ctx.api('GET', '/api/cash-closes/summary', { token: owner })
     assert.equal(summary.body[0].attribution, 'register')

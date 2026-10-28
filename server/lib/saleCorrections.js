@@ -17,6 +17,7 @@
 const { PAYMENT_METHODS, paymentSplit, foreignFields, round2 } = require('./payment');
 const { logStockChange } = require('./stockLog');
 const { lineUnits } = require('./units');
+const { replay, record } = require('./clientOperations');
 
 class CorrectionError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -98,7 +99,7 @@ async function adjustClose(tx, userId, closeId, before, after) {
   return { before: pick(close, CLOSE_FIELDS), after: pick(updated, CLOSE_FIELDS) };
 }
 
-async function correctSale(db, { userId, saleId, body, account }) {
+async function correctSale(db, { userId, saleId, body, account, op = null }) {
   const action = body?.action;
   if (action !== 'pago' && action !== 'anular') throw new CorrectionError(400, 'Corrección inválida');
   const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim().slice(0, 200) : null;
@@ -107,6 +108,8 @@ async function correctSale(db, { userId, saleId, body, account }) {
 
   const tx = await db.transaction('write');
   try {
+    const prior = op && await replay(tx, op);
+    if (prior) { await tx.rollback(); return prior.body; }
     const sale = (await tx.execute({
       sql: 'SELECT * FROM sales WHERE id = ? AND user_id = ?',
       args: [saleId, userId],
@@ -166,19 +169,21 @@ async function correctSale(db, { userId, saleId, body, account }) {
         reason, account.id, account.email,
       ],
     });
-    await tx.commit();
 
-    const correction = (await db.execute({
+    const correction = (await tx.execute({
       sql: 'SELECT * FROM sale_corrections WHERE id = ?',
       args: [Number(inserted.lastInsertRowid)],
     })).rows[0];
     const updatedSale = after
-      ? (await db.execute({ sql: 'SELECT * FROM sales WHERE id = ?', args: [sale.id] })).rows[0]
+      ? (await tx.execute({ sql: 'SELECT * FROM sales WHERE id = ?', args: [sale.id] })).rows[0]
       : null;
     const updatedClose = sale.cash_close_id != null
-      ? (await db.execute({ sql: 'SELECT * FROM cash_closes WHERE id = ?', args: [sale.cash_close_id] })).rows[0] ?? null
+      ? (await tx.execute({ sql: 'SELECT * FROM cash_closes WHERE id = ?', args: [sale.cash_close_id] })).rows[0] ?? null
       : null;
-    return { correction: parseCorrection(correction), sale: updatedSale, cash_close: updatedClose };
+    const result = { correction: parseCorrection(correction), sale: updatedSale, cash_close: updatedClose };
+    if (op) await record(tx, op, 200, result);
+    await tx.commit();
+    return result;
   } catch (error) {
     await tx.rollback().catch(() => { /* la transacción ya estaba cerrada */ });
     throw error;

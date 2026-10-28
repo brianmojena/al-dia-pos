@@ -7,6 +7,7 @@ const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
 const { validQuantity, roundQty } = require('../lib/units');
 const { stockChangeStatement } = require('../lib/stockLog');
+const { operationOf, replay, record, OperationError } = require('../lib/clientOperations');
 
 /**
  * Arqueo de inventario.
@@ -297,8 +298,16 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
     });
   }
 
+  let op;
+  try { op = operationOf(req); } catch (e) { return res.status(e.status).json({ error: e.message }); }
+
   const tx = await db.transaction('write');
   try {
+    const prior = op && await replay(tx, op);
+    if (prior) {
+      await tx.rollback();
+      return res.json(prior.body);
+    }
     // Comprobar si algún producto se volvió a contar en un arqueo más nuevo.
     const newerCountsResult = await tx.execute({
       sql: `SELECT DISTINCT product_id FROM inventory_count_items
@@ -488,15 +497,13 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
              roundQty(newUnitsExtra), Math.round(newValueMissing * 100) / 100, count.id],
     });
 
-    await tx.commit();
-
     // Devolver el arqueo actualizado con recounted_later.
-    const updatedCount = await db.execute({
+    const updatedCount = await tx.execute({
       sql: 'SELECT * FROM inventory_counts WHERE id = ?',
       args: [count.id],
     });
-    const updatedItems = await loadItems(db, count.id);
-    const newerCounts = await db.execute({
+    const updatedItems = await loadItems(tx, count.id);
+    const newerCounts = await tx.execute({
       sql: `SELECT DISTINCT product_id FROM inventory_count_items
             WHERE count_id IN (
               SELECT id FROM inventory_counts
@@ -513,9 +520,13 @@ router.put('/:id', requireOwner, asyncHandler(async (req, res) => {
       recounted_later: recounteProductIds.has(item.product_id),
     }));
 
-    res.json({ ...updatedCount.rows[0], items: itemsWithRecounted });
+    const result = { ...updatedCount.rows[0], items: itemsWithRecounted };
+    if (op) await record(tx, op, 200, result);
+    await tx.commit();
+    res.json(result);
   } catch (err) {
     await tx.rollback().catch(() => { /* la transacción ya estaba cerrada */ });
+    if (err instanceof OperationError) return res.status(err.status).json({ error: err.message });
     throw err;
   }
 }));

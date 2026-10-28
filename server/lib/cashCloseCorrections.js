@@ -1,5 +1,6 @@
 'use strict';
 
+const { replay, record } = require('./clientOperations');
 const { paymentSplit, purchaseSplit, withdrawalSplit, round2 } = require('./payment');
 
 class CashCloseCorrectionError extends Error {
@@ -84,10 +85,12 @@ async function closeDetails(db, close, { includeAudit = true } = {}) {
   return { ...close, corrections };
 }
 
-async function correctCashClose(db, { userId, closeId, body, account }) {
+async function correctCashClose(db, { userId, closeId, body, account, op = null }) {
   const input = validateBody(body);
   const tx = await db.transaction('write');
   try {
+    const prior = op && await replay(tx, op);
+    if (prior) { await tx.rollback(); return prior.body; }
     const close = (await run(tx,
       'SELECT * FROM cash_closes WHERE id = ? AND user_id = ?', [closeId, userId]))[0];
     if (!close) throw new CashCloseCorrectionError(404, 'Cierre de caja no encontrado');
@@ -199,11 +202,13 @@ async function correctCashClose(db, { userId, closeId, body, account }) {
               before, after, created_at FROM cash_close_corrections
         WHERE user_id = ? AND cash_close_id = ? AND correction_revision = ?`,
       [userId, close.id, revision + 1]))[0];
-    await tx.commit();
-    return {
-      cash_close: await closeDetails(db, nextClose),
+    const result = {
+      cash_close: await closeDetails(tx, nextClose),
       correction: { ...correction, before: JSON.parse(correction.before), after: JSON.parse(correction.after) },
     };
+    if (op) await record(tx, op, 200, result);
+    await tx.commit();
+    return result;
   } catch (error) {
     await tx.rollback().catch(() => {});
     throw error;

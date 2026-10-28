@@ -279,6 +279,17 @@ async function initDb() {
       PRIMARY KEY (user_id, account_id, operation_id)
     );
 
+    -- Recibos de operaciones con operation_id (ver lib/clientOperations.js).
+    CREATE TABLE IF NOT EXISTS client_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      response TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, operation_id)
+    );
+
     -- Teléfonos del dueño que reciben avisos push de cada venta. El token es
     -- único: si el mismo teléfono inicia sesión con otra cuenta, el registro
     -- cambia de dueño en vez de duplicarse.
@@ -680,6 +691,10 @@ async function initDb() {
     'ALTER TABLE shared_device_cashiers ADD COLUMN pin_salt TEXT',
     'ALTER TABLE shared_device_cashiers ADD COLUMN pin_hash TEXT',
     'ALTER TABLE shared_device_cashiers ADD COLUMN pin_iterations INTEGER',
+    // Caja centralizada: el aparato puede ser «central» y llevar al dueño como
+    // miembro (member_role = 'dueño'). Por defecto nada cambia (0 / 'cajero').
+    "ALTER TABLE shared_devices ADD COLUMN central INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE shared_device_cashiers ADD COLUMN member_role TEXT NOT NULL DEFAULT 'cajero'",
   ];
   for (const sql of sharedAddColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }

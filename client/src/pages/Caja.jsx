@@ -1,7 +1,7 @@
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useState, useEffect, useRef } from 'react'
 import {
-  Calculator, Check, AlertTriangle, ArrowUp, ArrowLeft, Banknote, Smartphone, Lock, History, Users, DollarSign,
+  Calculator, Check, AlertTriangle, ArrowUp, ArrowLeft, Banknote, Smartphone, Lock, History, Users, DollarSign, X,
 } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { getToken, isElectron } from '../lib/network.js'
@@ -45,17 +45,27 @@ export default function Caja() {
   // no registre dos arqueos del mismo período.
   const closeIdRef = useRef(null)
 
+  // Salidas de efectivo (solo para cajeros)
+  const [withdrawals,      setWithdrawals]      = useState([])
+  const [withdrawalModal,  setWithdrawalModal]  = useState(null)
+  const [withdrawalAmount, setWithdrawalAmount] = useState('')
+  const [withdrawalNote,   setWithdrawalNote]   = useState('')
+  const [withdrawalSubmitting, setWithdrawalSubmitting] = useState(false)
+  const [withdrawalError,  setWithdrawalError]  = useState('')
+
   const load = async () => {
     // El servidor limita al cajero a los cierres hechos por su propia cuenta.
     try {
-      const [p, h, s] = await Promise.all([
+      const [p, h, s, w] = await Promise.all([
         apiFetch('/api/cash-closes/current?register_id=web').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
         apiFetch('/api/cash-closes').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }),
         isOwner ? apiFetch('/api/cash-closes/summary').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return data }) : Promise.resolve([]),
+        !isOwner ? apiFetch('/api/cash-withdrawals?open=1').then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'No se pudo cargar'); return Array.isArray(data) ? data.filter(item => !item.voided_at) : [] }) : Promise.resolve([]),
       ])
       setPeriod(p)
       setHistory(Array.isArray(h) ? h : [])
       setSummary(Array.isArray(s) ? s : [])
+      setWithdrawals(Array.isArray(w) ? w : [])
       setDetailClose((current) => {
         if (!current) return current
         return (Array.isArray(h) ? h : []).find((close) => sameCashClose(close, current)) || current
@@ -111,6 +121,54 @@ export default function Caja() {
 
   const startNew = () => { setResult(null); setError('') }
 
+  const handleWithdrawalSubmit = async (e) => {
+    e.preventDefault()
+    if (withdrawalSubmitting || !withdrawalAmount || !withdrawalNote.trim()) return
+    setWithdrawalSubmitting(true)
+    setWithdrawalError('')
+
+    try {
+      const res = await apiFetch('/api/cash-withdrawals', {
+        method: 'POST',
+        body: JSON.stringify({
+          client_withdrawal_id: newId(),
+          method: 'efectivo',
+          amount: parseFloat(withdrawalAmount) || 0,
+          note: withdrawalNote.trim(),
+          register_id: 'web',
+        }),
+      })
+      const result = await res.json()
+      if (!res.ok) {
+        setWithdrawalError(result.error || 'No se pudo guardar la salida')
+        return
+      }
+      setWithdrawalModal(false)
+      setWithdrawalAmount('')
+      setWithdrawalNote('')
+      await load()
+    } catch (err) {
+      setWithdrawalError(err.message || 'No se pudo guardar la salida. Intenta de nuevo.')
+    } finally {
+      setWithdrawalSubmitting(false)
+    }
+  }
+
+  const handleVoidWithdrawal = async (clientWithdrawalId) => {
+    if (!confirm('¿Anular esta salida? El dinero vuelve a contar en la caja.')) return
+    try {
+      const res = await apiFetch(`/api/cash-withdrawals/${clientWithdrawalId}/void`, { method: 'POST' })
+      const result = await res.json()
+      if (!res.ok) {
+        alert(result.error || 'No se pudo anular la salida')
+        return
+      }
+      await load()
+    } catch (err) {
+      alert(err.message || 'No se pudo anular la salida. Intenta de nuevo.')
+    }
+  }
+
   if (loading) return (
     <div className="flex items-center justify-center h-full">
       <div className="w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full animate-spin" />
@@ -149,6 +207,10 @@ export default function Caja() {
         ? 'Este cierre incluye las operaciones de todos los cajeros de esta caja. Quedará registrado quién hizo el conteo; el descuadre corresponde al período compartido.'
         : 'Este cierre incluye tus operaciones en este dispositivo. Cierra antes de entregar la caja al siguiente cajero.'}</p>}
 
+      {isOwner && !result && <p className="mb-4 rounded-xl bg-blue-50 text-blue-800 p-3 text-sm">
+        Este cierre reúne todas las operaciones pendientes de la tienda. Cuenta el efectivo de todas las cajas incluidas y suma sus fondos iniciales.
+      </p>}
+
       {result ? (
         <div>
           {result.offline_notice && <p className="text-xs text-amber-700 bg-amber-50 rounded-xl px-3 py-2 mb-3">{result.offline_notice}</p>}
@@ -162,6 +224,7 @@ export default function Caja() {
           ) : <ResultCard result={result} onNew={startNew} />}
         </div>
       ) : (
+        <>
         <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm p-6 mb-6">
           {/* El aviso de conteo a ciegas es parte del producto, no decoración:
               es lo que le da valor al arqueo frente al dueño. */}
@@ -189,9 +252,56 @@ export default function Caja() {
                 value={float} onChange={e => setFloat(e.target.value)} className={field}
               />
               <p className="text-[11px] text-gray-400 mt-1.5">
-                Con cuánto efectivo empezó la caja. Déjalo en 0 si empezó vacía.
+                {isOwner
+                  ? 'Suma el efectivo con que empezaron las cajas incluidas. Usa el fondo realmente entregado al abrir.'
+                  : 'El efectivo que recibiste al abrir la caja. Déjalo en 0 si empezó vacía.'}
               </p>
             </div>
+
+            {!isOwner && (
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-4">
+                <h3 className="text-sm font-semibold text-gray-900 mb-2">Dinero que sacaste de la caja</h3>
+                <p className="text-xs text-gray-600 mb-4">
+                  Si pagaste una compra o diste dinero de la caja, anótalo aquí antes de cerrar para que no salga como faltante.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWithdrawalModal(true)
+                    setWithdrawalAmount('')
+                    setWithdrawalNote('')
+                    setWithdrawalError('')
+                  }}
+                  className="w-full text-sm font-semibold text-[#007AFF] hover:bg-blue-100 py-2 rounded-lg transition-colors"
+                >
+                  + Anotar salida de efectivo
+                </button>
+
+                {withdrawals.length > 0 && (
+                  <div className="mt-4 space-y-2 pt-3 border-t border-blue-200">
+                    {withdrawals.map((w) => (
+                      <div key={w.client_withdrawal_id} className="flex items-start justify-between py-2 gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900">{fmt(w.amount)}</p>
+                          <p className="text-xs text-gray-600 truncate">{w.note}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">{fmtDateTime(w.created_at)}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleVoidWithdrawal(w.client_withdrawal_id)}
+                          className="text-xs text-red-500 hover:text-red-700 font-semibold transition-colors flex-shrink-0"
+                        >
+                          Anular
+                        </button>
+                      </div>
+                    ))}
+                    <div className="pt-2 border-t border-blue-100 text-sm font-semibold text-gray-900">
+                      Salidas anotadas: {fmt(withdrawals.reduce((sum, w) => sum + w.amount, 0))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
@@ -204,7 +314,8 @@ export default function Caja() {
                 className={`${field} text-2xl font-bold py-4`}
               />
               <p className="text-[11px] text-gray-400 mt-1.5">
-                Los pesos que hay físicamente en la gaveta ahora mismo.
+                {isOwner ? 'Los pesos que hay físicamente en todas las cajas incluidas ahora mismo.' : 'Los pesos que hay físicamente en la gaveta ahora mismo.'}
+                {' '}Anota los pagos y retiros como salidas antes de cerrar; no los sumes al efectivo contado.
               </p>
             </div>
 
@@ -239,6 +350,7 @@ export default function Caja() {
                 placeholder="Ej: faltó un billete de 100"
                 value={note} onChange={e => setNote(e.target.value)} className={field}
               />
+              <p className="text-[11px] text-gray-400 mt-1.5">La nota explica el cierre. Para descontar dinero retirado, registra una salida de caja.</p>
             </div>
           </div>
 
@@ -257,6 +369,83 @@ export default function Caja() {
             {submitting ? 'Cerrando...' : 'Cerrar caja'}
           </button>
         </form>
+
+        {/* Modal de salida de efectivo */}
+        {withdrawalModal && !isOwner && (
+          <div className="fixed inset-0 bg-black/20 flex items-end sm:items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl w-full max-w-md shadow-lg">
+              <div className="flex items-center justify-between p-5 border-b border-gray-100">
+                <h3 className="font-semibold text-gray-900">Anotar salida de efectivo</h3>
+                <button
+                  type="button"
+                  onClick={() => setWithdrawalModal(false)}
+                  className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <X size={18} className="text-gray-500" />
+                </button>
+              </div>
+
+              <form onSubmit={handleWithdrawalSubmit} className="p-5 space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-gray-600 block mb-1.5">Cuánto sacas</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min="0"
+                      step="1"
+                      autoFocus
+                      value={withdrawalAmount}
+                      onChange={(e) => setWithdrawalAmount(e.target.value)}
+                      placeholder="0"
+                      className="w-full px-4 py-3 text-lg font-bold rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                    />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-gray-500">
+                      CUP
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-600 block mb-1.5">Motivo *</label>
+                  <input
+                    type="text"
+                    value={withdrawalNote}
+                    onChange={(e) => setWithdrawalNote(e.target.value)}
+                    placeholder="Ej: pagué al proveedor del café"
+                    maxLength={200}
+                    className="w-full px-4 py-3 text-sm rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1.5">
+                    Mínimo 3 caracteres
+                  </p>
+                </div>
+
+                {withdrawalError && (
+                  <div className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2.5">{withdrawalError}</div>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setWithdrawalModal(false)}
+                    className="flex-1 px-4 py-3 text-sm font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={withdrawalSubmitting || !withdrawalAmount || parseFloat(withdrawalAmount) <= 0 || withdrawalNote.trim().length < 3}
+                    className="flex-1 px-4 py-3 text-sm font-semibold bg-[#007AFF] text-white rounded-xl hover:bg-blue-600 disabled:opacity-40 transition-colors active:scale-95"
+                  >
+                    {withdrawalSubmitting ? 'Anotando...' : 'Anotar salida'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+        </>
       )}
 
       {/* Un cierre suelto con un faltante puede ser un vuelto mal dado. El
@@ -602,6 +791,9 @@ function ResultCard({ result, onNew }) {
         )}
         <div className="border-t border-gray-100 pt-3">
           <Row label="Debería haber" value={fmt(result.expected_cash)} />
+          {Number(result.withdrawn_cash) > 0 && (
+            <p className="text-xs text-gray-500 mt-2 italic">Las salidas anotadas ya están descontadas de lo esperado.</p>
+          )}
         </div>
         <Row label="Contado" value={fmt(result.counted_cash)} />
         <div className="border-t border-gray-100 pt-3">
