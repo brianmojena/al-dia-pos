@@ -1,0 +1,6 @@
+<resources>
+    <color name="brand_green">#176B45</color>
+    <color name="brand_green_dark">#104B31</color>
+    <color name="icon_background">#FFFFFF</color>
+    <color name="app_background">#F6F8F5</color>
+</resources>

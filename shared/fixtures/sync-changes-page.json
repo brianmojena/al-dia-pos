@@ -1,0 +1,36 @@
+{
+  "_comment": "Pagina de GET /api/sync/snapshot?after_* con la forma de server/lib/syncChanges.js (dueno). Montos de ejemplo.",
+  "products": [
+    { "id": 1, "name": "Refresco", "sale_price": 150, "stock": 18, "track_stock": 1 }
+  ],
+  "sales": [
+    { "id": 101, "client_sale_id": "c-101", "total": 300, "payment_method": "efectivo", "cash_received": 300, "created_at": "2026-10-28 14:00:00", "cash_close_id": null,
+      "items": [ { "id": 1, "product_id": 1, "product_name": "Refresco", "quantity": 2, "unit_price": 150 } ] },
+    { "id": 102, "client_sale_id": "c-pending", "total": 150, "payment_method": "efectivo", "cash_received": 150, "created_at": "2026-10-28 14:05:00", "cash_close_id": null, "items": [] }
+  ],
+  "sale_states": [
+    { "id": 103, "cash_close_id": null, "closed": 0 },
+    { "id": 104, "cash_close_id": 7, "closed": 1 }
+  ],
+  "purchase_states": [],
+  "withdrawal_states": [
+    { "id": 31, "cash_close_id": null, "voided_at": "2026-10-28 15:00:00", "closed": 0, "voided": 1 }
+  ],
+  "cash_closes": [
+    { "id": 7, "client_close_id": "k-7", "closed_at": "2026-10-28 20:00:00", "expected_cash": 1000, "counted_cash": 990, "difference": -10, "sales_count": 3, "correction_revision": 0,
+      "covered_sale_ids": [101], "covered_purchase_ids": [], "covered_withdrawal_ids": [] }
+  ],
+  "currency_purchases": [],
+  "cash_withdrawals": [
+    { "id": 30, "client_withdrawal_id": "w-30", "method": "efectivo", "amount": 50, "note": "cambio", "created_at": "2026-10-28 13:00:00", "cash_close_id": 7, "voided_at": null },
+    { "id": 31, "client_withdrawal_id": "w-31", "method": "efectivo", "amount": 20, "note": "luz", "created_at": "2026-10-28 13:30:00", "cash_close_id": null, "voided_at": null }
+  ],
+  "sale_corrections": [
+    { "id": 1, "action": "void", "sale_id": 105, "client_sale_id": "c-105", "cash_close_id": 7, "sale": null,
+      "cash_close": { "id": 7, "difference": 0, "correction_revision": 1 } }
+  ],
+  "cash_close_corrections": [],
+  "cash_close_coverage_version": 1,
+  "cursors": { "sale": 102, "sale_state": 104, "close": 7, "count": 0, "purchase": 0, "purchase_state": 0, "withdrawal": 31, "withdrawal_state": 31, "correction": 1, "close_correction": 0 },
+  "has_more": false
+}

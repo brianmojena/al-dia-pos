@@ -1,0 +1,625 @@
+package cu.mypimes.pos.data.store
+
+import android.util.Log
+import androidx.room.withTransaction
+import cu.mypimes.pos.data.auth.ApiErrorDto
+import cu.mypimes.pos.data.auth.ApiUser
+import cu.mypimes.pos.data.auth.Session
+import cu.mypimes.pos.data.auth.accountKeyFromToken
+import cu.mypimes.pos.data.local.CacheRecordEntity
+import cu.mypimes.pos.data.local.LocalDao
+import cu.mypimes.pos.data.local.LocalDatabase
+import cu.mypimes.pos.data.local.QueuedOperationEntity
+import cu.mypimes.pos.data.local.gateOf
+import cu.mypimes.pos.data.local.ownerRoleOf
+import cu.mypimes.pos.data.local.settleDependencies
+import cu.mypimes.pos.domain.outbox.Outbox
+import cu.mypimes.pos.data.pos.PosRepository
+import cu.mypimes.pos.data.pos.PosSyncScheduler
+import cu.mypimes.pos.data.pos.RegisterIdStore
+import java.io.IOException
+import java.time.Instant
+import java.util.UUID
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+
+data class CloseOutcome(
+    val close: CashCloseDto? = null,
+    val pending: Boolean = false,
+    val error: String? = null,
+)
+
+data class PurchaseOutcome(
+    val purchase: CurrencyPurchaseDto? = null,
+    val pending: Boolean = false,
+    val error: String? = null,
+    val cup: Double = 0.0,
+)
+
+data class WithdrawalOutcome(
+    val withdrawal: WithdrawalDto? = null,
+    val pending: Boolean = false,
+    val error: String? = null,
+)
+
+/**
+ * Caja, divisas e inicio.
+ *
+ * Las lecturas se guardan en Room para que la pantalla siga mostrando lo
+ * último conocido sin red. Las escrituras se guardan primero en la cola
+ * durable y luego se intentan subir; si no hay red, quedan pendientes y el
+ * trabajador las reintenta con su mismo identificador.
+ */
+/** Un null va como JSON null: el servidor lo lee como "borrar la tasa" (una clave ausente no la cambia). */
+internal fun shopRatesBody(usd: Double?, eur: Double?): JsonObject = buildJsonObject {
+    put("usd_rate", usd?.let { JsonPrimitive(it) } ?: JsonNull)
+    put("eur_rate", eur?.let { JsonPrimitive(it) } ?: JsonNull)
+}
+
+@Singleton
+class StoreRepository @Inject constructor(
+    private val api: StoreApi,
+    private val database: LocalDatabase,
+    private val dao: LocalDao,
+    private val json: Json,
+    private val registerIdStore: RegisterIdStore,
+    private val posRepository: PosRepository,
+    private val syncScheduler: PosSyncScheduler,
+    private val inventory: InventoryRepository,
+    private val outbox: OwnerOutbox,
+) {
+    private val mutex = Mutex()
+
+    // ---- Lecturas observables ------------------------------------------------
+
+    fun closes(accountKey: String): Flow<List<CashCloseDto>> =
+        observeList(accountKey, KIND_CLOSES) { json.decodeFromString<CashCloseDto>(it) }
+
+    fun withdrawals(accountKey: String): Flow<List<WithdrawalDto>> =
+        observeList(accountKey, KIND_WITHDRAWALS) { json.decodeFromString<WithdrawalDto>(it) }
+
+    fun purchases(accountKey: String): Flow<List<CurrencyPurchaseDto>> =
+        observeList(accountKey, KIND_PURCHASES) { json.decodeFromString<CurrencyPurchaseDto>(it) }
+
+    fun pendingCloses(accountKey: String): Flow<List<PendingClose>> =
+        dao.observeQueue(accountKey).map { queue ->
+            queue.filter { it.operationType == OP_CLOSE }.mapNotNull { operation ->
+                runCatching {
+                    val request = json.decodeFromString<CreateCloseRequest>(operation.payload)
+                    PendingClose(
+                        clientCloseId = request.clientCloseId,
+                        countedCash = request.countedCash,
+                        countedUsd = request.countedUsd,
+                        countedEur = request.countedEur,
+                        openingFloat = request.openingFloat,
+                        note = request.note,
+                        queuedAt = operation.createdAt,
+                        status = operation.status,
+                        lastError = operation.lastError,
+                    )
+                }.getOrNull()
+            }
+        }
+
+    fun pendingWithdrawals(accountKey: String): Flow<List<PendingWithdrawal>> =
+        dao.observeQueue(accountKey).map { queue ->
+            queue.filter { it.operationType == OP_WITHDRAWAL }.mapNotNull { operation ->
+                runCatching {
+                    val request = json.decodeFromString<CreateWithdrawalRequest>(operation.payload)
+                    PendingWithdrawal(
+                        clientWithdrawalId = request.clientWithdrawalId,
+                        amount = request.amount,
+                        note = request.note,
+                        queuedAt = operation.createdAt,
+                        status = operation.status,
+                        lastError = operation.lastError,
+                    )
+                }.getOrNull()
+            }
+        }
+
+    fun pendingPurchases(accountKey: String): Flow<List<PendingPurchase>> =
+        dao.observeQueue(accountKey).map { queue ->
+            queue.filter { it.operationType == OP_PURCHASE }.mapNotNull { operation ->
+                runCatching {
+                    val request = json.decodeFromString<CreatePurchaseRequest>(operation.payload)
+                    PendingPurchase(
+                        clientPurchaseId = request.clientPurchaseId,
+                        currency = request.foreignCurrency,
+                        amount = request.foreignAmount,
+                        rate = request.exchangeRate,
+                        cup = cu.mypimes.pos.domain.Payment.round2(request.foreignAmount * request.exchangeRate),
+                        queuedAt = operation.createdAt,
+                        status = operation.status,
+                        lastError = operation.lastError,
+                    )
+                }.getOrNull()
+            }
+        }
+
+    fun hasPendingClose(accountKey: String): Flow<Boolean> =
+        dao.observeQueue(accountKey).map { queue ->
+            queue.any { it.operationType == OP_CLOSE && it.status == QueuedOperationEntity.STATUS_PENDING }
+        }
+
+    // ---- Carga desde la nube ------------------------------------------------
+
+    suspend fun refreshCaja(session: Session): String? {
+        val accountKey = requireAccount(session)
+        val authorization = "Bearer ${session.token}"
+        var firstError: String? = null
+        runCatching {
+            val registerId = registerIdStore.getOrCreate()
+            val period = api.currentPeriod(authorization, registerId)
+            if (!period.isSuccessful) throw apiException(period.code(), period.errorBody()?.string())
+            cache(accountKey, KIND_PERIOD, "current", period.body()!!)
+        }.onFailure { firstError = it.message }
+
+        runCatching {
+            val response = api.closes(authorization)
+            if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+            replaceList(accountKey, KIND_CLOSES, response.body().orEmpty()) { it.id.toString() }
+        }.onFailure { firstError = firstError ?: it.message }
+
+        runCatching {
+            val response = api.withdrawals(authorization, date = null, open = 1)
+            if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+            replaceList(accountKey, KIND_OPEN_WITHDRAWALS, response.body().orEmpty()) { it.id.toString() }
+        }.onFailure { firstError = firstError ?: it.message }
+
+        return firstError
+    }
+
+    suspend fun refreshSummary(session: Session): String? = runCatching {
+        val accountKey = requireAccount(session)
+        val response = api.closeSummary("Bearer ${session.token}")
+        if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+        replaceList(accountKey, KIND_CLOSE_SUMMARY, response.body().orEmpty()) {
+            it.accountId?.toString() ?: it.registerId ?: "shared"
+        }
+        null
+    }.getOrElse { it.message }
+
+    fun summary(accountKey: String): Flow<List<CashCloseSummaryDto>> =
+        observeList(accountKey, KIND_CLOSE_SUMMARY) { json.decodeFromString<CashCloseSummaryDto>(it) }
+
+    fun period(accountKey: String): Flow<CurrentPeriodDto?> =
+        dao.observeCache(accountKey, KIND_PERIOD).map { rows ->
+            rows.firstOrNull()?.let { runCatching { json.decodeFromString<CurrentPeriodDto>(it.payload) }.getOrNull() }
+        }
+
+    fun openWithdrawals(accountKey: String): Flow<List<WithdrawalDto>> =
+        observeList(accountKey, KIND_OPEN_WITHDRAWALS) { json.decodeFromString<WithdrawalDto>(it) }
+
+    suspend fun refreshPurchases(session: Session, date: String): String? = runCatching {
+        val accountKey = requireAccount(session)
+        val response = api.purchases("Bearer ${session.token}", date)
+        if (!response.isSuccessful) {
+            if (response.code() == 403) return@runCatching null // cajero: sin historial
+            throw apiException(response.code(), response.errorBody()?.string())
+        }
+        replaceList(accountKey, KIND_PURCHASES, response.body().orEmpty()) { it.id.toString() }
+        null
+    }.getOrElse { it.message }
+
+    suspend fun refreshDashboard(session: Session): String? = runCatching {
+        val accountKey = requireAccount(session)
+        val response = api.dashboard("Bearer ${session.token}")
+        if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+        cache(accountKey, KIND_DASHBOARD, "dashboard", response.body()!!)
+        null
+    }.getOrElse { it.message }
+
+    fun dashboard(accountKey: String): Flow<DashboardDto?> =
+        dao.observeCache(accountKey, KIND_DASHBOARD).map { rows ->
+            rows.firstOrNull()?.let { runCatching { json.decodeFromString<DashboardDto>(it.payload) }.getOrNull() }
+        }
+
+    /** Cuándo se guardó el panel que se está mostrando (para el «datos de hace X»). */
+    fun dashboardSavedAt(accountKey: String): Flow<Long?> =
+        dao.observeCache(accountKey, KIND_DASHBOARD).map { rows -> rows.firstOrNull()?.updatedAt }
+
+    suspend fun activityDay(session: Session, date: String?): DailyActivityDto = mutex.withLock {
+        val accountKey = requireAccount(session)
+        val response = api.activityDay("Bearer ${session.token}", date)
+        if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+        val body = response.body() ?: throw IOException("Respuesta vacía del historial")
+        cache(accountKey, KIND_ACTIVITY, body.date, body)
+        body
+    }
+
+    fun cachedActivity(accountKey: String, date: String): Flow<DailyActivityDto?> =
+        dao.observeCache(accountKey, KIND_ACTIVITY).map { rows ->
+            rows.firstOrNull { it.recordKey == date }
+                ?.let { runCatching { json.decodeFromString<DailyActivityDto>(it.payload) }.getOrNull() }
+        }
+
+    suspend fun closeDetail(session: Session, id: Long): CashCloseDto {
+        val response = api.closeDetail("Bearer ${session.token}", id)
+        if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+        return response.body() ?: throw IOException("Cierre no encontrado")
+    }
+
+    // ---- Escrituras ---------------------------------------------------------
+
+    suspend fun closePeriod(
+        session: Session,
+        countedCash: Double,
+        countedUsd: Double,
+        countedEur: Double,
+        openingFloat: Double,
+        note: String?,
+    ): CloseOutcome = mutex.withLock {
+        val accountKey = requireAccount(session)
+        val request = CreateCloseRequest(
+            clientCloseId = UUID.randomUUID().toString(),
+            registerId = registerIdStore.getOrCreate(),
+            countedCash = countedCash,
+            countedUsd = countedUsd,
+            countedEur = countedEur,
+            openingFloat = openingFloat,
+            note = note?.trim()?.takeIf { it.isNotEmpty() },
+            closedAt = Instant.now().toString(),
+        )
+        val operation = queue(accountKey, OP_CLOSE, "/api/cash-closes", json.encodeToString(request), request.clientCloseId, ownerRoleOf(session.token))
+        return try {
+            val posted = postClose(session, operation)
+            CloseOutcome(close = posted)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (conflict: CloseConflict) {
+            CloseOutcome(error = conflict.message)
+        } catch (error: Exception) {
+            Log.e(TAG, "El cierre quedó pendiente", error)
+            CloseOutcome(
+                pending = true,
+                error = "El cierre quedó guardado en este dispositivo y se enviará al recuperar la conexión.",
+            )
+        }
+    }
+
+    suspend fun withdraw(session: Session, amount: Double, note: String): WithdrawalOutcome = mutex.withLock {
+        val accountKey = requireAccount(session)
+        val request = CreateWithdrawalRequest(
+            clientWithdrawalId = UUID.randomUUID().toString(),
+            method = "efectivo",
+            amount = amount,
+            note = note.trim(),
+            registerId = registerIdStore.getOrCreate(),
+            withdrawnAt = Instant.now().toString(),
+        )
+        val operation = queue(accountKey, OP_WITHDRAWAL, "/api/cash-withdrawals", json.encodeToString(request), request.clientWithdrawalId, ownerRoleOf(session.token))
+        return try {
+            WithdrawalOutcome(withdrawal = postWithdrawal(session, operation))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (rejected: StoreRejected) {
+            WithdrawalOutcome(error = rejected.message)
+        } catch (error: Exception) {
+            WithdrawalOutcome(pending = true, error = "La salida quedó guardada y se enviará al recuperar la conexión.")
+        }
+    }
+
+    suspend fun voidWithdrawal(session: Session, clientWithdrawalId: String): String? = mutex.withLock {
+        val accountKey = requireAccount(session)
+        val response = api.voidWithdrawal("Bearer ${session.token}", clientWithdrawalId)
+        if (!response.isSuccessful) return@withLock apiError(response.errorBody()?.string(), "No se pudo anular la salida")
+        response.body()?.let { cache(accountKey, KIND_WITHDRAWALS, it.id.toString(), it) }
+        runCatching {
+            val refreshed = api.withdrawals("Bearer ${session.token}", date = null, open = 1)
+            if (refreshed.isSuccessful) {
+                replaceList(accountKey, KIND_OPEN_WITHDRAWALS, refreshed.body().orEmpty()) { it.id.toString() }
+            }
+        }
+        null
+    }
+
+    /** Tasas de la tienda: solo en línea, como en la web. Un null borra la tasa. */
+    suspend fun saveShopRates(session: Session, usd: Double?, eur: Double?): ApiUser {
+        val response = try {
+            api.saveShopRates("Bearer ${session.token}", shopRatesBody(usd, eur))
+        } catch (_: IOException) {
+            throw IOException("Para cambiar la tasa de la tienda hace falta internet.")
+        }
+        if (!response.isSuccessful) throw apiException(response.code(), response.errorBody()?.string())
+        return response.body()?.user?.toApiUser() ?: throw IOException("El servidor no devolvió la tasa guardada.")
+    }
+
+    suspend fun buyCurrency(
+        session: Session,
+        currency: String,
+        amount: Double,
+        rate: Double,
+        shopRate: Double?,
+    ): PurchaseOutcome = mutex.withLock {
+        val accountKey = requireAccount(session)
+        val request = CreatePurchaseRequest(
+            clientPurchaseId = UUID.randomUUID().toString(),
+            foreignCurrency = currency,
+            foreignAmount = amount,
+            exchangeRate = rate,
+            shopRate = shopRate,
+            registerId = registerIdStore.getOrCreate(),
+            soldAt = Instant.now().toString(),
+        )
+        val operation = queue(accountKey, OP_PURCHASE, "/api/currency-purchases", json.encodeToString(request), request.clientPurchaseId, ownerRoleOf(session.token))
+        return try {
+            PurchaseOutcome(
+                purchase = postPurchase(session, operation),
+                cup = cu.mypimes.pos.domain.Payment.purchaseCup(amount, rate),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (rejected: StoreRejected) {
+            PurchaseOutcome(error = rejected.message, cup = cu.mypimes.pos.domain.Payment.purchaseCup(amount, rate))
+        } catch (error: Exception) {
+            PurchaseOutcome(
+                pending = true,
+                error = "La compra quedó guardada y se enviará al recuperar la conexión.",
+                cup = cu.mypimes.pos.domain.Payment.purchaseCup(amount, rate),
+            )
+        }
+    }
+
+    // ---- Sincronización -----------------------------------------------------
+
+    /**
+     * A5: una sola pasada en orden global por `createdAt` (ventas, retiros, compras, cierres, arqueos y escrituras
+     * del dueño). Una operación espera a que su dependencia suba; si esa murió (400/409), queda `blocked` con el
+     * motivo y nunca se borra. Un fallo de red o 5xx corta la pasada (lo reintenta WorkManager con los mismos ids).
+     */
+    suspend fun sync(session: Session) {
+        val accountKey = requireAccount(session)
+        settleDependencies(dao, accountKey)
+        var refreshCatalog = false
+        for (queued in dao.pending(accountKey).filter { it.operationType in GLOBAL_OPERATIONS }) {
+            // Estado fresco: la operación anterior pudo haberla bloqueado.
+            val operation = dao.operationById(queued.clientOperationId)?.takeIf { it.status == QueuedOperationEntity.STATUS_PENDING } ?: continue
+            when (val gate = gateOf(dao, operation)) {
+                is Outbox.Gate.Wait -> continue
+                is Outbox.Gate.Block -> {
+                    dao.setQueueState(operation.clientOperationId, accountKey, Outbox.STATUS_BLOCKED, operation.attempts, gate.reason)
+                    continue
+                }
+                else -> Unit
+            }
+            try {
+                when (operation.operationType) {
+                    PosRepository.OP_SALE -> if (!posRepository.syncOne(session, operation)) return
+                    InventoryRepository.OP_COUNT -> inventory.syncOne(session, operation)
+                    OP_WITHDRAWAL -> postWithdrawal(session, operation)
+                    OP_PURCHASE -> postPurchase(session, operation)
+                    OP_CLOSE -> postClose(session, operation)
+                    else -> if (outbox.send(session, operation)) refreshCatalog = true
+                }
+            } catch (_: CloseConflict) {
+                // Queda en conflicto para revisión; no se reintenta a ciegas.
+            } catch (_: StoreRejected) {
+                // Queda marcada en la cola con el mensaje del servidor.
+            }
+            settleDependencies(dao, accountKey) // lo rechazado bloquea en cascada a sus dependientes
+        }
+        // El cierre cubre las extracciones y compras abiertas: refrescar la caja
+        // después de subir deja el período nuevo listo.
+        runCatching { refreshCaja(session) }
+        runCatching { refreshSummary(session) }
+        if (refreshCatalog) runCatching { posRepository.refreshCatalog(session) }
+    }
+
+    private suspend fun postClose(session: Session, operation: QueuedOperationEntity): CashCloseDto {
+        val accountKey = operation.accountKey
+        val request = json.decodeFromString<CreateCloseRequest>(operation.payload)
+        val response = try {
+            api.createClose("Bearer ${session.token}", request)
+        } catch (error: IOException) {
+            markPending(operation, "Sin conexión. El cierre se enviará al recuperar la red.")
+            throw error
+        }
+        return when {
+            response.isSuccessful -> {
+                val body = response.body() ?: throw IOException("El servidor no confirmó el cierre")
+                database.withTransaction {
+                    cacheRecord(accountKey, KIND_CLOSES, body.id.toString(), body)
+                    dao.deleteAcknowledged(operation.clientOperationId, accountKey)
+                }
+                body
+            }
+            response.code() == 401 -> {
+                markPending(operation, "Inicia sesión de nuevo para sincronizar el cierre.", attemptsBump = false)
+                throw IOException("Sesión caducada")
+            }
+            response.code() == 400 || response.code() == 409 -> {
+                val message = apiError(response.errorBody()?.string(), "El servidor no pudo cerrar esta caja")
+                dao.setQueueState(operation.clientOperationId, accountKey,
+                    QueuedOperationEntity.STATUS_CONFLICT, operation.attempts + 1, message)
+                throw CloseConflict(message)
+            }
+            response.code() == 403 -> {
+                val message = apiError(response.errorBody()?.string(), "No puedes cerrar esta caja")
+                dao.setQueueState(operation.clientOperationId, accountKey,
+                    QueuedOperationEntity.STATUS_FAILED, operation.attempts + 1, message)
+                throw CloseConflict(message)
+            }
+            else -> {
+                markPending(operation, "Error temporal (${response.code()}). Se reintentará.")
+                throw IOException("Error temporal del servidor")
+            }
+        }
+    }
+
+    private suspend fun postWithdrawal(session: Session, operation: QueuedOperationEntity): WithdrawalDto {
+        val accountKey = operation.accountKey
+        val request = json.decodeFromString<CreateWithdrawalRequest>(operation.payload)
+        val response = try {
+            api.createWithdrawal("Bearer ${session.token}", request)
+        } catch (error: IOException) {
+            markPending(operation, "Sin conexión. La salida se enviará al recuperar la red.")
+            throw error
+        }
+        return when {
+            response.isSuccessful -> {
+                val body = response.body() ?: throw IOException("El servidor no confirmó la salida")
+                database.withTransaction {
+                    cacheRecord(accountKey, KIND_WITHDRAWALS, body.id.toString(), body)
+                    cacheRecord(accountKey, KIND_OPEN_WITHDRAWALS, body.id.toString(), body)
+                    dao.deleteAcknowledged(operation.clientOperationId, accountKey)
+                }
+                body
+            }
+            response.code() == 401 -> {
+                markPending(operation, "Inicia sesión de nuevo para sincronizar.", attemptsBump = false)
+                throw IOException("Sesión caducada")
+            }
+            response.code() == 400 || response.code() == 409 || response.code() == 403 -> {
+                val message = apiError(response.errorBody()?.string(), "El servidor rechazó la salida")
+                dao.setQueueState(operation.clientOperationId, accountKey,
+                    QueuedOperationEntity.STATUS_FAILED, operation.attempts + 1, message)
+                throw StoreRejected(message)
+            }
+            else -> {
+                markPending(operation, "Error temporal (${response.code()}). Se reintentará.")
+                throw IOException("Error temporal del servidor")
+            }
+        }
+    }
+
+    private suspend fun postPurchase(session: Session, operation: QueuedOperationEntity): CurrencyPurchaseDto {
+        val accountKey = operation.accountKey
+        val request = json.decodeFromString<CreatePurchaseRequest>(operation.payload)
+        val response = try {
+            api.createPurchase("Bearer ${session.token}", request)
+        } catch (error: IOException) {
+            markPending(operation, "Sin conexión. La compra se enviará al recuperar la red.")
+            throw error
+        }
+        return when {
+            response.isSuccessful -> {
+                val body = response.body() ?: throw IOException("El servidor no confirmó la compra")
+                database.withTransaction {
+                    cacheRecord(accountKey, KIND_PURCHASES, body.id.toString(), body)
+                    dao.deleteAcknowledged(operation.clientOperationId, accountKey)
+                }
+                body
+            }
+            response.code() == 401 -> {
+                markPending(operation, "Inicia sesión de nuevo para sincronizar.", attemptsBump = false)
+                throw IOException("Sesión caducada")
+            }
+            response.code() == 400 || response.code() == 409 || response.code() == 403 -> {
+                val message = apiError(response.errorBody()?.string(), "El servidor rechazó la compra")
+                dao.setQueueState(operation.clientOperationId, accountKey,
+                    QueuedOperationEntity.STATUS_FAILED, operation.attempts + 1, message)
+                throw StoreRejected(message)
+            }
+            else -> {
+                markPending(operation, "Error temporal (${response.code()}). Se reintentará.")
+                throw IOException("Error temporal del servidor")
+            }
+        }
+    }
+
+    // ---- Utilidades ---------------------------------------------------------
+
+    private suspend fun queue(
+        accountKey: String,
+        type: String,
+        path: String,
+        payload: String,
+        clientId: String,
+        ownerRole: String = Outbox.ROLE_CASHIER,
+    ): QueuedOperationEntity {
+        val operation = QueuedOperationEntity(
+            clientOperationId = clientId,
+            accountKey = accountKey,
+            operationType = type,
+            path = path,
+            method = "POST",
+            payload = payload,
+            status = QueuedOperationEntity.STATUS_PENDING,
+            createdAt = System.currentTimeMillis(),
+            ownerRole = ownerRole,
+        )
+        dao.enqueue(operation)
+        runCatching { syncScheduler.schedule(accountKey) }
+        return operation
+    }
+
+    private suspend fun markPending(operation: QueuedOperationEntity, message: String, attemptsBump: Boolean = true) {
+        dao.setQueueState(operation.clientOperationId, operation.accountKey,
+            QueuedOperationEntity.STATUS_PENDING,
+            operation.attempts + if (attemptsBump) 1 else 0, message)
+    }
+
+    private fun requireAccount(session: Session): String =
+        accountKeyFromToken(session.token, session.user.id)
+            ?: throw IllegalArgumentException("La sesión no contiene una identidad de cuenta válida")
+
+    private suspend inline fun <reified T> cache(accountKey: String, kind: String, key: String, value: T) {
+        dao.putCache(listOf(
+            CacheRecordEntity(accountKey, kind, key, json.encodeToString(value), System.currentTimeMillis()),
+        ))
+    }
+
+    private suspend inline fun <reified T> cacheRecord(accountKey: String, kind: String, key: String, value: T) {
+        cache(accountKey, kind, key, value)
+    }
+
+    private suspend inline fun <reified T> replaceList(
+        accountKey: String,
+        kind: String,
+        values: List<T>,
+        keyOf: (T) -> String,
+    ) {
+        val now = System.currentTimeMillis()
+        val records = values.map {
+            CacheRecordEntity(accountKey, kind, keyOf(it), json.encodeToString(it), now)
+        }
+        dao.replaceCacheKind(accountKey, kind, records)
+    }
+
+    private inline fun <reified T> observeList(
+        accountKey: String,
+        kind: String,
+        crossinline decode: (String) -> T,
+    ): Flow<List<T>> = dao.observeCache(accountKey, kind).map { rows ->
+        rows.mapNotNull { row -> runCatching { decode(row.payload) }.getOrNull() }
+    }
+
+    private fun apiError(body: String?, fallback: String): String =
+        body?.let { runCatching { json.decodeFromString<ApiErrorDto>(it).error }.getOrNull() }
+            ?.takeIf { it.isNotBlank() } ?: fallback
+
+    private fun apiException(code: Int, body: String?): IOException =
+        IOException(apiError(body, "Error del servidor ($code)"))
+
+    class StoreRejected(message: String) : Exception(message)
+    class CloseConflict(message: String) : Exception(message)
+
+    companion object {
+        const val KIND_PERIOD = "caja_period"
+        const val KIND_CLOSES = "caja_closes"
+        const val KIND_CLOSE_SUMMARY = "caja_summary"
+        const val KIND_WITHDRAWALS = "caja_withdrawals"
+        const val KIND_OPEN_WITHDRAWALS = "caja_open_withdrawals"
+        const val KIND_PURCHASES = "fx_purchases"
+        const val KIND_DASHBOARD = "dashboard"
+        const val KIND_ACTIVITY = "activity_day"
+
+        const val OP_CLOSE = "close"
+        const val OP_WITHDRAWAL = "withdrawal"
+        const val OP_PURCHASE = "purchase"
+        private val GLOBAL_OPERATIONS = setOf(PosRepository.OP_SALE, InventoryRepository.OP_COUNT, OP_CLOSE, OP_WITHDRAWAL, OP_PURCHASE) + Outbox.OWNER_TYPES
+        private const val TAG = "StoreRepository"
+    }
+}
