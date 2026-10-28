@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles, MoreHorizontal, X } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles, MoreHorizontal, X, BookOpen } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import { splitMobileNav, isMoreActive } from '../lib/mobileNav.js'
@@ -26,6 +26,8 @@ const navItems = [
   { to: '/sales',     icon: ClipboardList,   label: 'Historial'                    },
   // Los informes de auditoría los genera la nube; el escritorio offline no los tiene.
   { to: '/auditoria', icon: Sparkles,        label: 'Auditoría',   ownerOnly: true, cloudOnly: true },
+  // La contabilidad es solo para plan Enterprise.
+  { to: '/contabilidad', icon: BookOpen,     label: 'Contabilidad', ownerOnly: true, cloudOnly: true },
   // Panel de administración: confirmar tiendas nuevas (ver pages/Admin.jsx).
   // Solo existe para la cuenta de administración (is_admin del servidor).
   { to: '/admin',     icon: ShieldCheck,     label: 'Admin',     adminOnly: true   },

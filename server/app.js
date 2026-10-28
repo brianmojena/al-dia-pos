@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { requireAuth, requireOwner, requireAdmin } = require('./middleware/auth');
+const { requireEnterprise } = require('./middleware/plan');
 const authRouter      = require('./routes/auth');
 const productsRouter  = require('./routes/products');
 const salesRouter     = require('./routes/sales');
@@ -9,6 +10,7 @@ const cashClosesRouter = require('./routes/cashCloses');
 const cashWithdrawalsRouter = require('./routes/cashWithdrawals');
 const inventoryCountsRouter = require('./routes/inventoryCounts');
 const reportsRouter = require('./routes/reports');
+const accountingRouter = require('./routes/accounting');
 const syncRouter = require('./routes/sync');
 const auditCronRouter = require('./routes/auditCron');
 const { ownerRouter: auditRouter, adminRouter: adminAuditRouter } = require('./routes/audit');
@@ -47,6 +49,8 @@ app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 // Histórico de días pasados y su descarga en Excel — solo el dueño (requireOwner
 // vive dentro de cada ruta, igual que en /api/sales y /api/cash-closes).
 app.use('/api/reports', requireAuth, reportsRouter);
+// Contabilidad: solo dueño + plan Enterprise.
+app.use('/api/accounting', requireAuth, requireOwner, requireEnterprise, accountingRouter);
 // Informes de auditoría de la propia tienda: el router exige rol de dueño.
 app.use('/api/audit', requireAuth, auditRouter);
 app.use('/api/sync', requireAuth, require('./routes/pwaSync'));

@@ -19,6 +19,7 @@ import Divisas from './pages/Divisas'
 import Almacen from './pages/Almacen'
 import Cajeros from './pages/Cajeros'
 import Auditoria from './pages/Auditoria'
+import Contabilidad from './pages/Contabilidad'
 import Inventario from './pages/Inventario'
 import ImportarProductos from './pages/ImportarProductos'
 import { isElectron } from './lib/api'
@@ -72,6 +73,7 @@ export default function App() {
               <Route path="cajeros"    element={<Cajeros />} />
               {/* Los informes viven en la nube; en el escritorio offline no hay nada que ver. */}
               <Route path="auditoria"  element={<Auditoria />} />
+              <Route path="contabilidad" element={<Contabilidad />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
 

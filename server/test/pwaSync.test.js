@@ -80,7 +80,7 @@ test('sincronización PWA: snapshot, recibos, fechas y cierre exacto', async (t)
       register_id: 'web', items: [{ product_id: product, quantity: 1, unit_price: 50 }],
     } });
     const cashierSaleClose = await ctx.api('POST', '/api/cash-closes', { token: cashier.token, body: {
-      client_close_id: 'cashier-offline-exact', register_id: 'web', covered_sale_ids: [cashierSale.body.id],
+      client_close_id: 'cashier-offline-exact', register_id: 'web', covered_sale_ids: [9999999, cashierSale.body.id], // un id obsoleto no debe tumbar el cierre
       opening_float: 1000, counted_cash: 1300,
     } });
     assert.equal(cashierSaleClose.status, 201);

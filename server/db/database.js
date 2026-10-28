@@ -633,6 +633,20 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_cash_withdrawals_user ON cash_withdrawals(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_cash_withdrawals_open ON cash_withdrawals(user_id, cash_close_id);
 
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_expense_id TEXT,
+      method TEXT NOT NULL,
+      amount REAL NOT NULL,
+      concept TEXT NOT NULL,
+      account_id INTEGER,
+      account_email TEXT,
+      voided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_counts_client_id
       ON inventory_counts(user_id, client_count_id) WHERE client_count_id IS NOT NULL;
 
@@ -648,6 +662,10 @@ async function initDb() {
 
     -- El teléfono reintenta el aviso si se corta la conexión: una sola fila por venta.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_rejected_sales_client ON rejected_sales(user_id, client_sale_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_client_id
+      ON expenses(user_id, client_expense_id) WHERE client_expense_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id, created_at);
 
     -- El worker busca trabajos pendientes por fecha; el índice evita escanear
     -- toda la tabla cuando ya hay historial de miles de cierres.

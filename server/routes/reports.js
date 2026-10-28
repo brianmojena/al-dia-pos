@@ -476,3 +476,8 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 module.exports = router;
+module.exports.daySummaries = daySummaries;
+module.exports.sumTotals = sumTotals;
+module.exports.resolveMonth = resolveMonth;
+module.exports.buildExtraccionesSheet = buildExtraccionesSheet;
+module.exports.styleHeaderRow = styleHeaderRow;

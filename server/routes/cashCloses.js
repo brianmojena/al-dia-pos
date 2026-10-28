@@ -511,7 +511,10 @@ router.post('/', asyncHandler(async (req, res) => {
       : await openSales(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitIds) {
       const available = new Set(covered.map((sale) => Number(sale.id)));
-      if (explicitIds.some((id) => !available.has(id))) {
+      // Un id que ya no está abierto (otro cierre se lo llevó o quedó
+      // desfasado en el aparato) se ignora: el cierre toma las que sí siguen
+      // abiertas. Solo se rechaza si ninguna coincide.
+      if (explicitIds.length > 0 && !explicitIds.some((id) => available.has(id))) {
         await tx.rollback();
         return res.status(409).json({ error: 'Una venta de este cierre ya no está disponible. Revisa la caja antes de sincronizar.' });
       }
@@ -529,7 +532,7 @@ router.post('/', asyncHandler(async (req, res) => {
       : await openPurchases(tx, req.userId, mode, registerId, closesWholeShop(req), req.role === OWNER ? null : req.accountId);
     if (explicitPurchaseIds) {
       const available = new Set(coveredPurchases.map((purchase) => Number(purchase.id)));
-      if (explicitPurchaseIds.some((id) => !available.has(id))) {
+      if (explicitPurchaseIds.length > 0 && !explicitPurchaseIds.some((id) => available.has(id))) {
         await tx.rollback();
         return res.status(409).json({ error: 'Una compra de divisa de este cierre ya no está disponible. Revisa la caja antes de sincronizar.' });
       }
