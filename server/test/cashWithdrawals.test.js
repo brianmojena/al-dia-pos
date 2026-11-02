@@ -622,4 +622,68 @@ test('extracciones de caja', async (t) => {
     assert.equal(Number(listAfter.body.find((w) => w.client_withdrawal_id === 'ext-owner-close').cash_close_id), ownerClose.body.id);
     assert.equal(Number(listAfter.body.find((w) => w.client_withdrawal_id === 'ext-b-close').cash_close_id), ownerClose.body.id);
   });
+
+  await t.test('tipo de extracción: POST guarda kind válido, rechaza otro y sin kind queda null', async () => {
+    const owner = await registerUser(ctx.api);
+    const negocio = await extraer(owner, { client_withdrawal_id: 'kind-negocio', method: 'efectivo', amount: 10, kind: 'negocio' });
+    assert.equal(negocio.status, 201);
+    assert.equal(negocio.body.kind, 'negocio');
+    const sinTipo = await extraer(owner, { client_withdrawal_id: 'kind-none', method: 'efectivo', amount: 11 });
+    assert.equal(sinTipo.body.kind, null);
+    const vacio = await extraer(owner, { client_withdrawal_id: 'kind-empty', method: 'efectivo', amount: 12, kind: '' });
+    assert.equal(vacio.body.kind, null);
+    const invalido = await extraer(owner, { client_withdrawal_id: 'kind-bad', method: 'efectivo', amount: 13, kind: 'otro' });
+    assert.equal(invalido.status, 400);
+    assert.equal(invalido.body.error, 'Tipo de extracción inválido');
+  });
+
+  await t.test('cajero que manda kind: se guarda null y no da error (la clasificación es de la dueña)', async () => {
+    const owner = await registerUser(ctx.api);
+    const { token: cashier } = await createCashier(ctx.api, owner);
+    const res = await extraer(cashier, { client_withdrawal_id: 'kind-cashier', method: 'efectivo', amount: 15, note: 'Compra de pan', kind: 'mercancia' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.kind, null);
+    const otro = await extraer(cashier, { client_withdrawal_id: 'kind-cashier-bad', method: 'efectivo', amount: 16, note: 'Compra de sal', kind: 'otro' });
+    assert.equal(otro.status, 201);
+    assert.equal(otro.body.kind, null);
+    const rows = await ctx.api('GET', '/api/cash-withdrawals', { token: owner });
+    assert.equal(rows.body.find((w) => w.client_withdrawal_id === 'kind-cashier').kind, null);
+  });
+
+  await t.test('PATCH /kind: solo dueño, valida, 404 para ajenas, null desclasifica y anulada también se clasifica', async () => {
+    const owner = await registerUser(ctx.api);
+    const { token: cashier } = await createCashier(ctx.api, owner);
+    const otherOwner = await registerUser(ctx.api);
+    await extraer(cashier, { client_withdrawal_id: 'patch-1', method: 'efectivo', amount: 30, note: 'Compra de hielo' });
+    const patch = (token, id, body) => ctx.api('PATCH', `/api/cash-withdrawals/${id}/kind`, { token, body });
+
+    const porCajero = await patch(cashier, 'patch-1', { kind: 'negocio' });
+    assert.equal(porCajero.status, 403);
+
+    const invalido = await patch(owner, 'patch-1', { kind: 'otro' });
+    assert.equal(invalido.status, 400);
+    assert.equal(invalido.body.error, 'Tipo de extracción inválido');
+
+    const inexistente = await patch(owner, 'no-existe', { kind: 'negocio' });
+    assert.equal(inexistente.status, 404);
+    assert.equal(inexistente.body.error, 'Extracción no encontrada');
+
+    const ajena = await patch(otherOwner, 'patch-1', { kind: 'negocio' });
+    assert.equal(ajena.status, 404);
+
+    const clasifica = await patch(owner, 'patch-1', { kind: 'negocio' });
+    assert.equal(clasifica.status, 200);
+    assert.equal(clasifica.body.kind, 'negocio');
+    assert.equal(clasifica.body.note, 'Compra de hielo');
+    assert.equal(Number(clasifica.body.amount), 30);
+
+    const quita = await patch(owner, 'patch-1', { kind: null });
+    assert.equal(quita.body.kind, null);
+
+    await anular(owner, 'patch-1');
+    const anulada = await patch(owner, 'patch-1', { kind: 'personal' });
+    assert.equal(anulada.status, 200);
+    assert.equal(anulada.body.kind, 'personal');
+    assert.notEqual(anulada.body.voided_at, null);
+  });
 });

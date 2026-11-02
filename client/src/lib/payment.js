@@ -92,13 +92,19 @@ export function withdrawalSplit(w) {
   }
 }
 
+// Tipo de extracción: solo 'negocio' resta del resultado. null = sin clasificar.
+export const WITHDRAWAL_KINDS = ['mercancia', 'negocio', 'personal']
+export const WITHDRAWAL_KIND_LABELS = { mercancia: 'Compra de mercancía', negocio: 'Gasto del negocio', personal: 'Retiro personal' }
+
 // Valida y normaliza; lanza Error con mensaje en español para el dueño.
 export function withdrawalFields(body) {
   if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido')
   const amount = Number(body.amount)
   if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta cuánto dinero se extrae')
   const note = body.note == null ? null : String(body.note).trim().slice(0, 200) || null
-  return { method: body.method, amount: round2(amount), note }
+  const kind = body.kind == null || body.kind === '' ? null : body.kind
+  if (kind !== null && !WITHDRAWAL_KINDS.includes(kind)) throw new Error('Tipo de extracción inválido')
+  return { method: body.method, amount: round2(amount), note, kind }
 }
 
 // Lo que se manda al servidor. Con el slider en un extremo el cobro no es

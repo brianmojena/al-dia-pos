@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   paymentSplit, paymentLabel, maxTransfer, initialTransfer, clampTransfer, mixedPayload,
-  offShopRate, foreignBreakdown, foreignNeeded,
+  offShopRate, foreignBreakdown, foreignNeeded, withdrawalFields, WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS,
 } from './payment.js'
 
 const noForeign = { usd: 0, eur: 0, foreign_cup: 0 }
@@ -54,4 +54,17 @@ test('con el slider en un extremo no se manda un mixto', () => {
   assert.deepEqual(mixedPayload(2500, 0), { payment_method: 'efectivo' })
   assert.deepEqual(mixedPayload(2500, 2500), { payment_method: 'transferencia' })
   assert.deepEqual(mixedPayload(2500, 1350), { payment_method: 'mixto', transfer_amount: 1350 })
+})
+
+test('cada tipo de extracción tiene su etiqueta; sin tipo queda null', () => {
+  assert.deepEqual(WITHDRAWAL_KINDS, ['mercancia', 'negocio', 'personal'])
+  for (const kind of WITHDRAWAL_KINDS) assert.ok(WITHDRAWAL_KIND_LABELS[kind])
+  assert.equal(withdrawalFields({ method: 'efectivo', amount: 10 }).kind, null)
+  assert.equal(withdrawalFields({ method: 'efectivo', amount: 10, kind: '' }).kind, null)
+  assert.equal(withdrawalFields({ method: 'efectivo', amount: 10, kind: null }).kind, null)
+  assert.equal(withdrawalFields({ method: 'efectivo', amount: 10, kind: 'negocio' }).kind, 'negocio')
+})
+
+test('un tipo fuera de la lista se rechaza con mensaje en español', () => {
+  assert.throws(() => withdrawalFields({ method: 'efectivo', amount: 10, kind: 'otro' }), { message: 'Tipo de extracción inválido' })
 })

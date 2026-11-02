@@ -354,11 +354,12 @@ async function buildExtraccionesSheet(workbook, db, userId, bounds) {
     { header: 'Nota', key: 'nota', width: 30 },
     { header: 'Quién', key: 'quien', width: 24 },
     { header: 'Estado', key: 'estado', width: 12 },
+    { header: 'Tipo', key: 'tipo', width: 20 },
   ];
   styleHeaderRow(sheet.getRow(1));
 
   const result = await db.execute({
-    sql: `SELECT created_at, method, amount, note, account_email, voided_at, cash_close_id
+    sql: `SELECT created_at, method, amount, note, kind, account_email, voided_at, cash_close_id
           FROM cash_withdrawals WHERE user_id = ? AND created_at >= ? AND created_at < ?
           ORDER BY created_at ASC`,
     args: [userId, bounds.start, bounds.end],
@@ -369,6 +370,12 @@ async function buildExtraccionesSheet(workbook, db, userId, bounds) {
     'transferencia': 'Transferencia',
     'USD': 'Dólares',
     'EUR': 'Euros',
+  };
+
+  const kindLabels = {
+    mercancia: 'Compra de mercancía',
+    negocio: 'Gasto del negocio',
+    personal: 'Retiro personal',
   };
 
   for (const row of result.rows) {
@@ -387,6 +394,7 @@ async function buildExtraccionesSheet(workbook, db, userId, bounds) {
       nota: row.note || '',
       quien: row.account_email || '',
       estado,
+      tipo: kindLabels[row.kind] || 'Sin clasificar',
     });
   }
 }

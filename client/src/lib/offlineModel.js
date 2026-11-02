@@ -447,6 +447,8 @@ export function prepareOperation(data, method, path, body, ctx) {
     op.body.method = fields.method
     op.body.amount = fields.amount
     op.body.note = fields.note
+    // Sin tipo no se añade la propiedad: los cuerpos de los cajeros no cambian.
+    if (fields.kind !== null) op.body.kind = fields.kind
     op.body.withdrawn_at = now
     op.body.register_id = data.shared_device ? registerFor(ctx.account, data.shared_device) : 'web'
     op.result = { ...op.body, ...meta, id: ctx.localId(), created_at: now, register_id: registerFor(ctx.account, data.shared_device), cash_close_id: null, voided_at: null, pending: true }

@@ -7,7 +7,7 @@ const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { withdrawalFields } = require('../lib/payment');
+const { withdrawalFields, WITHDRAWAL_KINDS } = require('../lib/payment');
 
 /**
  * Extracciones de caja:
@@ -76,8 +76,10 @@ router.post('/', asyncHandler(async (req, res) => {
   try { operationDate = operationTime(req.body.withdrawn_at); }
   catch (error) { return operationTimeFailure(res, error); }
 
+  // La clasificación es de la dueña: al cajero se le ignora en silencio, así no fallan los clientes viejos.
+  const body = req.role === OWNER ? req.body : { ...req.body, kind: null };
   let fields;
-  try { fields = withdrawalFields(req.body); }
+  try { fields = withdrawalFields(body); }
   catch (error) { return res.status(400).json({ error: error.message }); }
 
   const { client_withdrawal_id = null, register_id: requestedRegisterId = null } = req.body;
@@ -107,11 +109,11 @@ router.post('/', asyncHandler(async (req, res) => {
   try {
     const inserted = await db.execute({
       sql: `INSERT INTO cash_withdrawals
-              (user_id, client_withdrawal_id, method, amount, note,
+              (user_id, client_withdrawal_id, method, amount, note, kind,
                register_id, account_id, account_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [
-        req.userId, client_withdrawal_id, fields.method, fields.amount, fields.note,
+        req.userId, client_withdrawal_id, fields.method, fields.amount, fields.note, fields.kind,
         registerId, account.id, account.email, operationDate,
       ],
     });
@@ -130,6 +132,22 @@ router.post('/', asyncHandler(async (req, res) => {
     }
     throw err;
   }
+}));
+
+// Clasificar no mueve dinero, así que se permite aunque esté anulada o ya cerrada.
+router.patch('/:clientWithdrawalId/kind', requireOwner, asyncHandler(async (req, res) => {
+  const kind = req.body?.kind;
+  if (kind !== null && !WITHDRAWAL_KINDS.includes(kind)) {
+    return res.status(400).json({ error: 'Tipo de extracción inválido' });
+  }
+
+  const db = getDb();
+  const found = await findByClientId(db, req.userId, req.params.clientWithdrawalId);
+  if (!found.rows[0]) return res.status(404).json({ error: 'Extracción no encontrada' });
+
+  await db.execute({ sql: 'UPDATE cash_withdrawals SET kind = ? WHERE id = ?', args: [kind, found.rows[0].id] });
+  const updated = await db.execute({ sql: 'SELECT * FROM cash_withdrawals WHERE id = ?', args: [found.rows[0].id] });
+  res.status(200).json(updated.rows[0]);
 }));
 
 router.post('/:clientWithdrawalId/void', asyncHandler(async (req, res) => {

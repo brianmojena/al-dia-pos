@@ -10,8 +10,87 @@ import { shiftMonth, monthLabel, dayLabel } from '../lib/months'
 import { newId } from '../lib/newId'
 import { formatTime } from '../lib/dates'
 import { validateExpense } from '../lib/accountingValidation'
+import { WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS } from '../lib/payment.js'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+
+// Aviso amarillo: las extracciones sin tipo no restan del resultado hasta clasificarlas.
+export function UnclassifiedNotice({ count, cup, onGo }) {
+  if (!count) return null
+  return (
+    <div className="flex items-start gap-3 bg-amber-50 border border-amber-300 rounded-2xl px-5 py-4 mb-6">
+      <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-amber-800">
+          {`Tienes ${count} ${count === 1 ? 'extracción' : 'extracciones'} sin clasificar (${fmt(cup)}). No se descuentan del resultado hasta que ${count === 1 ? 'la' : 'las'} clasifiques.`}
+        </p>
+        <button type="button" onClick={onGo} className="mt-2 text-sm font-semibold text-amber-800 underline">
+          Ir a la lista
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Compras de mercancía y retiros personales: se muestran, pero no restan del resultado.
+export function WithdrawalTotals({ totals }) {
+  return (
+    <div className="bg-white rounded-2xl shadow-sm p-5 mb-6">
+      <div className="flex items-center justify-between text-sm mb-2">
+        <span className="text-gray-700">Compras de mercancía</span>
+        <span className="font-semibold text-gray-900">{fmt(totals.merchandise_cup ?? 0)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-gray-700">Retiros personales</span>
+        <span className="font-semibold text-gray-900">{fmt(totals.personal_cup ?? 0)}</span>
+      </div>
+      <p className="text-[11px] text-gray-500 mt-3">
+        No se descuentan del resultado. La mercancía ya está en el costo de lo vendido, y los retiros personales son dinero tuyo.
+      </p>
+    </div>
+  )
+}
+
+// Las sin clasificar van primero; Array.sort es estable, así que cada grupo
+// conserva el orden del servidor (más recientes primero).
+export function WithdrawalRows({ rows, savingId, onKindChange }) {
+  const ordered = [...rows].sort((a, b) => Number(b.kind == null) - Number(a.kind == null))
+  return (
+    <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+      {ordered.map((w, idx) => (
+        <div
+          key={w.client_withdrawal_id}
+          className={`px-5 py-4 flex items-start justify-between gap-3 ${
+            idx < ordered.length - 1 ? 'border-b border-gray-100' : ''
+          } ${w.kind == null ? 'bg-amber-50' : ''}`}
+        >
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-gray-900">{w.note || 'Sin nota'}</p>
+            <p className="text-xs text-gray-500">
+              {dayLabel(w.created_at.split(' ')[0])} · {formatTime(w.created_at)}
+              {w.method !== 'efectivo' && ` · ${w.method}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <span className="text-sm font-semibold text-gray-900">{fmt(w.amount)}</span>
+            <select
+              aria-label="Tipo de extracción"
+              value={w.kind ?? ''}
+              disabled={savingId === w.client_withdrawal_id}
+              onChange={(e) => onKindChange(w.client_withdrawal_id, e.target.value)}
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-[#007AFF] disabled:opacity-50"
+            >
+              <option value="">Sin clasificar</option>
+              {WITHDRAWAL_KINDS.map((kind) => (
+                <option key={kind} value={kind}>{WITHDRAWAL_KIND_LABELS[kind]}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 export default function Contabilidad() {
   const { user } = useAuth()
@@ -48,6 +127,10 @@ function ContabilidadContent() {
   const [viewMonth, setViewMonth] = useState(currentMonth)
   const [summary, setSummary] = useState(null)
   const [expenses, setExpenses] = useState([])
+  const [withdrawals, setWithdrawals] = useState([])
+  const [kindSavingId, setKindSavingId] = useState(null)
+  const [kindError, setKindError] = useState('')
+  const withdrawalsRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [exporting, setExporting] = useState(false)
@@ -64,13 +147,18 @@ function ContabilidadContent() {
   // no registre dos gastos. Se genera solo una vez al abrir el formulario.
   const expenseIdRef = useRef(null)
 
-  const loadMonth = async (month) => {
-    setLoading(true)
-    setError('')
+  // silent: recarga sin desmontar la página (no spinner, no borrar el error),
+  // para que al clasificar varias extracciones seguidas no se pierda el scroll.
+  const loadMonth = async (month, { silent = false } = {}) => {
+    if (!silent) {
+      setLoading(true)
+      setError('')
+    }
     try {
-      const [summaryRes, expensesRes] = await Promise.all([
+      const [summaryRes, expensesRes, withdrawalsRes] = await Promise.all([
         apiFetch(`/api/accounting/summary?month=${month}`),
         apiFetch(`/api/accounting/expenses?month=${month}`),
+        apiFetch(`/api/accounting/withdrawals?month=${month}`),
       ])
 
       // Si falla por PLAN_REQUIRED, mostrar la tarjeta de plan
@@ -84,16 +172,19 @@ function ContabilidadContent() {
 
       if (!summaryRes.ok) throw new Error('No se pudo cargar el resumen del mes.')
       if (!expensesRes.ok) throw new Error('No se pudo cargar los gastos.')
+      if (!withdrawalsRes.ok) throw new Error('No se pudo cargar las extracciones.')
 
       const summaryData = await summaryRes.json()
       const expensesData = await expensesRes.json()
+      const withdrawalsData = await withdrawalsRes.json()
 
       setSummary(summaryData)
       setExpenses(Array.isArray(expensesData) ? expensesData : [])
+      setWithdrawals(Array.isArray(withdrawalsData) ? withdrawalsData : [])
     } catch (err) {
       setError(err.message || 'No se pudieron cargar los datos.')
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }
 
@@ -146,6 +237,27 @@ function ContabilidadContent() {
       setExpenseError(err.message)
     } finally {
       setExpenseSubmitting(false)
+    }
+  }
+
+  // Al guardar se recarga el mes entero: el resumen y la lista quedan al día.
+  const handleKindChange = async (clientWithdrawalId, value) => {
+    setKindSavingId(clientWithdrawalId)
+    setKindError('')
+    try {
+      const res = await apiFetch(`/api/cash-withdrawals/${clientWithdrawalId}/kind`, {
+        method: 'PATCH',
+        body: JSON.stringify({ kind: value || null }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'No se pudo cambiar el tipo de la extracción.')
+      }
+      await loadMonth(viewMonth, { silent: true })
+    } catch (err) {
+      setKindError(err.message)
+    } finally {
+      setKindSavingId(null)
     }
   }
 
@@ -250,6 +362,14 @@ function ContabilidadContent() {
         <>
           {/* Tarjetas de resumen */}
           {summary && (
+            <UnclassifiedNotice
+              count={summary.totals.unclassified_count ?? 0}
+              cup={summary.totals.unclassified_cup ?? 0}
+              onGo={() => withdrawalsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+            />
+          )}
+
+          {summary && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
               {/* Ingresos */}
               <div className="bg-white rounded-2xl shadow-sm p-5">
@@ -295,11 +415,12 @@ function ContabilidadContent() {
                   {fmt(summary.totals.result_cup)}
                 </p>
                 <p className="text-[11px] mt-2" style={{color: summary.totals.result_cup >= 0 ? '#059669' : '#dc2626'}}>
-                  Ganancia − gastos
+                  Ganancia menos gastos del negocio
                 </p>
               </div>
             </div>
           )}
+          {summary && <WithdrawalTotals totals={summary.totals} />}
 
           {/* Botón de descargar Excel */}
           <div className="mb-6">
@@ -433,7 +554,7 @@ function ContabilidadContent() {
           {/* Aclaración sobre extracciones de caja */}
           <div className="flex items-start gap-2 bg-blue-50 text-blue-800 rounded-xl px-4 py-3 mb-6 text-sm">
             <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
-            <p>Las extracciones de caja ya se cuentan como gasto automáticamente. No es necesario anotarlas de nuevo.</p>
+            <p>Las extracciones de caja clasificadas como Gasto del negocio ya se cuentan como gasto automáticamente. No es necesario anotarlas de nuevo.</p>
           </div>
 
           {/* Lista de gastos del mes */}
@@ -483,6 +604,18 @@ function ContabilidadContent() {
               </div>
             </div>
           )}
+
+          {/* Extracciones del mes: cada una se clasifica para saber si resta del resultado */}
+          <div ref={withdrawalsRef} className="mb-6">
+            <h3 className="font-semibold text-gray-900 mb-1">Extracciones del mes</h3>
+            <p className="text-xs text-gray-500 mb-3">Clasifica cada extracción. Solo Gasto del negocio resta del resultado.</p>
+            {kindError && <p role="alert" className="text-sm text-red-600 mb-3">{kindError}</p>}
+            {withdrawals.length > 0 ? (
+              <WithdrawalRows rows={withdrawals} savingId={kindSavingId} onKindChange={handleKindChange} />
+            ) : (
+              <p className="text-sm text-gray-500">No hay extracciones este mes.</p>
+            )}
+          </div>
 
           {/* Lista por día */}
           {summary?.days && summary.days.length > 0 && (

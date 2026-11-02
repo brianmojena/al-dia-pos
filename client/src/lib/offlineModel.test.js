@@ -368,6 +368,16 @@ test('extracción offline reduce holdings y cierre la cubre', () => {
   assert.equal(project(state).cash_withdrawals[0].cash_close_id, close.result.id)
 })
 
+test('extracción offline lleva su tipo; sin tipo el cuerpo queda igual que antes', () => {
+  const state = fixture()
+  const w = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 4, kind: 'negocio' })
+  assert.equal(w.body.kind, 'negocio')
+  assert.equal(w.result.kind, 'negocio')
+  const plain = add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 3 })
+  assert.equal('kind' in plain.body, false)
+  assert.equal('kind' in plain.result, false)
+})
+
 test('anular extracción restaura holdings, pero no si ya entró en cierre', () => {
   const state = fixture()
   sell(state, 1)

@@ -145,6 +145,10 @@ function purchaseFields(body) {
  */
 const WITHDRAWAL_METHODS = ['efectivo', 'transferencia', 'USD', 'EUR'];
 
+// Solo 'negocio' resta del resultado: 'mercancia' ya está en el costo de la venta.
+// NULL (sin clasificar) no resta y se avisa al dueño.
+const WITHDRAWAL_KINDS = ['mercancia', 'negocio', 'personal'];
+
 // Lo que una extracción le quita a cada apartado. Anulada = no quita nada.
 function withdrawalSplit(w) {
   const amount = w.voided_at ? 0 : round2(w.amount);
@@ -162,11 +166,13 @@ function withdrawalFields(body) {
   const amount = Number(body.amount);
   if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta cuánto dinero se extrae');
   const note = body.note == null ? null : String(body.note).trim().slice(0, 200) || null;
-  return { method: body.method, amount: round2(amount), note };
+  const kind = body.kind == null || body.kind === '' ? null : body.kind;
+  if (kind !== null && !WITHDRAWAL_KINDS.includes(kind)) throw new Error('Tipo de extracción inválido');
+  return { method: body.method, amount: round2(amount), note, kind };
 }
 
 module.exports = {
   PAYMENT_METHODS, CURRENCIES, paymentSplit, paymentLabel, offShopRate, foreignFields, round2,
   purchaseSplit, purchaseFields,
-  WITHDRAWAL_METHODS, withdrawalSplit, withdrawalFields,
+  WITHDRAWAL_METHODS, WITHDRAWAL_KINDS, withdrawalSplit, withdrawalFields,
 };

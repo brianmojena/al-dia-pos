@@ -7,7 +7,7 @@ const { operationTime, operationTimeFailure } = require('../lib/operationTime');
 const { shopLocalDate, shopLocalTime } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
-const { WITHDRAWAL_METHODS, round2 } = require('../lib/payment');
+const { WITHDRAWAL_METHODS, WITHDRAWAL_KINDS, round2 } = require('../lib/payment');
 const {
   daySummaries, sumTotals, resolveMonth, buildExtraccionesSheet, styleHeaderRow,
 } = require('./reports');
@@ -51,8 +51,13 @@ const classifyByMethod = (method, amount) => {
  * Devuelve { totals, days } donde days está ordenado más reciente primero.
  *
  * totals: { income, income_cash, income_transfer, income_foreign_cup, profit,
- *           expenses_cup, expenses_usd, expenses_eur, result_cup }
- * days: [{ date, income, profit, expenses_cup, expenses_usd, expenses_eur, result_cup }, ...]
+ *           expenses_cup, expenses_usd, expenses_eur, merchandise_cup, personal_cup,
+ *           unclassified_cup, unclassified_count, result_cup }
+ * days: [{ date, income, profit, expenses_cup, expenses_usd, expenses_eur,
+ *          merchandise_cup, personal_cup, unclassified_cup, result_cup }, ...]
+ *
+ * Solo las extracciones 'negocio' restan del resultado: la compra de mercancía
+ * ya está en el costo que la utilidad descuenta, y la personal no es del negocio.
  */
 async function monthAccounting(db, userId, bounds) {
   // Ingresos desde daySummaries
@@ -69,7 +74,7 @@ async function monthAccounting(db, userId, bounds) {
 
   // Extracciones no anuladas
   const withdrawalsResult = await db.execute({
-    sql: `SELECT created_at, method, amount FROM cash_withdrawals
+    sql: `SELECT created_at, method, amount, kind FROM cash_withdrawals
           WHERE user_id = ? AND created_at >= ? AND created_at < ? AND voided_at IS NULL
           ORDER BY created_at ASC`,
     args: [userId, bounds.start, bounds.end],
@@ -79,7 +84,10 @@ async function monthAccounting(db, userId, bounds) {
   const expensesByDay = new Map();
   const dayExpense = (date) => {
     if (!expensesByDay.has(date)) {
-      expensesByDay.set(date, { expenses_cup: 0, expenses_usd: 0, expenses_eur: 0 });
+      expensesByDay.set(date, {
+        expenses_cup: 0, expenses_usd: 0, expenses_eur: 0,
+        merchandise_cup: 0, personal_cup: 0, unclassified_cup: 0,
+      });
     }
     return expensesByDay.get(date);
   };
@@ -94,14 +102,25 @@ async function monthAccounting(db, userId, bounds) {
     d.expenses_eur += classified.eur;
   }
 
+  let unclassifiedCount = 0;
   for (const row of withdrawalsResult.rows) {
     const date = shopLocalDate(row.created_at);
     if (!date) continue;
+    if (!WITHDRAWAL_KINDS.includes(row.kind)) unclassifiedCount += 1;
     const d = dayExpense(date);
     const classified = classifyByMethod(row.method, row.amount);
-    d.expenses_cup += classified.cup;
-    d.expenses_usd += classified.usd;
-    d.expenses_eur += classified.eur;
+    // shortcut: las extracciones en USD/EUR que no son gasto solo suman su parte en CUP (0 si son divisa); desglosarlas en el resumen queda para cuando el dueño lo pida.
+    if (row.kind === 'negocio') {
+      d.expenses_cup += classified.cup;
+      d.expenses_usd += classified.usd;
+      d.expenses_eur += classified.eur;
+    } else if (row.kind === 'mercancia') {
+      d.merchandise_cup += classified.cup;
+    } else if (row.kind === 'personal') {
+      d.personal_cup += classified.cup;
+    } else {
+      d.unclassified_cup += classified.cup;
+    }
   }
 
   // Combinar con los días de daySummaries
@@ -110,8 +129,8 @@ async function monthAccounting(db, userId, bounds) {
     allDays[d.date] = { ...d };
   }
 
-  // Añadir días que solo tienen gastos
-  for (const [date, expenses] of expensesByDay) {
+  // Añadir días que solo tienen gastos o extracciones
+  for (const [date, amounts] of expensesByDay) {
     if (!allDays[date]) {
       allDays[date] = {
         date,
@@ -126,12 +145,12 @@ async function monthAccounting(db, userId, bounds) {
         off_rate_count: 0,
         stock_moves: 0,
         closes: null,
-        ...expenses,
+        ...amounts,
       };
     } else {
-      allDays[date].expenses_cup = (allDays[date].expenses_cup || 0) + expenses.expenses_cup;
-      allDays[date].expenses_usd = (allDays[date].expenses_usd || 0) + expenses.expenses_usd;
-      allDays[date].expenses_eur = (allDays[date].expenses_eur || 0) + expenses.expenses_eur;
+      for (const key of Object.keys(amounts)) {
+        allDays[date][key] = (allDays[date][key] || 0) + amounts[key];
+      }
     }
   }
 
@@ -145,6 +164,9 @@ async function monthAccounting(db, userId, bounds) {
       expenses_cup: round2(d.expenses_cup || 0),
       expenses_usd: round2(d.expenses_usd || 0),
       expenses_eur: round2(d.expenses_eur || 0),
+      merchandise_cup: round2(d.merchandise_cup || 0),
+      personal_cup: round2(d.personal_cup || 0),
+      unclassified_cup: round2(d.unclassified_cup || 0),
       result_cup: round2((d.profit || 0) - (d.expenses_cup || 0)),
     }));
 
@@ -158,6 +180,10 @@ async function monthAccounting(db, userId, bounds) {
     expenses_cup: 0,
     expenses_usd: 0,
     expenses_eur: 0,
+    merchandise_cup: 0,
+    personal_cup: 0,
+    unclassified_cup: 0,
+    unclassified_count: unclassifiedCount,
     result_cup: 0,
   };
 
@@ -165,6 +191,9 @@ async function monthAccounting(db, userId, bounds) {
     summaryTotals.expenses_cup = round2(summaryTotals.expenses_cup + d.expenses_cup);
     summaryTotals.expenses_usd = round2(summaryTotals.expenses_usd + d.expenses_usd);
     summaryTotals.expenses_eur = round2(summaryTotals.expenses_eur + d.expenses_eur);
+    summaryTotals.merchandise_cup = round2(summaryTotals.merchandise_cup + d.merchandise_cup);
+    summaryTotals.personal_cup = round2(summaryTotals.personal_cup + d.personal_cup);
+    summaryTotals.unclassified_cup = round2(summaryTotals.unclassified_cup + d.unclassified_cup);
   }
   summaryTotals.result_cup = round2(summaryTotals.profit - summaryTotals.expenses_cup);
 
@@ -309,6 +338,30 @@ router.post('/expenses/:clientExpenseId/void', requireOwner, asyncHandler(async 
 }));
 
 /**
+ * GET /withdrawals?month=YYYY-MM
+ * Extracciones no anuladas del mes, para que el dueño les ponga tipo.
+ */
+router.get('/withdrawals', requireOwner, asyncHandler(async (req, res) => {
+  let bounds;
+  try {
+    bounds = resolveMonth(req.query.month);
+  } catch (_) {
+    return res.status(400).json({ error: 'Mes inválido' });
+  }
+
+  const db = getDb();
+  const result = await db.execute({
+    sql: `SELECT id, client_withdrawal_id, created_at, method, amount, note, kind, account_email
+          FROM cash_withdrawals
+          WHERE user_id = ? AND created_at >= ? AND created_at < ? AND voided_at IS NULL
+          ORDER BY created_at DESC, id DESC`,
+    args: [req.userId, bounds.start, bounds.end],
+  });
+
+  res.json(result.rows);
+}));
+
+/**
  * GET /summary?month=YYYY-MM
  * Resumen mensual de ingresos y gastos.
  */
@@ -358,6 +411,10 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
     { header: 'Gastos USD', key: 'gastos_usd', width: 14, style: { numFmt: MONEY_FMT } },
     { header: 'Gastos EUR', key: 'gastos_eur', width: 14, style: { numFmt: MONEY_FMT } },
     { header: 'Resultado CUP', key: 'resultado_cup', width: 14, style: { numFmt: MONEY_FMT } },
+    // Al final para no mover las columnas de arriba: el Excel ya se comparte así.
+    { header: 'Compra de mercancía', key: 'mercancia_cup', width: 18, style: { numFmt: MONEY_FMT } },
+    { header: 'Retiro personal', key: 'personal_cup', width: 16, style: { numFmt: MONEY_FMT } },
+    { header: 'Sin clasificar', key: 'sin_clasificar_cup', width: 16, style: { numFmt: MONEY_FMT } },
   ];
   styleHeaderRow(resumenSheet.getRow(1));
 
@@ -371,6 +428,9 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
       gastos_usd: d.expenses_usd,
       gastos_eur: d.expenses_eur,
       resultado_cup: d.result_cup,
+      mercancia_cup: d.merchandise_cup,
+      personal_cup: d.personal_cup,
+      sin_clasificar_cup: d.unclassified_cup,
     });
   }
 
@@ -383,6 +443,9 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
     gastos_usd: totals.expenses_usd,
     gastos_eur: totals.expenses_eur,
     resultado_cup: totals.result_cup,
+    mercancia_cup: totals.merchandise_cup,
+    personal_cup: totals.personal_cup,
+    sin_clasificar_cup: totals.unclassified_cup,
   });
   totalRow.font = { bold: true };
 

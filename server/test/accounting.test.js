@@ -478,5 +478,106 @@ test('contabilidad', async (t) => {
     assert.equal(totalRow.getCell(5).value, summaryTotals.expenses_usd, 'gastos_usd coinciden');
     assert.equal(totalRow.getCell(6).value, summaryTotals.expenses_eur, 'gastos_eur coinciden');
     assert.equal(totalRow.getCell(7).value, summaryTotals.result_cup, 'resultado_cup coincide');
+    assert.deepEqual(
+      [8, 9, 10].map((col) => resumenSheet.getRow(1).getCell(col).value),
+      ['Compra de mercancía', 'Retiro personal', 'Sin clasificar'],
+    );
+    assert.equal(totalRow.getCell(8).value, summaryTotals.merchandise_cup, 'mercancía coincide');
+    assert.equal(totalRow.getCell(9).value, summaryTotals.personal_cup, 'retiro personal coincide');
+    assert.equal(totalRow.getCell(10).value, summaryTotals.unclassified_cup, 'sin clasificar coincide');
+  });
+
+  await t.test('tipo de extracción: solo el gasto del negocio resta del resultado', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    // Utilidad de la venta: 100 - 60 = 40
+    const productId = await createProduct(ctx.api, token, { name: 'Pan', stock: 10, sale_price: 100, purchase_price: 60 });
+    const sale = await ctx.api('POST', '/api/sales', {
+      token,
+      body: { register_id: 'web', items: [{ product_id: productId, quantity: 1, unit_price: 100 }], payment_method: 'efectivo' },
+    });
+    assert.equal(sale.status, 201);
+
+    const retiro = (client_withdrawal_id, amount, kind) => ctx.api('POST', '/api/cash-withdrawals', {
+      token, body: { register_id: 'web', client_withdrawal_id, method: 'efectivo', amount, note: 'Retiro de prueba', kind },
+    });
+    await retiro('acc-merc', 30, 'mercancia');
+    await retiro('acc-pers', 20, 'personal');
+    await retiro('acc-neg', 10, 'negocio');
+    await retiro('acc-none', 5, null);
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'acc-gasto', method: 'efectivo', amount: 7, concept: 'Gasto de prueba' },
+    });
+
+    const res = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(res.status, 200);
+    const totals = res.body.totals;
+    assert.equal(totals.profit, 40);
+    assert.equal(totals.expenses_cup, 17, 'gasto (7) + extracción de negocio (10)');
+    assert.equal(totals.merchandise_cup, 30);
+    assert.equal(totals.personal_cup, 20);
+    assert.equal(totals.unclassified_cup, 5);
+    assert.equal(totals.unclassified_count, 1);
+    assert.equal(totals.result_cup, 23, 'utilidad 40 - (gastos 7 + negocio 10)');
+
+    const sumDays = (key) => res.body.days.reduce((acc, d) => acc + d[key], 0);
+    assert.equal(sumDays('merchandise_cup'), 30);
+    assert.equal(sumDays('personal_cup'), 20);
+    assert.equal(sumDays('unclassified_cup'), 5);
+    assert.equal(sumDays('result_cup'), 23);
+  });
+
+  await t.test('día con solo extracciones de mercancía aparece con resultado 0', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    const res = await ctx.api('POST', '/api/cash-withdrawals', {
+      token,
+      body: {
+        register_id: 'web', client_withdrawal_id: 'acc-solo-merc', method: 'efectivo', amount: 80,
+        withdrawn_at: '2024-01-15T12:00:00.000Z', kind: 'mercancia',
+      },
+    });
+    assert.equal(res.status, 201);
+
+    const summary = await ctx.api('GET', '/api/accounting/summary?month=2024-01', { token });
+    assert.equal(summary.status, 200);
+    assert.equal(summary.body.days.length, 1);
+    assert.equal(summary.body.days[0].date, '2024-01-15');
+    assert.equal(summary.body.days[0].merchandise_cup, 80);
+    assert.equal(summary.body.days[0].result_cup, 0);
+    assert.equal(summary.body.totals.result_cup, 0);
+  });
+
+  await t.test('GET /withdrawals: solo dueño, mes inválido 400, sin anuladas y más reciente primero', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+    const cashier = await createCashier(ctx.api, token, { email: `cashier-${s}@test.local` });
+
+    const alta = (client_withdrawal_id, withdrawn_at, kind) => ctx.api('POST', '/api/cash-withdrawals', {
+      token, body: { register_id: 'web', client_withdrawal_id, method: 'efectivo', amount: 40, withdrawn_at, kind },
+    });
+    await alta('lista-1', '2024-02-10T12:00:00.000Z', 'negocio');
+    await alta('lista-2', '2024-02-11T12:00:00.000Z', null);
+    await alta('lista-3', '2024-02-12T12:00:00.000Z', null);
+    await ctx.api('POST', '/api/cash-withdrawals/lista-2/void', { token });
+
+    const porCajero = await ctx.api('GET', '/api/accounting/withdrawals?month=2024-02', { token: cashier.token });
+    assert.equal(porCajero.status, 403);
+
+    const mal = await ctx.api('GET', '/api/accounting/withdrawals?month=2024-13', { token });
+    assert.equal(mal.status, 400);
+    assert.equal(mal.body.error, 'Mes inválido');
+
+    const res = await ctx.api('GET', '/api/accounting/withdrawals?month=2024-02', { token });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.map((w) => w.client_withdrawal_id), ['lista-3', 'lista-1']);
+    assert.deepEqual(res.body.map((w) => w.kind), [null, 'negocio']);
+    assert.equal(res.body[0].account_email, `owner-${s}@test.local`);
   });
 });

@@ -9,6 +9,7 @@ import PaymentBadge from '../components/PaymentBadge'
 import ShopRatesCard from '../components/ShopRatesCard'
 import { formatTime, formatDateTime } from '../lib/dates'
 import { newId } from '../lib/newId'
+import { WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS } from '../lib/payment.js'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -16,6 +17,7 @@ const fmtMoney = (n) => new Intl.NumberFormat('es-ES', { minimumFractionDigits: 
 
 const methodLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', USD: 'Dólares', EUR: 'Euros' }
 const holdingKey = { efectivo: 'cash', transferencia: 'transfer', USD: 'usd', EUR: 'eur' }
+const kindHint = { mercancia: 'dinero para surtir la tienda', negocio: 'luz, pago a empleados, transporte…', personal: 'dinero que te llevas tú' }
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -25,6 +27,7 @@ export default function Dashboard() {
   const [withdrawalModal, setWithdrawalModal] = useState(null) // { method } or null
   const [withdrawalAmount, setWithdrawalAmount] = useState('')
   const [withdrawalNote, setWithdrawalNote] = useState('')
+  const [withdrawalKind, setWithdrawalKind] = useState('') // obligatorio: '' hasta elegir
   const [withdrawalSubmitting, setWithdrawalSubmitting] = useState(false)
   const [withdrawalError, setWithdrawalError] = useState('')
 
@@ -53,6 +56,7 @@ export default function Dashboard() {
           method: withdrawalModal.method,
           amount: parseFloat(withdrawalAmount) || 0,
           note: withdrawalNote.trim() || null,
+          kind: withdrawalKind,
         }),
       })
       const result = await res.json()
@@ -63,6 +67,7 @@ export default function Dashboard() {
       setWithdrawalModal(null)
       setWithdrawalAmount('')
       setWithdrawalNote('')
+      setWithdrawalKind('')
       await load()
     } catch (err) {
       setWithdrawalError(err.message || 'No se pudo guardar la extracción. Intenta de nuevo.')
@@ -204,7 +209,7 @@ export default function Dashboard() {
               </div>
               <p className="text-lg font-bold text-gray-900 mb-2">{value}</p>
               <button
-                onClick={() => { setWithdrawalModal({ method, id: newId() }); setWithdrawalAmount(''); setWithdrawalNote(''); setWithdrawalError('') }}
+                onClick={() => { setWithdrawalModal({ method, id: newId() }); setWithdrawalAmount(''); setWithdrawalNote(''); setWithdrawalKind(''); setWithdrawalError('') }}
                 className="mt-auto w-full flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold text-[#007AFF] hover:bg-blue-50 rounded-lg transition-colors active:scale-95 min-h-[36px]"
               >
                 <ArrowUpFromLine size={14} /> Extraer
@@ -377,6 +382,26 @@ export default function Dashboard() {
               </div>
 
               <div>
+                <label className="text-xs font-semibold text-gray-600 block mb-1.5">¿Para qué es? (obligatorio)</label>
+                <div className="space-y-2">
+                  {WITHDRAWAL_KINDS.map((kind) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      aria-pressed={withdrawalKind === kind}
+                      onClick={() => setWithdrawalKind(kind)}
+                      className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
+                        withdrawalKind === kind ? 'border-[#007AFF] bg-blue-50 ring-1 ring-[#007AFF]' : 'border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      <p className="text-sm font-semibold text-gray-900">{WITHDRAWAL_KIND_LABELS[kind]}</p>
+                      <p className="text-xs text-gray-500">{kindHint[kind]}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
                 <label className="text-xs font-semibold text-gray-600 block mb-1.5">Nota (opcional)</label>
                 <input
                   type="text"
@@ -408,7 +433,7 @@ export default function Dashboard() {
                 </button>
                 <button
                   type="submit"
-                  disabled={withdrawalSubmitting || !withdrawalAmount || parseFloat(withdrawalAmount) <= 0}
+                  disabled={withdrawalSubmitting || !withdrawalKind || !withdrawalAmount || parseFloat(withdrawalAmount) <= 0}
                   className="flex-1 px-4 py-3 text-sm font-semibold bg-[#007AFF] text-white rounded-xl hover:bg-blue-600 disabled:opacity-40 transition-colors active:scale-95"
                 >
                   {withdrawalSubmitting ? 'Guardando…' : 'Extraer'}

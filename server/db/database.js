@@ -331,6 +331,7 @@ async function initDb() {
       method TEXT NOT NULL,
       amount REAL NOT NULL,
       note TEXT,
+      kind TEXT,
       register_id TEXT,
       account_id INTEGER,
       account_email TEXT,
@@ -512,6 +513,8 @@ async function initDb() {
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_transfer REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_usd REAL NOT NULL DEFAULT 0',
     'ALTER TABLE cash_closes ADD COLUMN withdrawn_eur REAL NOT NULL DEFAULT 0',
+    // Tipo de extracción (ver WITHDRAWAL_KINDS en lib/payment.js). NULL = sin clasificar.
+    'ALTER TABLE cash_withdrawals ADD COLUMN kind TEXT',
     // Dirección de la transferencia: 'to_store' (almacén → tienda, la de ahora) o
     // 'to_warehouse' (tienda → almacén, la nueva).
     'ALTER TABLE warehouse_transfers ADD COLUMN direction TEXT NOT NULL DEFAULT \'to_store\'',
