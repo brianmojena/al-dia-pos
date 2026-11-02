@@ -10,6 +10,7 @@ import { UNITS, formatQty, priceSuffix, hasPack, formatPackStock } from '../lib/
 import { productDayStockValues } from '../lib/dailyStock'
 import { businessDate } from '../lib/offlineModel'
 import ProductDayStock from '../components/ProductDayStock.jsx'
+import { localSyncStatus, syncOffline } from '../lib/offlineClient.js'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 const fmt2 = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(Number(n) || 0)
@@ -125,6 +126,7 @@ export default function Products() {
   const [showEntries, setShowEntries] = useState(false)
   const [entries, setEntries] = useState(null)
   const [entriesError, setEntriesError] = useState('')
+  const [deletingEntry, setDeletingEntry] = useState(null)
   const openEntries = async () => {
     setShowEntries(true); setEntries(null); setEntriesError('')
     try {
@@ -133,6 +135,22 @@ export default function Products() {
       if (!res.ok || !Array.isArray(data)) { setEntriesError((data && data.error) || 'No se pudo cargar el historial. Hace falta conexión.'); return }
       setEntries(data)
     } catch (_) { setEntriesError('No se pudo cargar el historial. Hace falta conexión.') }
+  }
+  const deleteEntry = async (entry) => {
+    if (!window.confirm(`¿Borrar la entrada de ${entry.product_name} y descontar ${entry.quantity} del stock actual?`)) return
+    setDeletingEntry(entry.id); setEntriesError('')
+    try {
+      await syncOffline()
+      const status = await localSyncStatus()
+      if (status.pending || status.error || !status.initialized) throw new Error('Sincroniza los cambios pendientes antes de borrar la entrada.')
+      const res = await apiFetch(`/api/products/stock-entries/${entry.id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'No se pudo borrar la entrada')
+      setEntries(current => current.filter(item => item.id !== entry.id))
+      await syncOffline()
+      await load()
+    } catch (error) { setEntriesError(error.message || 'No se pudo borrar la entrada. Hace falta conexión.') }
+    finally { setDeletingEntry(null) }
   }
 
   // Para productos con paquete, el add_stock viene en paquetes + sueltos
@@ -384,6 +402,11 @@ export default function Products() {
                       <span className={`font-semibold ${kind.color}`}>{kind.label}</span> · {Number(e.stock_before)} → {Number(e.stock_after)} · {e.account_email || 'cuenta desconocida'} · {new Date(String(e.created_at).replace(' ', 'T') + 'Z').toLocaleString()}
                     </p>
                     {e.reason && <p className="text-xs text-gray-500 italic mt-0.5">«{e.reason}»</p>}
+                    {!isElectron() && ['entrada', 'nuevo', 'importacion'].includes(e.kind || 'entrada') && qty > 0 && (
+                      <button type="button" disabled={deletingEntry !== null} onClick={() => deleteEntry(e)} className="mt-2 text-xs font-semibold text-red-600 hover:text-red-800 disabled:opacity-50" aria-label={`Borrar entrada de ${e.product_name}`}>
+                        {deletingEntry === e.id ? 'Borrando...' : 'Borrar entrada'}
+                      </button>
+                    )}
                   </div>
                 )
               })}

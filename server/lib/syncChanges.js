@@ -2,6 +2,7 @@ const { resolveRegisterId } = require('./register');
 const { registerOf } = require('./sharedDevices');
 const { withdrawalScopeSql } = require('./withdrawalScope');
 const { dailyStock } = require('./dailyStock');
+const { STATE_SYNC_VERSION, readStateChanges, stateCursor } = require('./stateSync');
 
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 500;
@@ -222,6 +223,11 @@ async function syncChanges(tx, req) {
   const historyTo = dateParam(req.query.history_until) || (historyFrom ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null);
   const since = historyFrom ? null : dateParam(req.query.since);
   const history = historyFrom ? { from: historyFrom, to: historyTo } : null;
+  const incrementalStates = req.query.state_changes === '1';
+  const statePages = {};
+  if (incrementalStates && req.query.state_cursor_version === '0') {
+    for (const kind of ['sale', 'purchase', 'withdrawal']) cursors[`${kind}_state`] = 0;
+  }
   // En la carga inicial acotada se conservan siempre las filas abiertas: son
   // las que participan del arqueo y no deben quedar fuera por ser antiguas.
   const windowFilter = (column, openColumn = null) => {
@@ -293,11 +299,15 @@ async function syncChanges(tx, req) {
     sales = sales.map((sale) => ({ ...sale, items: itemsFor(sale) }));
   }
 
-  // Compact, account-scoped reconciliation for rows already cached by the
-  // cashier. It reveals only the close link, never close details or totals. The client
-  // resets this independent cursor after a full scan so a reopen is observed.
+  // Reconcile cached rows without exposing close totals. New clients follow change
+  // sequences; legacy clients still reconcile by scanning entity ids.
   let saleStates = [];
-  if ((owner || cashier || shared) && !history && 'after_sale_state' in req.query) {
+  if (incrementalStates && !history) {
+    for (const kind of ['sale', 'purchase', 'withdrawal']) {
+      statePages[kind] = await readStateChanges(tx, req, kind, cursors[`${kind}_state`], limit);
+    }
+    saleStates = statePages.sale.rows;
+  } else if ((owner || cashier || shared) && !history && 'after_sale_state' in req.query) {
     saleStates = shared
       ? await query(tx,
         `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
@@ -310,7 +320,9 @@ async function syncChanges(tx, req) {
         owner ? [req.userId, cursors.sale_state, limit] : [req.userId, ...cashierArgs, cursors.sale_state, limit]);
   }
   let purchaseStates = [];
-  if ((owner || cashier || shared) && !history && 'after_purchase_state' in req.query) {
+  if (incrementalStates && !history) {
+    purchaseStates = statePages.purchase.rows;
+  } else if ((owner || cashier || shared) && !history && 'after_purchase_state' in req.query) {
     purchaseStates = shared
       ? await query(tx,
         `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
@@ -324,7 +336,9 @@ async function syncChanges(tx, req) {
         owner ? [req.userId, cursors.purchase_state, limit] : [req.userId, ...cashierArgs, register, cursors.purchase_state, limit]);
   }
   let withdrawalStates = [];
-  if ((owner || cashier || shared) && !history && 'after_withdrawal_state' in req.query) {
+  if (incrementalStates && !history) {
+    withdrawalStates = statePages.withdrawal.rows;
+  } else if ((owner || cashier || shared) && !history && 'after_withdrawal_state' in req.query) {
     withdrawalStates = await query(tx,
       `SELECT id, cash_close_id, voided_at,
               CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed,
@@ -489,13 +503,13 @@ async function syncChanges(tx, req) {
   let rejectedSales;
   let cashiers;
   let daily;
-  if (owner) {
+  if (owner && !history) {
     rejectedSales = (await query(tx,
       'SELECT * FROM rejected_sales WHERE user_id = ? AND reviewed_at IS NULL ORDER BY id', [req.userId]))
       .map((sale) => ({ ...sale, items: JSON.parse(sale.items || '[]') }));
     cashiers = await query(tx,
       'SELECT id, email, created_at FROM users WHERE owner_id = ? ORDER BY created_at', [req.userId]);
-    daily = await dailyStock(tx, req.userId);
+    if (req.query.include_daily_stock !== '0') daily = await dailyStock(tx, req.userId);
   }
 
   const payload = {
@@ -510,6 +524,7 @@ async function syncChanges(tx, req) {
     sale_corrections: corrections,
     cash_close_corrections: closeCorrections,
     cash_close_coverage_version: 1,
+    ...(incrementalStates ? { state_changes_version: STATE_SYNC_VERSION } : {}),
   };
   if (history) {
     payload.history = history;
@@ -559,9 +574,9 @@ async function syncChanges(tx, req) {
 
   const buildCursors = () => ({
     sale: cursorsFor(sales, cursors.sale),
-    sale_state: cursorsFor(saleStates, cursors.sale_state),
-    purchase_state: cursorsFor(purchaseStates, cursors.purchase_state),
-    withdrawal_state: cursorsFor(withdrawalStates, cursors.withdrawal_state),
+    sale_state: stateCursor(saleStates, cursors.sale_state, statePages.sale),
+    purchase_state: stateCursor(purchaseStates, cursors.purchase_state, statePages.purchase),
+    withdrawal_state: stateCursor(withdrawalStates, cursors.withdrawal_state, statePages.withdrawal),
     close: cursorsFor(closes, cursors.close),
     count: cursorsFor(counts, cursors.count),
     purchase: cursorsFor(purchases, cursors.purchase),

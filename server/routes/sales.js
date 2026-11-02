@@ -1,4 +1,4 @@
-const { operationTime } = require('../lib/operationTime');
+const { operationTime, operationTimeFailure } = require('../lib/operationTime');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -243,9 +243,6 @@ router.get('/:id', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  let operationDate;
-  try { operationDate = operationTime(req.body.sold_at); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
   const {
     items, payment_method = 'efectivo', client_sale_id = null,
     register_id: requestedRegisterId = null, transfer_amount = null, cash_received = null,
@@ -289,6 +286,10 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(200).json({ ...sharedSaleResponse(req, existing.rows[0]), idempotent_replay: true });
     }
   }
+
+  let operationDate;
+  try { operationDate = operationTime(req.body.sold_at); }
+  catch (error) { return operationTimeFailure(res, error); }
 
   // El techo de transferencia lo fija el dueño (PUT /api/auth/settings) y se
   // valida aquí, no solo en la pantalla del POS: la cola offline y la app de

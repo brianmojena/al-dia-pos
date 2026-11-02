@@ -718,6 +718,22 @@ async function initDb() {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
   }
 
+  await require('../lib/stateSync').initStateSync(db);
+  // Cursor and date predicates need their own ordering; datetime() preserves legacy ISO timestamps.
+  const syncIndexes = [];
+  for (const table of ['sales', 'cash_closes', 'inventory_counts', 'currency_purchases', 'cash_withdrawals', 'warehouse_transfers', 'stock_entries']) {
+    syncIndexes.push(`CREATE INDEX IF NOT EXISTS idx_${table}_sync_cursor ON ${table}(user_id, id)`);
+  }
+  for (const [table, column] of [['sales', 'created_at'], ['stock_entries', 'created_at'], ['warehouse_transfers', 'created_at'], ['sale_corrections', 'created_at'], ['inventory_counts', 'counted_at']]) {
+    syncIndexes.push(`CREATE INDEX IF NOT EXISTS idx_${table}_sync_date ON ${table}(user_id, datetime(${column}))`);
+  }
+  for (const table of ['sales', 'currency_purchases', 'cash_withdrawals']) {
+    if (table !== 'cash_withdrawals') syncIndexes.push(`CREATE INDEX IF NOT EXISTS idx_${table}_close_coverage ON ${table}(user_id, cash_close_id, id)`);
+    syncIndexes.push(`CREATE INDEX IF NOT EXISTS idx_${table}_open_period ON ${table}(user_id, created_at) WHERE cash_close_id IS NULL`);
+  }
+  syncIndexes.push("CREATE INDEX IF NOT EXISTS idx_stock_entries_legacy_corrections ON stock_entries(user_id, product_id, reason) WHERE kind = 'correccion'");
+  await db.executeMultiple(syncIndexes.join(';'));
+
   console.log('Base de datos lista');
 }
 

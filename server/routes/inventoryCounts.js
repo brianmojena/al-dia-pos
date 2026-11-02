@@ -1,4 +1,4 @@
-const { operationTime } = require('../lib/operationTime');
+const { operationTime, operationTimeFailure } = require('../lib/operationTime');
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
@@ -92,7 +92,7 @@ router.get('/:id', requireOwner, asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   let operationDate;
   try { operationDate = operationTime(req.body.counted_at); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
+  catch (error) { return operationTimeFailure(res, error); }
   const { items, note = null, client_count_id = null } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {

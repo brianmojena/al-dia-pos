@@ -3,7 +3,7 @@ const router = express.Router();
 const ExcelJS = require('exceljs');
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { operationTime } = require('../lib/operationTime');
+const { operationTime, operationTimeFailure } = require('../lib/operationTime');
 const { shopLocalDate, shopLocalTime } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
@@ -201,7 +201,7 @@ router.get('/expenses', requireOwner, asyncHandler(async (req, res) => {
 router.post('/expenses', requireOwner, asyncHandler(async (req, res) => {
   let operationDate;
   try { operationDate = operationTime(req.body.spent_at); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
+  catch (error) { return operationTimeFailure(res, error); }
 
   // Validar method
   if (!WITHDRAWAL_METHODS.includes(req.body.method)) {

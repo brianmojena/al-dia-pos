@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
+const { STATE_SYNC_VERSION, readStateChanges, stateCursor } = require('../lib/stateSync');
 
 const numberParam = (value, fallback = 0) => {
   const n = Number(value);
@@ -31,13 +32,14 @@ const attachItems = (rows, items, key, itemKey) => {
 
 router.get('/delta', asyncHandler(async (req, res) => {
   const afterSale = numberParam(req.query.after_sale);
-  const afterSaleState = numberParam(req.query.after_sale_state);
+  const bootstrapStates = req.query.state_changes === '1' && req.query.state_cursor_version === '0';
+  const afterSaleState = bootstrapStates ? 0 : numberParam(req.query.after_sale_state);
   const afterClose = numberParam(req.query.after_close);
   const afterCount = numberParam(req.query.after_count);
   const afterPurchase = numberParam(req.query.after_purchase);
-  const afterPurchaseState = numberParam(req.query.after_purchase_state);
+  const afterPurchaseState = bootstrapStates ? 0 : numberParam(req.query.after_purchase_state);
   const afterWithdrawal = numberParam(req.query.after_withdrawal);
-  const afterWithdrawalState = numberParam(req.query.after_withdrawal_state);
+  const afterWithdrawalState = bootstrapStates ? 0 : numberParam(req.query.after_withdrawal_state);
   const afterCorrection = numberParam(req.query.after_correction);
   const afterCloseCorrection = numberParam(req.query.after_close_correction);
   const rawLimit = numberParam(req.query.limit, 500);
@@ -47,6 +49,13 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const since = typeof req.query.since === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since)
     ? req.query.since : null;
   const db = getDb();
+  const incrementalStates = req.query.state_changes === '1';
+  const statePages = {};
+  if (incrementalStates) {
+    for (const [kind, after] of [['sale', afterSaleState], ['purchase', afterPurchaseState], ['withdrawal', afterWithdrawalState]]) {
+      statePages[kind] = await readStateChanges(db, req, kind, after, limit);
+    }
+  }
   const sales = await db.execute({
     sql: `SELECT id, user_id, client_sale_id, total, profit, payment_method, transfer_amount,
             foreign_currency, foreign_amount, exchange_rate, shop_rate, cash_received,
@@ -56,7 +65,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterSale, since, limit] : [req.userId, afterSale, limit],
   });
-  const saleStates = 'after_sale_state' in req.query ? (await db.execute({
+  const saleStates = incrementalStates ? statePages.sale.rows : 'after_sale_state' in req.query ? (await db.execute({
     sql: `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
           FROM sales WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
     args: [req.userId, afterSaleState, limit],
@@ -80,7 +89,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterPurchase, since, limit] : [req.userId, afterPurchase, limit],
   });
-  const purchaseStates = 'after_purchase_state' in req.query ? (await db.execute({
+  const purchaseStates = incrementalStates ? statePages.purchase.rows : 'after_purchase_state' in req.query ? (await db.execute({
     sql: `SELECT id, cash_close_id, CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
           FROM currency_purchases WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
     args: [req.userId, afterPurchaseState, limit],
@@ -96,7 +105,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
           ORDER BY id ASC LIMIT ?`,
     args: since ? [req.userId, afterWithdrawal, since, limit] : [req.userId, afterWithdrawal, limit],
   });
-  const withdrawalStates = 'after_withdrawal_state' in req.query ? (await db.execute({
+  const withdrawalStates = incrementalStates ? statePages.withdrawal.rows : 'after_withdrawal_state' in req.query ? (await db.execute({
     sql: `SELECT id, cash_close_id, voided_at,
                  CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed,
                  CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided
@@ -194,6 +203,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
   const last = (rows, cursor) => rows.length ? Number(rows[rows.length - 1].id) : cursor;
 
   const payload = {
+    ...(incrementalStates ? { state_changes_version: STATE_SYNC_VERSION } : {}),
     sales: saleRows,
     sale_states: saleStates,
     cash_closes: closeRows,
@@ -208,11 +218,11 @@ router.get('/delta', asyncHandler(async (req, res) => {
       correction: last(corrections, afterCorrection),
       close_correction: last(closeCorrections, afterCloseCorrection),
       purchase: last(purchases.rows, afterPurchase),
-      purchase_state: last(purchaseStates, afterPurchaseState),
+      purchase_state: stateCursor(purchaseStates, afterPurchaseState, statePages.purchase),
       withdrawal: last(withdrawals.rows, afterWithdrawal),
-      withdrawal_state: last(withdrawalStates, afterWithdrawalState),
+      withdrawal_state: stateCursor(withdrawalStates, afterWithdrawalState, statePages.withdrawal),
       sale: last(sales.rows, afterSale),
-      sale_state: last(saleStates, afterSaleState),
+      sale_state: stateCursor(saleStates, afterSaleState, statePages.sale),
       close: last(closes.rows, afterClose),
       count: last(counts.rows, afterCount),
     },
@@ -239,7 +249,7 @@ router.get('/delta', asyncHandler(async (req, res) => {
     ['currency_purchases', 'purchase', afterPurchase], ['purchase_states', 'purchase_state', afterPurchaseState],
     ['withdrawal_states', 'withdrawal_state', afterWithdrawalState],
     ['sale_corrections', 'correction', afterCorrection], ['cash_close_corrections', 'close_correction', afterCloseCorrection],
-  ]) if (wasTrimmed.has(key)) payload.cursors[cursor] = cursorFor(payload[key], after);
+  ]) if (wasTrimmed.has(key)) payload.cursors[cursor] = key.endsWith('_states') ? stateCursor(payload[key], after) : cursorFor(payload[key], after);
   if (wasTrimmed.has('cash_withdrawals')) {
     const includedNew = payload.cash_withdrawals.filter((row) => Number(row.id) > afterWithdrawal);
     payload.cursors.withdrawal = cursorFor(includedNew, afterWithdrawal);

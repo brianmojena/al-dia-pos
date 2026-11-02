@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
-const { operationTime } = require('../lib/operationTime');
+const { operationTime, operationTimeFailure } = require('../lib/operationTime');
 const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
@@ -48,7 +48,7 @@ router.get('/', requireOwner, asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   let operationDate;
   try { operationDate = operationTime(req.body.sold_at); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
+  catch (error) { return operationTimeFailure(res, error); }
   let fields;
   try { fields = purchaseFields(req.body); }
   catch (error) { return res.status(400).json({ error: error.message }); }

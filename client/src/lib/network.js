@@ -1,5 +1,6 @@
 import { sharedContextForToken, blockSharedDevice, disableSharedCashier, isSharedLocked, lockSharedDevice } from './sharedDevice.js'
 import { accountKeyFromToken } from './queueOwnership.js'
+import { observeServerTime } from './operationClock.js'
 
 const TOKEN_KEY = 'mypimes_token'
 export const getToken = () => localStorage.getItem(TOKEN_KEY)
@@ -19,6 +20,11 @@ export async function networkFetch(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), 12_000)
   try {
     const res = await fetch(path, { ...request, headers, signal: request.signal || controller.signal })
+    observeServerTime(res.headers.get('Date'))
+    if (res.status === 503) {
+      const error = await res.clone().json().catch(() => ({}))
+      if (error.code === 'CLOCK_AHEAD') observeServerTime(error.server_time)
+    }
     const shared = sharedContextForToken(token)
     if (shared && res.status === 403) {
       const error = await res.clone().json().catch(() => ({}))

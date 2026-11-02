@@ -4,6 +4,7 @@ import { getToken, isElectron, networkFetch } from './network.js'
 import { getCachedUser, getCachedProducts } from './offlineCache.js'
 import { accountKeyFromToken, splitByAccount } from './queueOwnership.js'
 import { newId } from './newId.js'
+import { operationNow } from './operationClock.js'
 import { requestPersistentStorage } from './storagePersistence.js'
 import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, applyChanges, applyHistory, businessDate, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
 import { getSharedDevice, getSharedContext, getSharedCredential, getLastSharedAccount, isSharedLocked, isSharedExpired } from './sharedDevice.js'
@@ -100,7 +101,7 @@ export async function offlineRequest(path, options = {}) {
         // anterior, pero no debe tocar la base: el outbox las proyecta después.
         data = { ...data, products: (data.products || []).map((p) => ({ ...p })), local_entries: structuredClone(data.local_entries || {}) }
       }
-      const ctx = { account, user, newId, localId: () => current.nextId-- }
+      const ctx = { account, user, newId, now: operationNow(), localId: () => current.nextId-- }
       if (route === '/api/products/import') {
         if (user.role === 'cajero') throw new Error('Solo el dueño puede importar')
         if (!Array.isArray(body.items) || !body.items.length || body.items.length > 2000) throw new Error('La importación debe contener entre 1 y 2000 productos')
@@ -161,8 +162,8 @@ const CURSOR_PARAMS = {
 }
 const emptyCursors = () => Object.fromEntries(Object.keys(CURSOR_PARAMS).map((key) => [key, 0]))
 const INITIAL_SYNC_DAYS = 7
-const changesPath = (cursors, since = null) => {
-  const params = new URLSearchParams({ limit: '200', max_bytes: String(512 * 1024) })
+const changesPath = (cursors, since = null, includeDailyStock = true, stateVersion = 0) => {
+  const params = new URLSearchParams({ limit: '200', max_bytes: String(512 * 1024), state_changes: '1', state_cursor_version: String(stateVersion), include_daily_stock: includeDailyStock ? '1' : '0' })
   for (const [key, param] of Object.entries(CURSOR_PARAMS)) params.set(param, String(cursors[key] ?? 0))
   if (since) params.set('since', since)
   return `/api/sync/snapshot?${params}`
@@ -390,11 +391,13 @@ export async function syncOffline() {
       // todo el historial.
       const saved = await readState(account, storageKey)
       let cursors = { ...emptyCursors(), ...(saved.cursors || {}) }
+      let stateVersion = saved.stateChangesVersion === 1 ? 1 : 0
       const since = saved.syncSince || (!saved.initialized && !saved.cursors
         ? new Date(Date.now() - INITIAL_SYNC_DAYS * 86_400_000).toISOString()
         : null)
+      let firstPage = true
       for (;;) {
-        const res = await request(changesPath(cursors, since), shared ? { token: getSharedCredential(accountNow())?.token || token } : {})
+        const res = await request(changesPath(cursors, since, firstPage, stateVersion), shared ? { token: getSharedCredential(accountNow())?.token || token } : {})
         if (!res.ok) throw new Error(res.status === 401 ? 'Renueva tu sesión para sincronizar. Los datos locales siguen disponibles.' : 'No se pudieron descargar los datos de la tienda')
         const page = await res.json()
         if (!stillCurrent()) return
@@ -403,7 +406,7 @@ export async function syncOffline() {
           // completa y cursores derivados de lo recibido.
           await updateAccount(storageKey, (s = initialState(account, shared)) => ({
             ...s, base: { ...emptyData(), ...page }, cursors: cursorsFromSnapshot(page),
-            initialized: true, lastSynced: Date.now(), syncError: '', syncSince: null,
+            initialized: true, lastSynced: Date.now(), syncError: '', syncSince: null, stateChangesVersion: 0,
           }))
           break
         }
@@ -412,7 +415,8 @@ export async function syncOffline() {
         }
         await updateAccount(storageKey, (s = initialState(account, shared)) => {
           s.base = applyChanges(s.base, page)
-          s.cursors = { ...page.cursors, ...(page.has_more ? {} : { sale_state: 0, purchase_state: 0, withdrawal_state: 0 }) }
+          s.cursors = { ...page.cursors, ...(page.has_more || page.state_changes_version === 1 ? {} : { sale_state: 0, purchase_state: 0, withdrawal_state: 0 }) }
+          s.stateChangesVersion = page.state_changes_version === 1 ? 1 : 0
           s.initialized = true
           s.lastSynced = Date.now()
           s.syncError = ''
@@ -422,13 +426,17 @@ export async function syncOffline() {
         broadcast()
         if (!page.has_more) break
         cursors = page.cursors
+        stateVersion = page.state_changes_version === 1 ? 1 : 0
+        firstPage = false
       }
       try { await dropMissingCashCloses(account, storageKey, request, stillCurrent, shared) } catch { /* la próxima sincronización lo reintenta */ }
       if (!stillCurrent()) return
       requestPersistentStorage()
+      return true
     } catch (error) {
       try { await updateAccount(storageKey, (s = initialState(account, shared)) => ({ ...s, syncError: error.message || 'Sin conexión con el servidor' })) } catch {}
       broadcast()
+      return false
     }
   }
   syncing = (navigator.locks ? navigator.locks.request('mypimes-sync', run) : run()).finally(() => { syncing = null })
@@ -549,10 +557,33 @@ export async function resolveProductConflict(choice) {
   else { if (syncing) await syncing; await resolve() }
   return syncOffline()
 }
+let stopOfflineSync = null
 export function startOfflineSync() {
   if (isElectron()) return
-  window.addEventListener('online', syncOffline)
-  window.addEventListener('focus', syncOffline)
-  setInterval(syncOffline, 20_000)
-  void syncOffline()
+  if (stopOfflineSync) return stopOfflineSync
+  let stopped = false, running = false, timer, delay = 20_000
+  const tick = async () => {
+    if (stopped || running) return
+    running = true
+    const result = await syncOffline().catch(() => false)
+    running = false
+    delay = result === false ? Math.min(delay * 2, 300_000) : 20_000
+    if (!stopped) timer = setTimeout(tick, delay)
+  }
+  const resume = () => {
+    clearTimeout(timer)
+    delay = 20_000
+    void tick()
+  }
+  window.addEventListener('online', resume)
+  window.addEventListener('focus', resume)
+  stopOfflineSync = () => {
+    stopped = true
+    clearTimeout(timer)
+    window.removeEventListener('online', resume)
+    window.removeEventListener('focus', resume)
+    stopOfflineSync = null
+  }
+  void tick()
+  return stopOfflineSync
 }

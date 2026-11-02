@@ -27,10 +27,45 @@ router.get('/', asyncHandler(async (req, res) => {
 // revisa que nadie infle el inventario.
 router.get('/stock-entries', requireOwner, asyncHandler(async (req, res) => {
   const result = await getDb().execute({
-    sql: 'SELECT * FROM stock_entries WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 200',
+    sql: "SELECT * FROM stock_entries WHERE user_id = ? AND kind != 'entrada_anulada' ORDER BY created_at DESC, id DESC LIMIT 200",
     args: [req.userId],
   });
   res.json(result.rows);
+}));
+
+router.delete('/stock-entries/:id', requireOwner, asyncHandler(async (req, res) => {
+  const db = getDb();
+  const account = await describeAccount(db, req);
+  const tx = await db.transaction('write');
+  try {
+    const entry = (await tx.execute({
+      sql: 'SELECT * FROM stock_entries WHERE id = ? AND user_id = ?',
+      args: [req.params.id, req.userId],
+    })).rows[0];
+    if (!entry || entry.kind === 'entrada_anulada') {
+      await tx.rollback();
+      return res.status(404).json({ error: 'Entrada no encontrada' });
+    }
+    const quantity = Number(entry.quantity);
+    if (!['entrada', 'nuevo', 'importacion'].includes(entry.kind) || quantity <= 0 || roundQty(Number(entry.stock_after) - Number(entry.stock_before)) !== roundQty(quantity)) {
+      await tx.rollback();
+      return res.status(400).json({ error: 'Solo se pueden borrar entradas de mercancía' });
+    }
+    const product = (await tx.execute({
+      sql: 'SELECT * FROM products WHERE id = ? AND user_id = ?',
+      args: [entry.product_id, req.userId],
+    })).rows[0];
+    if (!product || Number(product.track_stock) !== 1 || roundQty(Number(product.stock) - quantity) < 0) {
+      await tx.rollback();
+      return res.status(409).json({ error: 'El producto no tiene stock suficiente para descontar esta entrada' });
+    }
+    const after = roundQty(Number(product.stock) - quantity);
+    await tx.execute({ sql: 'UPDATE products SET stock = ? WHERE id = ? AND user_id = ?', args: [after, product.id, req.userId] });
+    await tx.execute({ sql: "UPDATE stock_entries SET kind = 'entrada_anulada' WHERE id = ? AND user_id = ?", args: [entry.id, req.userId] });
+    await tx.execute(stockChangeStatement({ userId: req.userId, product, before: product.stock, after, account, kind: 'correccion', reason: `Entrada #${entry.id} anulada` }));
+    await tx.commit();
+    res.json({ ok: true });
+  } catch (error) { await tx.rollback().catch(() => {}); throw error; }
 }));
 
 router.get('/day-stock', requireOwner, asyncHandler(async (req, res) => {

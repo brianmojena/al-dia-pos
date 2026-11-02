@@ -15,7 +15,7 @@ Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, confi
 globalThis.BroadcastChannel = undefined
 const { apiFetch, setToken } = await import('./api.js')
 const { cacheUser } = await import('./offlineCache.js')
-const { syncOffline, localSyncStatus, retrySync, resolveProductConflict, handlesOffline, cacheCashCloseCorrection, refreshOfflineSnapshot } = await import('./offlineClient.js')
+const { syncOffline, startOfflineSync, localSyncStatus, retrySync, resolveProductConflict, handlesOffline, cacheCashCloseCorrection, refreshOfflineSnapshot } = await import('./offlineClient.js')
 const tokenFor = (shop, account = shop) => `x.${Buffer.from(JSON.stringify({ userId: shop, accountId: account })).toString('base64url')}.x`
 const login = (shop) => { setToken(tokenFor(shop)); cacheUser({ id: shop, email: `${shop}@test.local`, role: 'dueño', transfer_limit: null }) }
 const stateKey = (shop) => `mypimes_local_v1:${shop}:${shop}`
@@ -23,6 +23,82 @@ const seed = (shop = 1) => seedState(stateKey(shop), { base: { ...emptyData(), p
 const write = (path, body, method = 'POST') => apiFetch(path, { method, body: JSON.stringify(body) })
 const saleBody = (id = 'sale-1') => ({ client_sale_id: id, payment_method: 'efectivo', items: [{ product_id: 10, quantity: 2, unit_price: 10 }] })
 const jsonResponse = (data, status = 200) => new Response(JSON.stringify(data), { status })
+
+test('el protocolo nuevo conserva estados al completar y al reanudar páginas interrumpidas', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = true
+  const key = stateKey(1), urls = []
+  const cursors = { sale: 700, sale_state: 900, purchase: 0, purchase_state: 800, withdrawal: 0, withdrawal_state: 600,
+    close: 0, count: 0, correction: 0, close_correction: 0 }
+  const state = stateAt(key)
+  state.base.sales = [{ id: 700, total: 10, items: [], cash_close_id: null }]
+  state.cursors = { ...cursors, sale_state: 999999 }
+  seedState(key, state)
+  let calls = 0
+  globalThis.fetch = async (path) => {
+    const params = new URL(path, 'http://local').searchParams
+    urls.push(params)
+    calls++
+    if (calls === 2) return jsonResponse({}, 503)
+    return jsonResponse({ products: state.base.products, state_changes_version: 1,
+      sale_states: [{ id: 700, change_id: calls === 1 ? 900 : 901, cash_close_id: calls === 1 ? 77 : null }],
+      ...(calls === 1 ? { daily_stock: { marker: 'first-page' } } : {}),
+      cursors: { ...cursors, sale_state: calls === 1 ? 900 : 901 }, has_more: calls === 1 })
+  }
+  await syncOffline()
+  assert.equal(urls[0].get('state_cursor_version'), '0')
+  assert.equal(urls[0].get('state_changes'), '1')
+  assert.equal(urls[0].get('include_daily_stock'), '1')
+  assert.equal(urls[1].get('include_daily_stock'), '0')
+  assert.equal(urls[1].get('state_cursor_version'), '1')
+  assert.equal(stateAt(key).cursors.sale_state, 900)
+  assert.equal(stateAt(key).stateChangesVersion, 1)
+  assert.equal(stateAt(key).base.sales[0].cash_close_id, 77)
+  await syncOffline()
+  assert.equal(urls[2].get('after_sale_state'), '900', 'retoma el cursor guardado antes del corte')
+  assert.equal(urls[2].get('include_daily_stock'), '1', 'la nueva pasada refresca el stock una vez')
+  assert.equal(stateAt(key).cursors.sale_state, 901, 'el cursor incremental no se reinicia al terminar')
+  assert.equal(stateAt(key).cursors.purchase_state, 800)
+  assert.equal(stateAt(key).base.sales[0].cash_close_id, null, 'la reapertura sustituye el estado anterior')
+  assert.deepEqual(stateAt(key).base.daily_stock, { marker: 'first-page' })
+  await syncOffline()
+  assert.equal(urls[3].get('after_sale_state'), '901')
+  assert.equal(urls[3].get('state_cursor_version'), '1')
+  assert.equal(stateAt(key).outbox.length, 0)
+})
+
+test('los fallos espacian los reintentos hasta cinco minutos y recuperar el foco reanuda inmediatamente', async (t) => {
+  resetStore(); login(1); seed(); navigator.onLine = true
+  const originalSet = globalThis.setTimeout, originalClear = globalThis.clearTimeout
+  const timers = new Map(); let id = 0
+  globalThis.setTimeout = (fn, ms) => { timers.set(++id, { fn, ms }); return id }
+  globalThis.clearTimeout = (key) => timers.delete(key)
+  let stop
+  t.after(() => { stop?.(); globalThis.setTimeout = originalSet; globalThis.clearTimeout = originalClear })
+  globalThis.fetch = async () => jsonResponse({}, 503)
+  stop = startOfflineSync()
+  assert.equal(startOfflineSync(), stop, 'iniciar dos veces no crea dos bucles')
+  await new Promise(setImmediate)
+  for (const delay of [40_000, 80_000, 160_000, 300_000, 300_000]) {
+    assert.equal(timers.size, 1)
+    const [key, timer] = [...timers][0]
+    assert.equal(timer.ms, delay)
+    timers.delete(key)
+    await timer.fn()
+  }
+  let release, calls = 0
+  globalThis.fetch = async () => { calls++; return new Promise((resolve) => { release = resolve }) }
+  window.dispatchEvent(new Event('focus'))
+  await new Promise(setImmediate)
+  window.dispatchEvent(new Event('online'))
+  await new Promise(setImmediate)
+  assert.equal(calls, 1, 'eventos simultáneos comparten la sincronización en curso')
+  release(jsonResponse({ ...emptyData(), cursors: { sale: 0 }, state_changes_version: 1, has_more: false }))
+  await new Promise(setImmediate)
+  assert.equal(timers.size, 1)
+  assert.equal([...timers.values()][0].ms, 20_000)
+  stop()
+  assert.equal(timers.size, 0)
+})
 
 test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fallos', async (t) => {
   await t.test('sin red todas las lecturas y ventas usan solo almacenamiento local', async () => {
@@ -681,4 +757,21 @@ test('la sincronización retira cierres borrados en la nube y conserva pendiente
   }
   await syncOffline()
   assert.ok(stateAt(key).base.cash_closes.some((close) => close.id === 23), 'una lista incompleta no borra nada')
+})
+
+test('el reloj adelantado conserva el cobro en el outbox y la hora del servidor corrige ventas nuevas', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  await write('/api/sales', saleBody('clock-pending'))
+  const original = structuredClone(stateAt(stateKey(1)).outbox[0])
+  const server = new Date(Date.now() - 3600000).toISOString()
+  navigator.onLine = true
+  globalThis.fetch = async () => jsonResponse({ code: 'CLOCK_AHEAD', server_time: server, error: 'Reloj adelantado: venta pendiente' }, 503)
+  await syncOffline()
+  assert.equal(stateAt(stateKey(1)).outbox.length, 1)
+  assert.deepEqual(stateAt(stateKey(1)).outbox[0], original)
+  assert.deepEqual(records.get('mypimes_rejected_sales') || [], [])
+  navigator.onLine = false
+  await write('/api/sales', saleBody('clock-corrected'))
+  const corrected = stateAt(stateKey(1)).outbox[1]
+  assert.ok(Math.abs(Date.parse(corrected.body.sold_at) - Date.parse(server)) < 2000)
 })

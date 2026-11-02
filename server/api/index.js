@@ -14,7 +14,11 @@ assertConfig();
 let dbReady;
 
 module.exports = async (req, res) => {
-  if (!dbReady) dbReady = initDb();
+  // Un fallo temporal no debe bloquear todas las invocaciones warm posteriores.
+  if (!dbReady) dbReady = initDb().catch((error) => {
+    dbReady = null;
+    throw error;
+  });
   await dbReady;
   return app(req, res);
 };

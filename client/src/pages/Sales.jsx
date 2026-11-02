@@ -662,6 +662,7 @@ function StockMovements({ date, refreshKey }) {
                 {
                   {
                     'entrada': 'Entró a la tienda',
+                    'entrada_anulada': 'Entrada anulada',
                     'nuevo': 'Producto nuevo con stock',
                     'importacion': 'Importado desde Excel',
                     'correccion': 'Corrección de stock',
