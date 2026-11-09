@@ -10,8 +10,8 @@ import ShopRatesCard from '../components/ShopRatesCard'
 import { formatTime, formatDateTime } from '../lib/dates'
 import { newId } from '../lib/newId'
 import { WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS } from '../lib/payment.js'
-
-const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+import { fmtMoney as fmt } from '../lib/fmt.js'
+import { planOf } from '../lib/plans'
 
 const fmtMoney = (n) => new Intl.NumberFormat('es-ES', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n || 0)
 
@@ -101,6 +101,9 @@ export default function Dashboard() {
   const dateLabel = today.toLocaleDateString('es-ES', {
     weekday: 'long', day: 'numeric', month: 'long',
   })
+  // Las abiertas y sin tipo son las que el dueño todavía puede clasificar:
+  // el aviso manda a Contabilidad, donde vive la clasificación.
+  const unclassifiedWithdrawals = (data?.open_withdrawals || []).filter((w) => w.kind == null).length
 
   return (
     <div className="p-5 md:p-8 max-w-3xl mx-auto">
@@ -155,6 +158,27 @@ export default function Dashboard() {
             </p>
           </div>
           <ChevronRight size={18} className="text-orange-300 flex-shrink-0" />
+        </Link>
+      )}
+
+      {/* Extracciones sin clasificar: el resultado no cuadra hasta clasificarlas en Contabilidad */}
+      {planOf(user?.plan) === 'enterprise' && unclassifiedWithdrawals > 0 && (
+        <Link
+          to="/contabilidad"
+          className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4 mb-5 hover:bg-amber-100/60 transition-colors"
+        >
+          <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-amber-800 text-sm">
+              {unclassifiedWithdrawals === 1
+                ? '1 extracción de caja sin clasificar'
+                : `${unclassifiedWithdrawals} extracciones de caja sin clasificar`}
+            </p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              Clasifícalas en Contabilidad para que el resultado cuadre.
+            </p>
+          </div>
+          <ChevronRight size={18} className="text-amber-400 flex-shrink-0" />
         </Link>
       )}
 

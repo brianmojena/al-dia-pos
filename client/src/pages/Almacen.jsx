@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Upload, Plus, Pencil, Trash2, X, Warehouse, ArrowRightLeft, History, AlertTriangle, PackagePlus, Store } from 'lucide-react'
+import { Upload, Plus, Pencil, Trash2, Warehouse, ArrowRightLeft, History, AlertTriangle, PackagePlus, Store } from 'lucide-react'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { accountLabel } from '../lib/accountLabel'
 import { UNITS, formatQty, priceSuffix, roundMoney } from '../lib/units'
+import Modal from '../components/Modal'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(roundMoney(n))
 const norm = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
@@ -20,17 +21,6 @@ const inputCls = 'w-full border border-gray-200 rounded-xl px-4 py-3 text-base f
 const ErrorBox = ({ message }) => message ? (
   <div className="flex items-start gap-2 bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm font-medium"><AlertTriangle size={16} className="flex-shrink-0 mt-0.5" /><span>{message}</span></div>
 ) : null
-const Modal = ({ title, onClose, children }) => (
-  <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
-    <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-auto">
-      <div className="flex justify-between items-center px-6 py-5 border-b border-gray-100">
-        <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-        <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-xl"><X size={20} className="text-gray-500" /></button>
-      </div>
-      {children}
-    </div>
-  </div>
-)
 
 // Almacén: mercancía guardada aparte de la tienda. Solo tiene costo y cantidad.
 // Todas las cuentas dan de alta, editan, importan, borran y transfieren; el

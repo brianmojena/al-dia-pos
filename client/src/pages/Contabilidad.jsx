@@ -14,8 +14,23 @@ import { validateExpense } from '../lib/accountingValidation'
 import { WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS } from '../lib/payment.js'
 import { accountingCsv } from '../lib/offlineExport.js'
 import { useLocalRefresh } from '../lib/useLocalRefresh.js'
+import { fmtMoney as fmt } from '../lib/fmt.js'
+import Modal from '../components/Modal'
 
-const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
+// Tarjeta de upsell del plan. Antes estaba copiada dos veces en este archivo.
+export function EnterpriseUpsell() {
+  return (
+    <div className="bg-white rounded-2xl shadow-sm p-8 text-center">
+      <BookOpen size={40} className="mx-auto mb-3 text-gray-300" />
+      <p className="text-base text-gray-700 font-semibold mb-1">
+        La contabilidad es parte del plan Enterprise
+      </p>
+      <p className="text-sm text-gray-500">
+        Actualiza tu plan para acceder a esta herramienta de análisis financiero.
+      </p>
+    </div>
+  )
+}
 
 // Aviso amarillo: las extracciones sin tipo no restan del resultado hasta clasificarlas.
 export function UnclassifiedNotice({ count, cup, onGo }) {
@@ -36,6 +51,8 @@ export function UnclassifiedNotice({ count, cup, onGo }) {
 }
 
 // Compras de mercancía y retiros personales: se muestran, pero no restan del resultado.
+// Aquí vive también la aclaración de que las extracciones "Gasto del negocio"
+// ya se cuentan solas (antes era un banner azul aparte que se apilaba encima).
 export function WithdrawalTotals({ totals }) {
   return (
     <div className="bg-white rounded-2xl shadow-sm p-5 mb-6">
@@ -48,7 +65,7 @@ export function WithdrawalTotals({ totals }) {
         <span className="font-semibold text-gray-900">{fmt(totals.personal_cup ?? 0)}</span>
       </div>
       <p className="text-[11px] text-gray-500 mt-3">
-        No se descuentan del resultado. La mercancía ya está en el costo de lo vendido, y los retiros personales son dinero tuyo.
+        No se descuentan del resultado. La mercancía ya está en el costo de lo vendido, y los retiros personales son dinero tuyo. Las clasificadas como Gasto del negocio ya se cuentan solas: no las anotes de nuevo.
       </p>
     </div>
   )
@@ -211,7 +228,7 @@ export function ExpenseRows({ rows, filter, savingId, onCategoryChange, onVoid }
               </select>
               {!expense.voided_at && (
                 <button
-                  onClick={() => onVoid(expense.client_expense_id)}
+                  onClick={() => onVoid(expense)}
                   className="p-2 hover:bg-red-50 rounded-lg text-gray-400 hover:text-red-600 transition-colors"
                   title="Anular"
                 >
@@ -298,15 +315,7 @@ export default function Contabilidad() {
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-2xl font-bold text-gray-900">Contabilidad</h2>
         </div>
-        <div className="bg-white rounded-2xl shadow-sm p-8 text-center">
-          <BookOpen size={40} className="mx-auto mb-3 text-gray-300" />
-          <p className="text-base text-gray-700 font-semibold mb-1">
-            La contabilidad es parte del plan Enterprise
-          </p>
-          <p className="text-sm text-gray-500">
-            Actualiza tu plan para acceder a esta herramienta de análisis financiero.
-          </p>
-        </div>
+        <EnterpriseUpsell />
       </div>
     )
   }
@@ -545,17 +554,30 @@ function ContabilidadContent() {
     }
   }
 
-  const handleVoidExpense = async (clientExpenseId) => {
-    if (!window.confirm('¿Anular este gasto?')) return
+  // Anular con confirmación a medida (el window.confirm nativo se sentía ajeno
+  // al resto de la app). El gasto a anular se guarda completo para mostrar
+  // concepto y monto en el diálogo.
+  const [voidTarget, setVoidTarget] = useState(null)
+  const [voiding, setVoiding] = useState(false)
 
+  const confirmVoidExpense = async () => {
+    if (!voidTarget) return
+    setVoiding(true)
     try {
-      const res = await apiFetch(`/api/accounting/expenses/${clientExpenseId}/void`, {
+      const res = await apiFetch(`/api/accounting/expenses/${voidTarget.client_expense_id}/void`, {
         method: 'POST',
       })
-      if (!res.ok) throw new Error('No se pudo anular el gasto.')
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'No se pudo anular el gasto.')
+      }
+      setVoidTarget(null)
       await loadMonth(viewMonth)
     } catch (err) {
       setError(err.message)
+      setVoidTarget(null)
+    } finally {
+      setVoiding(false)
     }
   }
 
@@ -604,15 +626,7 @@ function ContabilidadContent() {
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-2xl font-bold text-gray-900">Contabilidad</h2>
         </div>
-        <div className="bg-white rounded-2xl shadow-sm p-8 text-center">
-          <BookOpen size={40} className="mx-auto mb-3 text-gray-300" />
-          <p className="text-base text-gray-700 font-semibold mb-1">
-            La contabilidad es parte del plan Enterprise
-          </p>
-          <p className="text-sm text-gray-500">
-            Actualiza tu plan para acceder a esta herramienta de análisis financiero.
-          </p>
-        </div>
+        <EnterpriseUpsell />
       </div>
     )
   }
@@ -924,12 +938,6 @@ function ContabilidadContent() {
             </form>
           )}
 
-          {/* Aclaración sobre extracciones de caja */}
-          <div className="flex items-start gap-2 bg-blue-50 text-blue-800 rounded-xl px-4 py-3 mb-6 text-sm">
-            <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
-            <p>Las extracciones de caja clasificadas como Gasto del negocio ya se cuentan como gasto automáticamente. No es necesario anotarlas de nuevo.</p>
-          </div>
-
           {/* Lista de gastos del mes: con filtro por categoría y recategorizar en línea */}
           {expenses.length > 0 && (
             <div className="mb-6">
@@ -950,7 +958,7 @@ function ContabilidadContent() {
                 filter={categoryFilter}
                 savingId={categorySavingId}
                 onCategoryChange={handleCategoryChange}
-                onVoid={handleVoidExpense}
+                onVoid={setVoidTarget}
               />
               {categoryError && <p role="alert" className="text-sm text-red-600 mt-2">{categoryError}</p>}
             </div>
@@ -1000,6 +1008,37 @@ function ContabilidadContent() {
             </div>
           )}
         </>
+      )}
+
+      {/* Confirmación de anulación de gasto */}
+      {voidTarget && (
+        <Modal title="Anular gasto" onClose={() => setVoidTarget(null)}>
+          <div className="px-6 py-5">
+            <p className="text-sm text-gray-700">
+              ¿Anular <span className="font-semibold">«{voidTarget.concept}»</span> por {fmt(voidTarget.amount)} {voidTarget.method}?
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              Deja de contar del resultado. Esta acción no se puede deshacer.
+            </p>
+            <div className="flex gap-2 mt-5">
+              <button
+                type="button"
+                onClick={confirmVoidExpense}
+                disabled={voiding}
+                className="flex-1 bg-red-500 text-white font-semibold py-3 rounded-2xl hover:bg-red-600 active:scale-[0.99] transition-all disabled:opacity-50"
+              >
+                {voiding ? 'Anulando...' : 'Anular gasto'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setVoidTarget(null)}
+                className="flex-1 bg-gray-100 text-gray-700 font-semibold py-3 rounded-2xl hover:bg-gray-200 active:scale-[0.99] transition-all"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   )

@@ -4,8 +4,8 @@ import {
 } from 'lucide-react'
 import { formatDateTime } from '../lib/dates'
 import { accountLabel } from '../lib/accountLabel'
+import { fmtMoney as fmt } from '../lib/fmt.js'
 
-const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(Number(n) || 0))
 const fmtAmount = (n, currency = 'CUP') => {
   const value = Number(n) || 0
   if (!currency || currency === 'CUP') return fmt(value)
