@@ -171,8 +171,51 @@ function withdrawalFields(body) {
   return { method: body.method, amount: round2(amount), note, kind };
 }
 
+/**
+ * Gastos del dueño (contabilidad). Mismo método de apartado que las
+ * extracciones; la categoría es un enum cerrado para que el desglose de
+ * "¿a qué se va el dinero?" agrupe limpio. NULL = sin categoría
+ * (gastos viejos o clientes que aún no la mandan).
+ */
+const EXPENSE_CATEGORIES = ['salarios', 'servicios', 'transporte', 'insumos', 'renta', 'impuestos', 'otros'];
+
+const EXPENSE_CATEGORY_LABELS = {
+  salarios: 'Salarios',
+  servicios: 'Servicios',
+  transporte: 'Transporte',
+  insumos: 'Insumos',
+  renta: 'Renta',
+  impuestos: 'Impuestos',
+  otros: 'Otros',
+};
+
+// Valida y normaliza el cuerpo de un gasto, o lanza con un mensaje para el dueño.
+function expenseFields(body) {
+  if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido');
+  const amount = Number(body.amount);
+  if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta el monto del gasto');
+  const concept = body.concept == null ? '' : String(body.concept).trim();
+  if (concept.length < 3 || concept.length > 200) throw new Error('Escribe en qué se gastó (entre 3 y 200 caracteres)');
+  const category = body.category == null || body.category === '' ? null : body.category;
+  if (category !== null && !EXPENSE_CATEGORIES.includes(category)) throw new Error('Categoría inválida');
+  return { method: body.method, amount: round2(amount), concept, category };
+}
+
+/**
+ * Congela la tasa con la que se convierte un gasto en divisa a pesos (mismo
+ * criterio que `purchaseFields`: el dueño tiene que poder ver después la tasa
+ * que se usó ese día). Sin tasa de tienda definida no hay conversión y el
+ * gasto no resta del resultado, como las extracciones en divisa sin clasificar.
+ */
+function expenseCup(amount, rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n) || n <= 0) return { exchange_rate: null, cup_amount: null };
+  return { exchange_rate: n, cup_amount: round2(round2(amount) * n) };
+}
+
 module.exports = {
   PAYMENT_METHODS, CURRENCIES, paymentSplit, paymentLabel, offShopRate, foreignFields, round2,
   purchaseSplit, purchaseFields,
   WITHDRAWAL_METHODS, WITHDRAWAL_KINDS, withdrawalSplit, withdrawalFields,
+  EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS, expenseFields, expenseCup,
 };

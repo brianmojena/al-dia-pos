@@ -538,6 +538,21 @@ async function initDb() {
     // paso sugerido. Son parte de la redacción (IA o respaldo), no del cálculo.
     "ALTER TABLE audit_reports ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'",
     'ALTER TABLE audit_reports ADD COLUMN next_step TEXT',
+    // Categoría de gasto (ver EXPENSE_CATEGORIES en lib/payment.js). NULL = sin
+    // categoría: los gastos viejos y los clientes que aún no la mandan.
+    'ALTER TABLE expenses ADD COLUMN category TEXT',
+    // Gasto en divisa con la tasa congelada (ver expenseCup en lib/payment.js):
+    // el resultado resta `cup_amount` y queda el recuerdo de la tasa del día.
+    // NULL = sin tasa definida en la tienda, no hay conversión y no resta.
+    'ALTER TABLE expenses ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE expenses ADD COLUMN cup_amount REAL',
+    // Quién anuló, con el mismo criterio de atribución del resto: email
+    // congelado y sin clave foránea.
+    'ALTER TABLE expenses ADD COLUMN voided_by_email TEXT',
+    // Extracción clasificada como gasto del negocio en divisa: misma congelada
+    // de tasa que los gastos, para que el resultado la descuenta igual.
+    'ALTER TABLE cash_withdrawals ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE cash_withdrawals ADD COLUMN cup_amount REAL',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -643,9 +658,13 @@ async function initDb() {
       method TEXT NOT NULL,
       amount REAL NOT NULL,
       concept TEXT NOT NULL,
+      category TEXT,
+      exchange_rate REAL,
+      cup_amount REAL,
       account_id INTEGER,
       account_email TEXT,
       voided_at TEXT,
+      voided_by_email TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );

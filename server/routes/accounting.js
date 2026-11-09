@@ -4,10 +4,12 @@ const ExcelJS = require('exceljs');
 const { getDb } = require('../db/database');
 const { asyncHandler } = require('../lib/asyncHandler');
 const { operationTime, operationTimeFailure } = require('../lib/operationTime');
-const { shopLocalDate, shopLocalTime } = require('../lib/businessDay');
+const { shopLocalDate, shopLocalTime, monthBounds } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner } = require('../middleware/auth');
-const { WITHDRAWAL_METHODS, WITHDRAWAL_KINDS, round2 } = require('../lib/payment');
+const {
+  WITHDRAWAL_KINDS, round2, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_LABELS, expenseFields, expenseCup,
+} = require('../lib/payment');
 const {
   daySummaries, sumTotals, resolveMonth, buildExtraccionesSheet, styleHeaderRow,
 } = require('./reports');
@@ -52,12 +54,16 @@ const classifyByMethod = (method, amount) => {
  *
  * totals: { income, income_cash, income_transfer, income_foreign_cup, profit,
  *           expenses_cup, expenses_usd, expenses_eur, merchandise_cup, personal_cup,
- *           unclassified_cup, unclassified_count, result_cup }
+ *           unclassified_cup, unclassified_count, result_cup,
+ *           category_totals: { [categoria]: { cup, usd, eur } }, missing_rate_count }
  * days: [{ date, income, profit, expenses_cup, expenses_usd, expenses_eur,
  *          merchandise_cup, personal_cup, unclassified_cup, result_cup }, ...]
  *
  * Solo las extracciones 'negocio' restan del resultado: la compra de mercancía
  * ya está en el costo que la utilidad descuenta, y la personal no es del negocio.
+ * Los gastos en divisa con tasa congelada (cup_amount) restan del resultado por
+ * su equivalente en pesos; sin tasa definida no hay conversión y se avisa
+ * (missing_rate_count) para que el dueño ponga la tasa de la tienda.
  */
 async function monthAccounting(db, userId, bounds) {
   // Ingresos desde daySummaries
@@ -66,7 +72,7 @@ async function monthAccounting(db, userId, bounds) {
 
   // Gastos no anulados
   const expensesResult = await db.execute({
-    sql: `SELECT created_at, method, amount FROM expenses
+    sql: `SELECT created_at, method, amount, category, cup_amount FROM expenses
           WHERE user_id = ? AND created_at >= ? AND created_at < ? AND voided_at IS NULL
           ORDER BY created_at ASC`,
     args: [userId, bounds.start, bounds.end],
@@ -74,7 +80,7 @@ async function monthAccounting(db, userId, bounds) {
 
   // Extracciones no anuladas
   const withdrawalsResult = await db.execute({
-    sql: `SELECT created_at, method, amount, kind FROM cash_withdrawals
+    sql: `SELECT created_at, method, amount, kind, cup_amount FROM cash_withdrawals
           WHERE user_id = ? AND created_at >= ? AND created_at < ? AND voided_at IS NULL
           ORDER BY created_at ASC`,
     args: [userId, bounds.start, bounds.end],
@@ -92,14 +98,28 @@ async function monthAccounting(db, userId, bounds) {
     return expensesByDay.get(date);
   };
 
+  // Desglose "¿a qué se va el dinero?" por categoría de gasto. Las categorías
+  // son solo de la tabla expenses; las extracciones clasificadas como gasto del
+  // negocio no tienen categoría propia (son de caja) y quedan fuera del desglose.
+  const categoryTotals = new Map();
+  let missingRateCount = 0;
+
   for (const row of expensesResult.rows) {
     const date = shopLocalDate(row.created_at);
     if (!date) continue;
     const d = dayExpense(date);
     const classified = classifyByMethod(row.method, row.amount);
-    d.expenses_cup += classified.cup;
+    const converted = round2(row.cup_amount || 0);
+    d.expenses_cup += classified.cup + converted;
     d.expenses_usd += classified.usd;
     d.expenses_eur += classified.eur;
+    if (classified.usd + classified.eur > 0 && !converted) missingRateCount += 1;
+    const category = EXPENSE_CATEGORIES.includes(row.category) ? row.category : 'sin_categoria';
+    const byCategory = categoryTotals.get(category) || { cup: 0, usd: 0, eur: 0 };
+    byCategory.cup = round2(byCategory.cup + classified.cup + converted);
+    byCategory.usd = round2(byCategory.usd + classified.usd);
+    byCategory.eur = round2(byCategory.eur + classified.eur);
+    categoryTotals.set(category, byCategory);
   }
 
   let unclassifiedCount = 0;
@@ -109,9 +129,11 @@ async function monthAccounting(db, userId, bounds) {
     if (!WITHDRAWAL_KINDS.includes(row.kind)) unclassifiedCount += 1;
     const d = dayExpense(date);
     const classified = classifyByMethod(row.method, row.amount);
-    // shortcut: las extracciones en USD/EUR que no son gasto solo suman su parte en CUP (0 si son divisa); desglosarlas en el resumen queda para cuando el dueño lo pida.
+    // Las extracciones en USD/EUR clasificadas como gasto del negocio restan por
+    // su cup_amount congelado al momento de clasificarlas; sin tasa, solo su
+    // parte en CUP (0) y se ven en el desglose de divisas.
     if (row.kind === 'negocio') {
-      d.expenses_cup += classified.cup;
+      d.expenses_cup += classified.cup + round2(row.cup_amount || 0);
       d.expenses_usd += classified.usd;
       d.expenses_eur += classified.eur;
     } else if (row.kind === 'mercancia') {
@@ -185,6 +207,8 @@ async function monthAccounting(db, userId, bounds) {
     unclassified_cup: 0,
     unclassified_count: unclassifiedCount,
     result_cup: 0,
+    category_totals: Object.fromEntries(categoryTotals),
+    missing_rate_count: missingRateCount,
   };
 
   for (const d of resultDays) {
@@ -225,29 +249,18 @@ router.get('/expenses', requireOwner, asyncHandler(async (req, res) => {
 
 /**
  * POST /expenses
- * Crea un gasto. Idempotente por client_expense_id.
+ * Crea un gasto. Idempotente por client_expense_id. La categoría es opcional
+ * (enum cerrado) y la tasa de la divisa la congela el servidor: no se acepta
+ * la del cliente.
  */
 router.post('/expenses', requireOwner, asyncHandler(async (req, res) => {
   let operationDate;
   try { operationDate = operationTime(req.body.spent_at); }
   catch (error) { return operationTimeFailure(res, error); }
 
-  // Validar method
-  if (!WITHDRAWAL_METHODS.includes(req.body.method)) {
-    return res.status(400).json({ error: 'Apartado inválido' });
-  }
-
-  // Validar amount
-  const amount = Number(req.body.amount);
-  if (req.body.amount == null || req.body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) {
-    return res.status(400).json({ error: 'Falta el monto del gasto' });
-  }
-
-  // Validar concept
-  const concept = req.body.concept == null ? '' : String(req.body.concept).trim();
-  if (concept.length < 3 || concept.length > 200) {
-    return res.status(400).json({ error: 'Escribe en qué se gastó (entre 3 y 200 caracteres)' });
-  }
+  let fields;
+  try { fields = expenseFields(req.body); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
 
   // Validar client_expense_id
   const { client_expense_id = null } = req.body;
@@ -258,21 +271,30 @@ router.post('/expenses', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
 
   // Idempotencia (camino rápido)
-  if (client_expense_id) {
-    const existing = await findByClientId(db, req.userId, client_expense_id);
-    if (existing.rows[0]) return res.status(200).json({ ...existing.rows[0], idempotent_replay: true });
-  }
+  const replay = await findByClientId(db, req.userId, client_expense_id);
+  if (replay.rows[0]) return res.status(200).json({ ...replay.rows[0], idempotent_replay: true });
+
+  // Tasa vigente de la tienda para convertir el gasto en divisa. Sin tasa
+  // definida no hay conversión: el gasto no resta del resultado.
+  const shop = (await db.execute({
+    sql: 'SELECT usd_rate, eur_rate FROM users WHERE id = ?',
+    args: [req.userId],
+  })).rows[0] || {};
+  const shopRate = fields.method === 'USD' ? shop.usd_rate : fields.method === 'EUR' ? shop.eur_rate : null;
+  const frozen = expenseCup(fields.amount, shopRate);
 
   const account = await describeAccount(db, req);
 
   try {
     const inserted = await db.execute({
       sql: `INSERT INTO expenses
-              (user_id, client_expense_id, method, amount, concept,
+              (user_id, client_expense_id, method, amount, concept, category,
+               exchange_rate, cup_amount,
                account_id, account_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
       args: [
-        req.userId, client_expense_id, req.body.method, round2(amount), concept,
+        req.userId, client_expense_id, fields.method, fields.amount, fields.concept, fields.category,
+        frozen.exchange_rate, frozen.cup_amount,
         account.id, account.email, operationDate,
       ],
     });
@@ -291,12 +313,34 @@ router.post('/expenses', requireOwner, asyncHandler(async (req, res) => {
 }));
 
 /**
+ * PATCH /expenses/:clientExpenseId/category
+ * Recategoriza un gasto. Como clasificar una extracción: no mueve dinero, así
+ * que se permite sobre gastos anulados o de meses pasados.
+ */
+router.patch('/expenses/:clientExpenseId/category', requireOwner, asyncHandler(async (req, res) => {
+  const category = req.body?.category == null || req.body.category === '' ? null : req.body.category;
+  if (category !== null && !EXPENSE_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: 'Categoría inválida' });
+  }
+
+  const db = getDb();
+  const found = await findByClientId(db, req.userId, req.params.clientExpenseId);
+  if (!found.rows[0]) return res.status(404).json({ error: 'Gasto no encontrado' });
+
+  await db.execute({ sql: 'UPDATE expenses SET category = ? WHERE id = ?', args: [category, found.rows[0].id] });
+  const updated = await db.execute({ sql: 'SELECT * FROM expenses WHERE id = ?', args: [found.rows[0].id] });
+  res.status(200).json(updated.rows[0]);
+}));
+
+/**
  * POST /expenses/:clientExpenseId/void
- * Anula un gasto (pone voided_at). Idempotente.
+ * Anula un gasto (pone voided_at). Idempotente. El email de quien anula queda
+ * congelado (voided_by_email), igual que la atribución de las creaciones.
  */
 router.post('/expenses/:clientExpenseId/void', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const { clientExpenseId } = req.params;
+  const account = await describeAccount(db, req);
 
   const tx = await db.transaction('write');
   try {
@@ -320,8 +364,8 @@ router.post('/expenses/:clientExpenseId/void', requireOwner, asyncHandler(async 
 
     // Anular el gasto
     await tx.execute({
-      sql: 'UPDATE expenses SET voided_at = datetime(\'now\') WHERE id = ? AND voided_at IS NULL',
-      args: [row.id],
+      sql: 'UPDATE expenses SET voided_at = datetime(\'now\'), voided_by_email = ? WHERE id = ? AND voided_at IS NULL',
+      args: [account.email, row.id],
     });
 
     await tx.commit();
@@ -363,7 +407,8 @@ router.get('/withdrawals', requireOwner, asyncHandler(async (req, res) => {
 
 /**
  * GET /summary?month=YYYY-MM
- * Resumen mensual de ingresos y gastos.
+ * Resumen mensual de ingresos y gastos, con los totales del mes anterior para
+ * que la UI muestre la variación sin una segunda petición.
  */
 router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
   let bounds;
@@ -376,11 +421,74 @@ router.get('/summary', requireOwner, asyncHandler(async (req, res) => {
   const db = getDb();
   const { totals, days } = await monthAccounting(db, req.userId, bounds);
 
+  const [year, month] = bounds.month.split('-').map(Number);
+  const prevMonth = month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
+  const previous = await monthAccounting(db, req.userId, monthBounds(prevMonth));
+  const previousTotals = {
+    income: previous.totals.income,
+    profit: previous.totals.profit,
+    expenses_cup: previous.totals.expenses_cup,
+    result_cup: previous.totals.result_cup,
+  };
+
   res.json({
     month: bounds.month,
     totals,
     days,
+    previous: previousTotals,
   });
+}));
+
+/**
+ * GET /year?year=YYYY
+ * Vista anual: los meses con datos del año, para comparar de una mirada.
+ * En el año en curso solo van los meses transcurridos.
+ */
+router.get('/year', requireOwner, asyncHandler(async (req, res) => {
+  if (!/^\d{4}$/.test(String(req.query.year || '').trim())) {
+    return res.status(400).json({ error: 'Año inválido' });
+  }
+  const year = Number(req.query.year);
+  const db = getDb();
+
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const currentMonth = now.getUTCMonth() + 1;
+  const lastMonth = year < currentYear ? 12 : year === currentYear ? currentMonth : 0;
+
+  const months = [];
+  const totals = { income: 0, profit: 0, expenses_cup: 0, expenses_usd: 0, expenses_eur: 0, result_cup: 0 };
+  const categoryTotals = {};
+  for (let m = 1; m <= lastMonth; m++) {
+    const monthKey = `${year}-${String(m).padStart(2, '0')}`;
+    const { totals: t } = await monthAccounting(db, req.userId, monthBounds(monthKey));
+    months.push({
+      month: monthKey,
+      income: t.income,
+      profit: t.profit,
+      expenses_cup: t.expenses_cup,
+      expenses_usd: t.expenses_usd,
+      expenses_eur: t.expenses_eur,
+      result_cup: t.result_cup,
+      category_totals: t.category_totals,
+    });
+    totals.income = round2(totals.income + t.income);
+    totals.profit = round2(totals.profit + t.profit);
+    totals.expenses_cup = round2(totals.expenses_cup + t.expenses_cup);
+    totals.expenses_usd = round2(totals.expenses_usd + t.expenses_usd);
+    totals.expenses_eur = round2(totals.expenses_eur + t.expenses_eur);
+    totals.result_cup = round2(totals.result_cup + t.result_cup);
+    for (const [category, v] of Object.entries(t.category_totals)) {
+      const acc = categoryTotals[category] || { cup: 0, usd: 0, eur: 0 };
+      categoryTotals[category] = {
+        cup: round2(acc.cup + v.cup),
+        usd: round2(acc.usd + v.usd),
+        eur: round2(acc.eur + v.eur),
+      };
+    }
+  }
+
+  res.json({ year, months, totals, category_totals: categoryTotals });
 }));
 
 /**
@@ -459,11 +567,13 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
     { header: 'Monto', key: 'monto', width: 14, style: { numFmt: MONEY_FMT } },
     { header: 'Registró', key: 'registro', width: 24 },
     { header: 'Estado', key: 'estado', width: 12 },
+    // Al final para no mover las columnas que ya se comparten.
+    { header: 'Categoría', key: 'categoria', width: 16 },
   ];
   styleHeaderRow(gastosSheet.getRow(1));
 
   const allExpensesResult = await db.execute({
-    sql: `SELECT created_at, method, amount, concept, account_email, voided_at FROM expenses
+    sql: `SELECT created_at, method, amount, concept, category, account_email, voided_at FROM expenses
           WHERE user_id = ? AND created_at >= ? AND created_at < ?
           ORDER BY created_at ASC`,
     args: [req.userId, bounds.start, bounds.end],
@@ -490,6 +600,7 @@ router.get('/export', requireOwner, asyncHandler(async (req, res) => {
       monto: Number(row.amount) || 0,
       registro: row.account_email || '',
       estado,
+      categoria: EXPENSE_CATEGORY_LABELS[row.category] || 'Sin categoría',
     });
   }
 

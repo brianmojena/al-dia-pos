@@ -7,7 +7,7 @@ const { boundsForDate } = require('../lib/businessDay');
 const { describeAccount } = require('../lib/account');
 const { requireOwner, OWNER } = require('../middleware/auth');
 const { resolveRegisterId } = require('../lib/register');
-const { withdrawalFields, WITHDRAWAL_KINDS } = require('../lib/payment');
+const { withdrawalFields, WITHDRAWAL_KINDS, expenseCup } = require('../lib/payment');
 
 /**
  * Extracciones de caja:
@@ -144,9 +144,33 @@ router.patch('/:clientWithdrawalId/kind', requireOwner, asyncHandler(async (req,
   const db = getDb();
   const found = await findByClientId(db, req.userId, req.params.clientWithdrawalId);
   if (!found.rows[0]) return res.status(404).json({ error: 'Extracción no encontrada' });
+  const row = found.rows[0];
 
-  await db.execute({ sql: 'UPDATE cash_withdrawals SET kind = ? WHERE id = ?', args: [kind, found.rows[0].id] });
-  const updated = await db.execute({ sql: 'SELECT * FROM cash_withdrawals WHERE id = ?', args: [found.rows[0].id] });
+  // Solo una extracción clasificada como gasto del negocio resta del resultado.
+  // Si es en divisa, se congela la tasa vigente de la tienda (misma cuenta que
+  // los gastos, expenseCup) para que el resultado la descuenta por su
+  // equivalente en pesos; sin tasa definida no hay conversión. Clasificar como
+  // otra cosa limpia la conversión que pudiera tener.
+  let exchangeRate = row.exchange_rate;
+  let cupAmount = row.cup_amount;
+  if (kind === 'negocio' && (row.method === 'USD' || row.method === 'EUR')) {
+    const shop = (await db.execute({
+      sql: 'SELECT usd_rate, eur_rate FROM users WHERE id = ?',
+      args: [req.userId],
+    })).rows[0] || {};
+    const frozen = expenseCup(row.amount, row.method === 'USD' ? shop.usd_rate : shop.eur_rate);
+    exchangeRate = frozen.exchange_rate;
+    cupAmount = frozen.cup_amount;
+  } else if (kind !== 'negocio') {
+    exchangeRate = null;
+    cupAmount = null;
+  }
+
+  await db.execute({
+    sql: 'UPDATE cash_withdrawals SET kind = ?, exchange_rate = ?, cup_amount = ? WHERE id = ?',
+    args: [kind, exchangeRate, cupAmount, row.id],
+  });
+  const updated = await db.execute({ sql: 'SELECT * FROM cash_withdrawals WHERE id = ?', args: [row.id] });
   res.status(200).json(updated.rows[0]);
 }));
 

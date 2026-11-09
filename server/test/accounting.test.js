@@ -373,9 +373,10 @@ test('contabilidad', async (t) => {
     // Summary
     const res = await ctx.api('GET', '/api/accounting/summary', { token });
     assert.equal(res.status, 200);
-    assert.equal(res.body.totals.expenses_cup, 0, 'USD y EUR no se mezclan con CUP');
+    assert.equal(res.body.totals.expenses_cup, 0, 'sin tasa definida no hay conversión');
     assert.equal(res.body.totals.expenses_usd, 100);
     assert.equal(res.body.totals.expenses_eur, 50);
+    assert.equal(res.body.totals.missing_rate_count, 2, 'se avisa que faltan tasas');
   });
 
   await t.test('export devuelve Excel con status 200', async () => {
@@ -579,5 +580,200 @@ test('contabilidad', async (t) => {
     assert.deepEqual(res.body.map((w) => w.client_withdrawal_id), ['lista-3', 'lista-1']);
     assert.deepEqual(res.body.map((w) => w.kind), [null, 'negocio']);
     assert.equal(res.body[0].account_email, `owner-${s}@test.local`);
+  });
+
+  await t.test('categorías: enum válido, inválido, desglose y recategorizar', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    const ok = await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'cat-1', method: 'efectivo', amount: 100, concept: 'Pago de salarios del mes', category: 'salarios' },
+    });
+    assert.equal(ok.status, 201);
+    assert.equal(ok.body.category, 'salarios');
+
+    const bad = await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'cat-2', method: 'efectivo', amount: 100, concept: 'Categoría inventada', category: 'inventado' },
+    });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error, /Categoría/);
+
+    // Sin categoría (clientes viejos): se agrupa como sin_categoria
+    const sinCategoria = await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'cat-3', method: 'efectivo', amount: 50, concept: 'Gasto sin categoría' },
+    });
+    assert.equal(sinCategoria.status, 201);
+    assert.equal(sinCategoria.body.category, null);
+
+    const summary = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.deepEqual(summary.body.totals.category_totals, {
+      salarios: { cup: 100, usd: 0, eur: 0 },
+      sin_categoria: { cup: 50, usd: 0, eur: 0 },
+    });
+
+    const repatch = await ctx.api('PATCH', '/api/accounting/expenses/cat-3/category', { token, body: { category: 'transporte' } });
+    assert.equal(repatch.status, 200);
+    assert.equal(repatch.body.category, 'transporte');
+
+    const repatchBad = await ctx.api('PATCH', '/api/accounting/expenses/cat-3/category', { token, body: { category: 'nope' } });
+    assert.equal(repatchBad.status, 400);
+
+    const repatch404 = await ctx.api('PATCH', '/api/accounting/expenses/nadie/category', { token, body: { category: 'otros' } });
+    assert.equal(repatch404.status, 404);
+
+    const summary2 = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.deepEqual(summary2.body.totals.category_totals, {
+      salarios: { cup: 100, usd: 0, eur: 0 },
+      transporte: { cup: 50, usd: 0, eur: 0 },
+    });
+  });
+
+  await t.test('gasto en divisa con tasa congelada resta del resultado', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    const settings = await ctx.api('PUT', '/api/auth/settings', { token, body: { usd_rate: 400, eur_rate: 440 } });
+    assert.equal(settings.status, 200);
+
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'fx-1', method: 'USD', amount: 10, concept: 'Gasto en dólares con tasa' },
+    });
+
+    const summary = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(summary.body.totals.expenses_usd, 10);
+    assert.equal(summary.body.totals.expenses_cup, 4000, 'resta por su tasa congelada');
+    assert.equal(summary.body.totals.result_cup, -4000);
+    assert.equal(summary.body.totals.missing_rate_count, 0);
+
+    // La fila recuerda la tasa del día
+    const list = await ctx.api('GET', '/api/accounting/expenses', { token });
+    const fx1 = list.body.find((e) => e.client_expense_id === 'fx-1');
+    assert.equal(fx1.exchange_rate, 400);
+    assert.equal(fx1.cup_amount, 4000);
+
+    // EUR sin tasa definida: no hay conversión y se avisa
+    await ctx.api('PUT', '/api/auth/settings', { token, body: { eur_rate: null } });
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'fx-2', method: 'EUR', amount: 20, concept: 'Gasto en euros sin tasa' },
+    });
+    const summary2 = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(summary2.body.totals.expenses_eur, 20);
+    assert.equal(summary2.body.totals.expenses_cup, 4000, 'sin tasa no resta');
+    assert.equal(summary2.body.totals.missing_rate_count, 1);
+  });
+
+  await t.test('anular gasto deja quién lo anuló', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'void-by', method: 'efectivo', amount: 30, concept: 'Gasto anulado con autoría' },
+    });
+    const res = await ctx.api('POST', '/api/accounting/expenses/void-by/void', { token });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.voided_by_email, `owner-${s}@test.local`);
+  });
+
+  await t.test('vista anual: totales por mes consistentes con /summary', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    const bad = await ctx.api('GET', '/api/accounting/year?year=nope', { token });
+    assert.equal(bad.status, 400);
+
+    const summary = await ctx.api('GET', '/api/accounting/summary', { token });
+    const month = summary.body.month;
+    const year = month.slice(0, 4);
+
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'year-1', method: 'efectivo', amount: 120, concept: 'Gasto para la vista anual' },
+    });
+
+    const res = await ctx.api('GET', `/api/accounting/year?year=${year}`, { token });
+    assert.equal(res.status, 200);
+    const row = res.body.months.find((m) => m.month === month);
+    assert.ok(row, 'el mes actual está en la vista anual');
+    assert.equal(row.expenses_cup, 120);
+    assert.equal(res.body.totals.expenses_cup, 120);
+    assert.equal(res.body.totals.result_cup, -120);
+    assert.equal(res.body.months.at(-1).month, month, 'en el año en curso solo van los meses transcurridos');
+
+    const summary2 = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(row.income, summary2.body.totals.income);
+    assert.equal(row.result_cup, summary2.body.totals.result_cup);
+  });
+
+  await t.test('clasificar extracción de negocio en divisa congela la tasa', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    await ctx.api('PUT', '/api/auth/settings', { token, body: { usd_rate: 300 } });
+
+    const alta = await ctx.api('POST', '/api/cash-withdrawals', {
+      token,
+      body: { register_id: 'web', client_withdrawal_id: 'fx-neg', method: 'USD', amount: 5, note: 'Salida en dólares' },
+    });
+    assert.equal(alta.status, 201);
+
+    // Sin clasificar no resta nada (solo su parte CUP, que es 0)
+    const sinClasificar = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(sinClasificar.body.totals.expenses_cup, 0);
+    assert.equal(sinClasificar.body.totals.unclassified_cup, 0);
+
+    await ctx.api('PATCH', '/api/cash-withdrawals/fx-neg/kind', { token, body: { kind: 'negocio' } });
+
+    const summary = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(summary.body.totals.expenses_cup, 1500, '5 USD a tasa 300');
+    assert.equal(summary.body.totals.expenses_usd, 5);
+
+    // Cambiar el tipo limpia la conversión
+    await ctx.api('PATCH', '/api/cash-withdrawals/fx-neg/kind', { token, body: { kind: 'personal' } });
+    const summary2 = await ctx.api('GET', '/api/accounting/summary', { token });
+    assert.equal(summary2.body.totals.expenses_cup, 0);
+    assert.equal(summary2.body.totals.personal_cup, 0, 'en divisa el personal solo suma su parte CUP');
+
+    const lista = await ctx.api('GET', '/api/cash-withdrawals', { token });
+    const row = lista.body.find((w) => w.client_withdrawal_id === 'fx-neg');
+    assert.equal(row.exchange_rate, null);
+    assert.equal(row.cup_amount, null);
+  });
+
+  await t.test('snapshot: gastos con after_expense y anulaciones con after_expense_state', async () => {
+    const s = suffix();
+    const owner = await registerWithPlan(ctx.api, s, 'enterprise');
+    const token = owner.body.token;
+
+    const sinOptin = await ctx.api('GET', '/api/sync/snapshot?after_sale=0', { token });
+    assert.equal('expenses' in sinOptin.body, false, 'sin el cursor no se mandan gastos');
+    assert.equal('expense_state' in sinOptin.body.cursors, false);
+
+    await ctx.api('POST', '/api/accounting/expenses', {
+      token,
+      body: { client_expense_id: 'sync-1', method: 'efectivo', amount: 10, concept: 'Gasto para sincronizar' },
+    });
+
+    const snap = await ctx.api('GET', '/api/sync/snapshot?after_expense=0&after_expense_state=0', { token });
+    assert.equal(snap.status, 200);
+    assert.equal(snap.body.expenses.length, 1);
+    assert.equal(snap.body.expenses[0].client_expense_id, 'sync-1');
+    assert.equal(snap.body.expense_states.length, 1);
+    assert.equal(snap.body.expense_states[0].voided, 0);
+
+    await ctx.api('POST', '/api/accounting/expenses/sync-1/void', { token });
+    const snap2 = await ctx.api('GET', '/api/sync/snapshot?after_expense=0&after_expense_state=0', { token });
+    assert.equal(snap2.body.expense_states[0].voided, 1);
+    assert.ok(snap2.body.expense_states[0].voided_at);
   });
 });

@@ -154,6 +154,8 @@ test('estados incrementales: bootstrap, privacidad, transacciones y trabajo acot
           account_id INTEGER, account_email TEXT, register_id TEXT, cash_close_id INTEGER);
         CREATE TABLE cash_withdrawals (id INTEGER PRIMARY KEY, user_id INTEGER,
           account_id INTEGER, account_email TEXT, register_id TEXT, cash_close_id INTEGER, voided_at TEXT);
+        CREATE TABLE expenses (id INTEGER PRIMARY KEY, user_id INTEGER,
+          account_id INTEGER, account_email TEXT, voided_at TEXT);
         INSERT INTO sales (id, user_id, total, cash_close_id) VALUES (1, 1, 10, 999), (2, NULL, 10, NULL);`);
       await initStateSync(db);
       const migrated = (await db.execute("SELECT * FROM sync_state_changes WHERE kind = 'sale' AND entity_id = 1")).rows[0];
@@ -167,6 +169,14 @@ test('estados incrementales: bootstrap, privacidad, transacciones y trabajo acot
       assert.equal(changed.cash_close_id, null);
       assert.ok(changed.seq > before);
       await db.execute('INSERT INTO sales (total) VALUES (10)');
+      // El gasto es del dueño y no tiene gaveta: el change-log le escribe
+      // NULL en cash_close_id y congela voided_at al anularse.
+      await db.execute("INSERT INTO expenses (id, user_id, account_email, voided_at) VALUES (5, 1, 'duena@test', NULL)");
+      await db.execute("UPDATE expenses SET voided_at = '2026-11-01 12:00:00' WHERE id = 5");
+      const expenseState = (await db.execute("SELECT * FROM sync_state_changes WHERE kind = 'expense' AND entity_id = 5")).rows[0];
+      assert.ok(expenseState, 'la anulación del gasto llega al change-log');
+      assert.equal(expenseState.cash_close_id, null);
+      assert.equal(expenseState.voided_at, '2026-11-01 12:00:00');
     } finally { db.close(); }
   });
 });

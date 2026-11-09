@@ -2,7 +2,11 @@ const { resolveRegisterId } = require('./register');
 const { withdrawalScopeSql } = require('./withdrawalScope');
 
 const STATE_SYNC_VERSION = 1;
-const STATE_TABLES = { sale: 'sales', purchase: 'currency_purchases', withdrawal: 'cash_withdrawals' };
+const STATE_TABLES = { sale: 'sales', purchase: 'currency_purchases', withdrawal: 'cash_withdrawals', expense: 'expenses' };
+// Tablas sin las columnas del arqueo: los gastos son del dueño, no de una
+// gaveta, así que no tienen register_id ni cash_close_id y el change-log les
+// escribe NULL en esas dos.
+const STATE_PLAIN = new Set(['expense']);
 
 async function initStateSync(db) {
   await db.executeMultiple(`
@@ -22,11 +26,18 @@ async function initStateSync(db) {
   `);
   const statements = [];
   for (const [kind, table] of Object.entries(STATE_TABLES)) {
-    const voided = kind === 'withdrawal' ? 'NEW.voided_at' : 'NULL';
-    const fields = ['cash_close_id', 'account_id', 'account_email', 'register_id', ...(kind === 'withdrawal' ? ['voided_at'] : [])];
-    const write = `INSERT OR REPLACE INTO sync_state_changes
-      (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
-      VALUES (NEW.user_id, '${kind}', NEW.id, NEW.account_id, NEW.account_email, NEW.register_id, NEW.cash_close_id, ${voided});`;
+    const plain = STATE_PLAIN.has(kind);
+    const voided = kind === 'withdrawal' || kind === 'expense' ? 'NEW.voided_at' : 'NULL';
+    const fields = plain
+      ? ['account_id', 'account_email', 'voided_at']
+      : ['cash_close_id', 'account_id', 'account_email', 'register_id', ...(kind === 'withdrawal' ? ['voided_at'] : [])];
+    const write = plain
+      ? `INSERT OR REPLACE INTO sync_state_changes
+        (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
+        VALUES (NEW.user_id, '${kind}', NEW.id, NEW.account_id, NEW.account_email, NULL, NULL, ${voided});`
+      : `INSERT OR REPLACE INTO sync_state_changes
+        (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
+        VALUES (NEW.user_id, '${kind}', NEW.id, NEW.account_id, NEW.account_email, NEW.register_id, NEW.cash_close_id, ${voided});`;
     statements.push(`CREATE TRIGGER IF NOT EXISTS sync_${kind}_insert AFTER INSERT ON ${table} WHEN NEW.user_id IS NOT NULL BEGIN ${write} END`);
     statements.push(`CREATE TRIGGER IF NOT EXISTS sync_${kind}_update AFTER UPDATE OF ${fields.join(', ')} ON ${table}
       WHEN NEW.user_id IS NOT NULL AND (${fields.map((field) => `OLD.${field} IS NOT NEW.${field}`).join(' OR ')}) BEGIN ${write} END`);
@@ -37,12 +48,29 @@ async function initStateSync(db) {
   const key = 'sync_state_changes_v1';
   const migrated = (await db.execute({ sql: 'SELECT key FROM schema_migrations WHERE key = ?', args: [key] })).rows.length;
   if (!migrated) {
-    for (const [kind, table] of Object.entries(STATE_TABLES)) statements.push(`
+    for (const [kind, table] of Object.entries(STATE_TABLES)) {
+      statements.push(STATE_PLAIN.has(kind) ? `
+      INSERT OR IGNORE INTO sync_state_changes
+        (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
+      SELECT user_id, '${kind}', id, account_id, account_email, NULL, NULL, voided_at FROM ${table} WHERE user_id IS NOT NULL` : `
       INSERT OR IGNORE INTO sync_state_changes
         (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
       SELECT user_id, '${kind}', id, account_id, account_email, register_id, cash_close_id,
              ${kind === 'withdrawal' ? 'voided_at' : 'NULL'} FROM ${table} WHERE user_id IS NOT NULL`);
+    }
     statements.push({ sql: 'INSERT OR IGNORE INTO schema_migrations (key) VALUES (?)', args: [key] });
+  } else {
+    // Bootstrap solo para las entidades añadidas después de la v1: las bases
+    // que ya pasaron la v1 no re-escanean el historial completo.
+    const expenseKey = 'sync_state_changes_expense_v1';
+    const expenseMigrated = (await db.execute({ sql: 'SELECT key FROM schema_migrations WHERE key = ?', args: [expenseKey] })).rows.length;
+    if (!expenseMigrated) {
+      statements.push(`
+      INSERT OR IGNORE INTO sync_state_changes
+        (user_id, kind, entity_id, account_id, account_email, register_id, cash_close_id, voided_at)
+      SELECT user_id, 'expense', id, account_id, account_email, NULL, NULL, voided_at FROM expenses WHERE user_id IS NOT NULL`);
+      statements.push({ sql: 'INSERT OR IGNORE INTO schema_migrations (key) VALUES (?)', args: [expenseKey] });
+    }
   }
   await db.batch(statements, 'write');
 }
@@ -53,6 +81,10 @@ async function readStateChanges(db, req, kind, after, limit) {
   const register = resolveRegisterId(req, 'web');
   let scope = '';
   const args = [req.userId, kind, after];
+  // Los gastos son del dueño; para un cajero la respuesta es vacía y estable.
+  if (kind === 'expense' && !owner) {
+    return { rows: [], cursor: after, count: 0 };
+  }
   if (!owner && req.sharedDevice) {
     scope = ' AND register_id = ?';
     args.push(register);
@@ -72,7 +104,7 @@ async function readStateChanges(db, req, kind, after, limit) {
   const rows = (await db.execute({
     sql: `SELECT entity_id AS id, seq AS change_id, cash_close_id,
                  CASE WHEN cash_close_id IS NULL THEN 0 ELSE 1 END AS closed
-                 ${kind === 'withdrawal' ? ', voided_at, CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided' : ''}
+                 ${kind === 'withdrawal' || kind === 'expense' ? ', voided_at, CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided' : ''}
           FROM sync_state_changes WHERE user_id = ? AND kind = ? AND seq > ?${scope} ORDER BY seq LIMIT ?`,
     args: [...args, limit],
   })).rows;

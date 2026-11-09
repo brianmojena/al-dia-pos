@@ -24,9 +24,11 @@ const CURSOR_PARAMS = {
   warehouse_state: 'after_warehouse_state',
   warehouse_transfer: 'after_warehouse_transfer',
   stock_entry: 'after_stock_entry',
+  expense: 'after_expense',
+  expense_state: 'after_expense_state',
 };
-// Cursores S5 (almacén y entradas de stock): solo se atienden si el cliente
-// los envía, así el cliente web actual no ve campos nuevos.
+// Cursores S5 (almacén, entradas de stock y gastos de contabilidad): solo se
+// atienden si el cliente los envía, así el cliente web actual no ve campos nuevos.
 const OWNER_EXTRA = [
   ['warehouse', 'warehouse_items', 'SELECT * FROM warehouse_items'],
   ['warehouse_state', 'warehouse_states', 'SELECT id, name, unit, cost, quantity FROM warehouse_items'],
@@ -224,7 +226,14 @@ async function syncChanges(tx, req) {
   const since = historyFrom ? null : dateParam(req.query.since);
   const history = historyFrom ? { from: historyFrom, to: historyTo } : null;
   const incrementalStates = req.query.state_changes === '1';
+  // Los gastos (y sus estados) solo se atienden si el cliente pidió sus
+  // cursores: los clientes viejos no reciben el campo nuevo.
+  const expensesRequested = 'after_expense' in req.query;
+  const expenseStatesRequested = 'after_expense_state' in req.query;
   const statePages = {};
+  if (incrementalStates && !history && expensesRequested) {
+    statePages.expense = await readStateChanges(tx, req, 'expense', cursors.expense_state, limit);
+  }
   if (incrementalStates && req.query.state_cursor_version === '0') {
     for (const kind of ['sale', 'purchase', 'withdrawal']) cursors[`${kind}_state`] = 0;
   }
@@ -346,6 +355,17 @@ async function syncChanges(tx, req) {
         FROM cash_withdrawals WHERE user_id = ?${owner ? '' : withdrawalScope} AND id > ? ORDER BY id ASC LIMIT ?`,
       owner ? [req.userId, cursors.withdrawal_state, limit] : [req.userId, ...withdrawalArgs, cursors.withdrawal_state, limit]);
   }
+  let expenseStates = [];
+  if (expensesRequested && incrementalStates && !history) {
+    expenseStates = statePages.expense?.rows || [];
+  } else if (expensesRequested && owner && !history) {
+    // Anulaciones y recategorizaciones de gastos hechas en otro aparato. Sin
+    // gaveta no hay cash_close_id: solo importa voided_at.
+    expenseStates = await query(tx,
+      `SELECT id, voided_at, CASE WHEN voided_at IS NULL THEN 0 ELSE 1 END AS voided
+        FROM expenses WHERE user_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+      [req.userId, cursors.expense_state, limit]);
+  }
 
   let closes;
   const closeWindow = windowFilter('closed_at');
@@ -437,6 +457,17 @@ async function syncChanges(tx, req) {
   for (const row of reminders) if (!withdrawalMap.has(Number(row.id))) withdrawalMap.set(Number(row.id), row);
   withdrawals = [...withdrawalMap.values()].sort((a, b) => Number(a.id) - Number(b.id));
 
+  // Gastos de contabilidad: solo el dueño, y solo si el cliente pidió el
+  // cursor — los clientes viejos no reciben el campo nuevo. Con ventana de
+  // historial para que los meses pasados lleguen en el sync por mes.
+  let expenses = [];
+  if (owner && 'after_expense' in req.query) {
+    const expenseWindow = windowFilter('created_at');
+    expenses = await query(tx,
+      `SELECT * FROM expenses WHERE user_id = ? AND id > ?${expenseWindow.sql} ORDER BY id ASC LIMIT ?`,
+      [req.userId, cursors.expense, ...expenseWindow.args, limit]);
+  }
+
   let corrections = [];
   const correctionWindow = windowFilter('created_at');
   if (owner) {
@@ -525,6 +556,8 @@ async function syncChanges(tx, req) {
     cash_close_corrections: closeCorrections,
     cash_close_coverage_version: 1,
     ...(incrementalStates ? { state_changes_version: STATE_SYNC_VERSION } : {}),
+    ...(expensesRequested ? { expenses } : {}),
+    ...(expenseStatesRequested ? { expense_states: expenseStates } : {}),
   };
   if (history) {
     payload.history = history;
@@ -577,16 +610,20 @@ async function syncChanges(tx, req) {
     sale_state: stateCursor(saleStates, cursors.sale_state, statePages.sale),
     purchase_state: stateCursor(purchaseStates, cursors.purchase_state, statePages.purchase),
     withdrawal_state: stateCursor(withdrawalStates, cursors.withdrawal_state, statePages.withdrawal),
+    ...(expensesRequested || expenseStatesRequested ? { expense_state: stateCursor(expenseStates, cursors.expense_state, statePages.expense) } : {}),
     close: cursorsFor(closes, cursors.close),
     count: cursorsFor(counts, cursors.count),
     purchase: cursorsFor(purchases, cursors.purchase),
     withdrawal: cursorsFor(withdrawals.filter((row) => Number(row.id) > cursors.withdrawal), cursors.withdrawal),
+    ...(expensesRequested ? { expense: cursorsFor(expenses, cursors.expense) } : {}),
     correction: cursorsFor(corrections, cursors.correction),
     close_correction: cursorsFor(closeCorrections, cursors.close_correction),
     ...extraCursors(),
   });
   const buildHasMore = (trimmed) => sales.length === limit || saleStates.length === limit || purchaseStates.length === limit || withdrawalStates.length === limit || closes.length === limit || counts.length === limit
     || purchases.length === limit || newWithdrawals === limit
+    || (expensesRequested && expenses.length === limit)
+    || (expensesRequested && expenseStates.length === limit)
     || corrections.length === limit || closeCorrections.length === limit
     || extraFull() || trimmed.size > 0;
 
@@ -595,15 +632,15 @@ async function syncChanges(tx, req) {
   payload.cursors = buildCursors();
   payload.has_more = true;
   let trimmed = trimToBudget(payload, [
-    'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
-    'cash_withdrawals', 'sale_corrections', 'cash_close_corrections', ...extraNames,
+    'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'expense_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
+    'cash_withdrawals', 'expenses', 'sale_corrections', 'cash_close_corrections', ...extraNames,
   ], maxBytes);
   payload.cursors = buildCursors();
   payload.has_more = buildHasMore(trimmed);
   if (byteSize(payload) > maxBytes) {
     trimmed = trimToBudget(payload, [
-      'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
-      'cash_withdrawals', 'sale_corrections', 'cash_close_corrections',
+      'sales', 'sale_states', 'purchase_states', 'withdrawal_states', 'expense_states', 'cash_closes', 'inventory_counts', 'currency_purchases',
+      'cash_withdrawals', 'expenses', 'sale_corrections', 'cash_close_corrections',
     ], maxBytes);
     payload.cursors = buildCursors();
     payload.has_more = buildHasMore(trimmed);
