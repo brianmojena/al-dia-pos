@@ -137,3 +137,37 @@ export function offShopPurchase(purchase) {
   if (purchase.shop_rate == null) return false
   return Math.abs(Number(purchase.exchange_rate) - Number(purchase.shop_rate)) > 0.005
 }
+
+// Gastos del dueño (contabilidad). Misma regla que server/lib/payment.js.
+export const EXPENSE_CATEGORIES = ['salarios', 'servicios', 'transporte', 'insumos', 'renta', 'impuestos', 'otros']
+export const EXPENSE_CATEGORY_LABELS = { salarios: 'Salarios', servicios: 'Servicios', transporte: 'Transporte', insumos: 'Insumos', renta: 'Renta', impuestos: 'Impuestos', otros: 'Otros' }
+
+// Valida y normaliza; lanza Error con mensaje en español para el dueño.
+export function expenseFields(body) {
+  if (!WITHDRAWAL_METHODS.includes(body.method)) throw new Error('Apartado inválido')
+  const amount = Number(body.amount)
+  if (body.amount == null || body.amount === '' || !Number.isFinite(amount) || round2(amount) <= 0) throw new Error('Falta el monto del gasto')
+  const concept = body.concept == null ? '' : String(body.concept).trim()
+  if (concept.length < 3 || concept.length > 200) throw new Error('Escribe en qué se gastó (entre 3 y 200 caracteres)')
+  const category = body.category == null || body.category === '' ? null : body.category
+  if (category !== null && !EXPENSE_CATEGORIES.includes(category)) throw new Error('Categoría inválida')
+  return { method: body.method, amount: round2(amount), concept, category }
+}
+
+// Congela la tasa con la que se convierte un gasto en divisa a pesos. Sin tasa
+// (la tienda no la definió) no hay conversión y el gasto no resta del resultado.
+export function expenseCup(amount, rate) {
+  const n = Number(rate)
+  if (!Number.isFinite(n) || n <= 0) return { exchange_rate: null, cup_amount: null }
+  return { exchange_rate: n, cup_amount: round2(round2(amount) * n) }
+}
+
+// Clasifica una cantidad por método en los apartados contables. Igual que
+// classifyByMethod en server/routes/accounting.js.
+export function classifyByMethod(method, amount) {
+  const amt = round2(amount)
+  if (method === 'efectivo' || method === 'transferencia') return { cup: amt, usd: 0, eur: 0 }
+  if (method === 'USD') return { cup: 0, usd: amt, eur: 0 }
+  if (method === 'EUR') return { cup: 0, usd: 0, eur: amt }
+  return { cup: 0, usd: 0, eur: 0 }
+}

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { paymentSplit, paymentLabel, foreignBreakdown, foreignNeeded, maxTransfer, initialTransfer, clampTransfer, mixedPayload, withdrawalSplit, withdrawalFields as clientWithdrawalFields, purchaseSplit, purchaseCup as clientPurchaseCup, offShopRate, offShopPurchase } from '../../client/src/lib/payment.js'
+import { paymentSplit, paymentLabel, foreignBreakdown, foreignNeeded, maxTransfer, initialTransfer, clampTransfer, mixedPayload, withdrawalSplit, withdrawalFields as clientWithdrawalFields, purchaseSplit, purchaseCup as clientPurchaseCup, offShopRate, offShopPurchase, expenseFields as clientExpenseFields, expenseCup as clientExpenseCup } from '../../client/src/lib/payment.js'
 import { cashPaymentBreakdown, parseCupCents } from '../../client/src/lib/cashPayment.js'
 
 const require = createRequire(import.meta.url)
@@ -32,6 +32,8 @@ function run(item) {
     case 'cashPaymentBreakdown': return cashPaymentBreakdown(x.total, x.received)
     case 'offShopRate': return offShopRate({ payment_method: x.method, exchange_rate: x.rate, shop_rate: x.shopRate })
     case 'offShopPurchase': return offShopPurchase({ exchange_rate: x.rate, shop_rate: x.shopRate })
+    case 'expenseFields': return serverPayment.expenseFields({ method: x.method, amount: x.amount, concept: x.concept, category: x.category })
+    case 'expenseCup': return serverPayment.expenseCup(x.amount, x.rate)
     default: throw new Error(`Unknown operation ${item.op}`)
   }
 }
@@ -58,6 +60,12 @@ for (const item of cases) {
       }
       if (item.op === 'withdrawalFields') {
         assert.deepEqual(clientWithdrawalFields({ method: x.method, amount: x.amount, note: x.note }), expected, 'client withdrawalFields parity')
+      }
+      if (item.op === 'expenseFields') {
+        assert.deepEqual(clientExpenseFields({ method: x.method, amount: x.amount, concept: x.concept, category: x.category }), expected, 'client expenseFields parity')
+      }
+      if (item.op === 'expenseCup') {
+        assert.deepEqual(clientExpenseCup(x.amount, x.rate), expected, 'client expenseCup parity')
       }
     }
   })

@@ -11,6 +11,8 @@ import { newId } from '../lib/newId'
 import { formatTime } from '../lib/dates'
 import { validateExpense } from '../lib/accountingValidation'
 import { WITHDRAWAL_KINDS, WITHDRAWAL_KIND_LABELS } from '../lib/payment.js'
+import { accountingCsv } from '../lib/offlineExport.js'
+import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
 
@@ -191,6 +193,9 @@ function ContabilidadContent() {
   useEffect(() => {
     loadMonth(viewMonth)
   }, [viewMonth])
+  // Los gastos y el resumen son offline-capables: al confirmarse la subida de
+  // una operación (o llegar una página del snapshot) se refresca en silencio.
+  useLocalRefresh(() => loadMonth(viewMonth, { silent: true }))
 
   const goMonth = (delta) => {
     setViewMonth((current) => shiftMonth(current, delta))
@@ -245,6 +250,8 @@ function ContabilidadContent() {
     setKindSavingId(clientWithdrawalId)
     setKindError('')
     try {
+      // La clasificación aún no funciona sin conexión: la cola solo cubre los gastos.
+      if (navigator.onLine === false) throw new Error('Conéctate para clasificar la extracción.')
       const res = await apiFetch(`/api/cash-withdrawals/${clientWithdrawalId}/kind`, {
         method: 'PATCH',
         body: JSON.stringify({ kind: value || null }),
@@ -275,24 +282,38 @@ function ContabilidadContent() {
     }
   }
 
+  const saveBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
+
   const downloadExcel = async () => {
     if (!viewMonth) return
     setExporting(true)
     setExportError('')
     try {
+      if (navigator.onLine === false) throw new Error('offline')
       const res = await apiFetch(`/api/accounting/export?month=${viewMonth}`)
       if (!res.ok) throw new Error('No se pudo generar el archivo.')
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `contabilidad-${viewMonth}.xlsx`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      saveBlob(await res.blob(), `contabilidad-${viewMonth}.xlsx`)
     } catch (err) {
-      setExportError(err.message)
+      if (err.message !== 'offline') {
+        setExportError(err.message)
+      } else {
+        // Sin conexión: CSV con lo descargado, mismo criterio que el historial de ventas.
+        try {
+          const csv = accountingCsv(summary, expenses, viewMonth)
+          saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `contabilidad-${viewMonth}.csv`)
+        } catch {
+          setExportError('Sin conexión no se pudo generar el archivo.')
+        }
+      }
     } finally {
       setExporting(false)
     }

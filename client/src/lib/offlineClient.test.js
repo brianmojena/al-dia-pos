@@ -349,7 +349,7 @@ test('ciclo real del cliente: guardar, reabrir, sincronizar y recuperarse de fal
     assert.equal(state.base.products[0].stock, 19)
     assert.equal(state.base.sales.length, 0, 'la anulación descargada elimina la venta local')
     assert.equal(state.base.cash_closes[0].id, 80)
-    assert.deepEqual(state.cursors, { sale: 100, sale_state: 0, close: 80, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 1, close_correction: 0 })
+    assert.deepEqual(state.cursors, { sale: 100, sale_state: 0, close: 80, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 1, close_correction: 0, expense_state: 0 })
     assert.match(calls[0], /after_sale=0/)
     assert.match(calls[1], /after_sale=100/)
   })
@@ -693,7 +693,7 @@ test('una instalación anterior completa una última carga entera y luego usa cu
   }
   await syncOffline()
   assert.equal(new URL(urls[0], 'http://local').searchParams.get('since'), null, 'la base existente no se recorta en la actualización')
-  assert.deepEqual(stateAt(key).cursors, { sale: 700, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 0, close_correction: 0 })
+  assert.deepEqual(stateAt(key).cursors, { sale: 700, sale_state: 0, close: 0, count: 0, purchase: 0, purchase_state: 0, withdrawal: 0, withdrawal_state: 0, correction: 0, close_correction: 0, expense_state: 0 })
   urls.length = 0
   await syncOffline()
   assert.equal(new URL(urls[0], 'http://local').searchParams.get('after_sale'), '700')
@@ -774,4 +774,54 @@ test('el reloj adelantado conserva el cobro en el outbox y la hora del servidor 
   await write('/api/sales', saleBody('clock-corrected'))
   const corrected = stateAt(stateKey(1)).outbox[1]
   assert.ok(Math.abs(Date.parse(corrected.body.sold_at) - Date.parse(server)) < 2000)
+})
+
+test('los gastos funcionan sin conexión: quedan en cola con su tasa y se suben al reconectar', async () => {
+  resetStore(); login(1); seed(); navigator.onLine = false
+  cacheUser({ id: 1, email: '1@test.local', role: 'dueño', transfer_limit: null, usd_rate: 400 })
+  assert.equal(handlesOffline('/api/accounting/expenses', 'POST'), true)
+  assert.equal(handlesOffline('/api/accounting/expenses/x/void', 'POST'), true)
+  assert.equal(handlesOffline('/api/accounting/summary', 'GET'), true)
+  assert.equal(handlesOffline('/api/accounting/expenses', 'GET'), true)
+  assert.equal(handlesOffline('/api/accounting/year', 'GET'), false, 'la vista anual sigue necesitando red')
+  const month = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Havana', year: 'numeric', month: '2-digit' }).format(new Date())
+
+  const res = await write('/api/accounting/expenses', { method: 'USD', amount: 10, concept: 'Bolsas para pan', category: 'insumos' })
+  assert.equal(res.status, 202)
+  assert.equal((await localSyncStatus()).pending, 1)
+
+  // El resumen y la lista se leen de la base local con la tasa estimada.
+  const summary = await (await apiFetch(`/api/accounting/summary?month=${month}`)).json()
+  assert.equal(summary.totals.expenses_usd, 10)
+  assert.equal(summary.totals.expenses_cup, 4000)
+  assert.deepEqual(summary.totals.category_totals, { insumos: { cup: 4000, usd: 10, eur: 0 } })
+  const list = await (await apiFetch(`/api/accounting/expenses?month=${month}`)).json()
+  assert.equal(list.length, 1)
+  assert.equal(list[0].pending, true)
+
+  // Anular sin conexión también funciona: un gasto nunca entra en un cierre.
+  const voidRes = await write(`/api/accounting/expenses/${list[0].client_expense_id}/void`, {})
+  assert.equal(voidRes.status, 202)
+  assert.equal((await localSyncStatus()).pending, 2)
+
+  // Reconectar: la subida confirma con la tasa del servidor y el snapshot restaura el estado real.
+  navigator.onLine = true
+  const [expenseOp] = stateAt(stateKey(1)).outbox
+  globalThis.fetch = async (path, options) => {
+    if (path === '/api/accounting/expenses') {
+      const body = JSON.parse(options.body)
+      return jsonResponse({ id: 77, client_expense_id: body.client_expense_id, method: body.method, amount: body.amount, concept: body.concept, category: body.category, exchange_rate: 410, cup_amount: 4100, created_at: body.spent_at, voided_at: null })
+    }
+    if (/\/void$/.test(path)) return jsonResponse({ id: 77, voided_at: '2026-11-09 12:00:00', voided_by_email: '1@test.local' })
+    assert.ok(path.startsWith('/api/sync/snapshot'))
+    return jsonResponse({ ...emptyData(), expenses: [{ id: 77, client_expense_id: expenseOp.body.client_expense_id, method: 'USD', amount: 10, concept: 'Bolsas para pan', category: 'insumos', exchange_rate: 410, cup_amount: 4100, voided_at: '2026-11-09 12:00:00', account_email: '1@test.local' }], expense_states: [{ id: 77, voided_at: '2026-11-09 12:00:00', voided: 1 }] })
+  }
+  await retrySync()
+  assert.equal((await localSyncStatus()).pending, 0)
+  const row = stateAt(stateKey(1)).base.expenses[0]
+  assert.equal(row.id, 77)
+  assert.equal(row.cup_amount, 4100, 'la tasa congelada del servidor sustituye la estimación local')
+  assert.equal(row.voided_at, '2026-11-09 12:00:00')
+  const finalSummary = await (await apiFetch(`/api/accounting/summary?month=${month}`)).json()
+  assert.equal(finalSummary.totals.expenses_cup, 0, 'anulado no resta')
 })

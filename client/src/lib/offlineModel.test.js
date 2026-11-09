@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, readLocal, businessDate, applyChanges, openSales, openPurchases, openWithdrawals } from './offlineModel.js'
-import { monthCsv } from './offlineExport.js'
+import { emptyData, project, prepareOperation, acknowledgeOperation, monthlyReport, monthlyAccounting, readLocal, businessDate, applyChanges, openSales, openPurchases, openWithdrawals } from './offlineModel.js'
+import { monthCsv, accountingCsv } from './offlineExport.js'
 import { summarizeCashierSales } from './cashierSalesSummary.js'
 import { withdrawalSplit } from './payment.js'
 import { dailyStockFor } from './dailyStock.js'
@@ -587,4 +587,108 @@ test('GET /api/cash-withdrawals: cajero solo ve las suyas, dueño ve todas', () 
   // Cajero2 solo ve la suya
   const c2All = readLocal(data, '/api/cash-withdrawals', '1:3', cashier2)
   assert.deepEqual(c2All.map((w) => w.id), [w2.result.id])
+})
+
+test('gasto offline: tasa congelada de la tienda, categoría y resumen contable', () => {
+  const state = fixture()
+  const op = add(state, 'POST', '/api/accounting/expenses', { method: 'USD', amount: 10, concept: 'Bolsas para pan', category: 'insumos' }, { user: { ...user, usd_rate: 400 } })
+  assert.equal(op.kind, 'expense')
+  assert.equal(op.result.pending, true)
+  assert.equal(op.result.exchange_rate, 400)
+  assert.equal(op.result.cup_amount, 4000)
+  // Mismas reglas de validación que el servidor: un gasto aceptado aquí no puede ser rechazado allá.
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 5, concept: 'Categoría inventada', category: 'inventado' }), /Categoría inválida/)
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 0, concept: 'Sin monto' }), /monto/)
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 5, concept: 'ab' }), /3 y 200/)
+
+  const data = project(state)
+  const rows = readLocal(data, '/api/accounting/expenses?month=2026-09', '1:1', user)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].category, 'insumos')
+  const summary = readLocal(data, '/api/accounting/summary?month=2026-09', '1:1', user)
+  assert.equal(summary.totals.expenses_usd, 10)
+  assert.equal(summary.totals.expenses_cup, 4000, 'el gasto en divisa resta por su tasa congelada')
+  assert.equal(summary.totals.result_cup, -4000)
+  assert.deepEqual(summary.totals.category_totals, { insumos: { cup: 4000, usd: 10, eur: 0 } })
+  assert.equal(summary.totals.missing_rate_count, 0)
+  // Idempotencia por client_expense_id, igual que en la cola de ventas
+  const again = add(state, 'POST', '/api/accounting/expenses', { client_expense_id: op.body.client_expense_id, method: 'USD', amount: 10, concept: 'Bolsas para pan' })
+  assert.equal(again.kind, 'noop')
+})
+
+test('gasto en divisa sin tasa no resta del resultado y se avisa', () => {
+  const state = fixture()
+  add(state, 'POST', '/api/accounting/expenses', { method: 'EUR', amount: 20, concept: 'Gasto sin tasa' })
+  add(state, 'POST', '/api/cash-withdrawals', { method: 'USD', amount: 5, note: 'Salida en dólares' })
+  add(state, 'POST', '/api/cash-withdrawals', { method: 'efectivo', amount: 30, note: 'Surtir la tienda', kind: 'mercancia' })
+  const summary = readLocal(project(state), '/api/accounting/summary?month=2026-09', '1:1', user)
+  assert.equal(summary.totals.expenses_cup, 0)
+  assert.equal(summary.totals.expenses_eur, 20)
+  assert.equal(summary.totals.missing_rate_count, 1)
+  assert.equal(summary.totals.unclassified_cup, 0, 'en divisa sin clasificar solo suma su parte CUP (0)')
+  assert.equal(summary.totals.unclassified_count, 1)
+  assert.equal(summary.totals.merchandise_cup, 30)
+})
+
+test('anular gasto offline deja quién anuló y el resumen deja de contarlo', () => {
+  const state = fixture()
+  const op = add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 50, concept: 'Almuerzo de repartidores' })
+  const voidOp = add(state, 'POST', `/api/accounting/expenses/${op.body.client_expense_id}/void`, {})
+  assert.equal(voidOp.kind, 'expense_void')
+  assert.equal(voidOp.result.voided_by_email, user.email)
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses/no-existe/void', {}), /no encontrado/)
+  const data = project(state)
+  assert.equal(data.expenses[0].voided_at, voidOp.result.voided_at)
+  assert.equal(data.expenses[0].voided_by_email, user.email)
+  const summary = readLocal(data, '/api/accounting/summary?month=2026-09', '1:1', user)
+  assert.equal(summary.totals.expenses_cup, 0)
+})
+
+test('solo el dueño registra y anula gastos', () => {
+  const state = fixture()
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 5, concept: 'Gasto de cajero' }, { user: { ...user, role: 'cajero' }, account: '1:2' }), /Solo el dueño/)
+  assert.throws(() => add(state, 'POST', '/api/accounting/expenses/x/void', {}, { user: { ...user, role: 'cajero' }, account: '1:2' }), /Solo el dueño/)
+})
+
+test('el snapshot trae gastos y reconcilia anulaciones de otro aparato', () => {
+  const state = fixture()
+  const base = applyChanges(state.base, {
+    expenses: [{ id: 7, client_expense_id: 'srv-1', method: 'efectivo', amount: 20, concept: 'Gasto del servidor', category: 'otros', created_at: '2026-09-20 12:00:00', voided_at: null }],
+    expense_states: [{ id: 7, voided_at: null, voided: 0 }],
+  })
+  assert.equal(base.expenses.length, 1)
+  // La misma página dos veces deja lo mismo (idempotente)
+  assert.equal(applyChanges(structuredClone(base), { expenses: base.expenses }).expenses.length, 1)
+  const after = applyChanges(structuredClone(base), { expense_states: [{ id: 7, voided_at: '2026-09-21 10:00:00', voided: 1 }] })
+  assert.equal(after.expenses[0].voided_at, '2026-09-21 10:00:00')
+  const summary = monthlyAccounting(after, '2026-09')
+  assert.equal(summary.totals.expenses_cup, 0)
+})
+
+test('monthlyAccounting respeta el mes y combina días de solo gastos', () => {
+  const state = fixture()
+  sell(state, 1) // 10 en efectivo, 4 de utilidad (10 - 6 de costo)
+  add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 3, concept: 'Gasto del día de venta' })
+  add(state, 'POST', '/api/accounting/expenses', { method: 'efectivo', amount: 2, concept: 'Gasto sin ventas', client_expense_id: 'otro-dia' }, { now: '2026-09-20T14:00:00.000Z' })
+  const summary = monthlyAccounting(project(state), '2026-09')
+  assert.equal(summary.days.length, 2, 'un día con solo gastos aparece en el resumen')
+  const noSales = summary.days.find((d) => d.date === '2026-09-20')
+  assert.equal(noSales.income, 0)
+  assert.equal(noSales.expenses_cup, 2)
+  assert.equal(noSales.result_cup, -2)
+  assert.equal(summary.totals.expenses_cup, 5)
+  assert.equal(summary.totals.result_cup, -1)
+  assert.equal(monthlyAccounting(project(state), '2026-10').totals.expenses_cup, 0, 'otro mes no mezcla gastos')
+})
+
+test('accountingCsv sin conexión incluye resumen, categorías y escape anti-fórmula', () => {
+  const csv = accountingCsv(
+    { totals: { income: 100, profit: 40, expenses_cup: 10, expenses_usd: 0, expenses_eur: 0, result_cup: 30 }, days: [{ date: '2026-09-15', income: 100, profit: 40, expenses_cup: 10, expenses_usd: 0, expenses_eur: 0, result_cup: 30 }] },
+    [{ created_at: '2026-09-15 12:00:00', concept: '=peligro', category: 'salarios', method: 'efectivo', amount: 10, voided_at: null }],
+    '2026-09',
+  )
+  assert.match(csv, /Total 2026-09/)
+  assert.match(csv, /"'=peligro/)
+  assert.match(csv, /Salarios/)
+  assert.match(csv, /Activo/)
 })

@@ -37,8 +37,8 @@ if (channel) channel.onmessage = () => window.dispatchEvent(new Event('local:dat
 
 export function handlesOffline(path, method) {
   const route = path.split('?')[0]
-  if (method === 'GET') return /^\/api\/(products(?:\/day-stock)?$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|cash-withdrawals$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$)/.test(route)
-  return /^\/api\/(products(?:\/(?:-?\d+|import))?$|sales$|currency-purchases$|cash-withdrawals(?:\/[\w-]+\/void)?$|inventory-counts$|cash-closes$|sales\/rejected\/\d+\/review$)/.test(route)
+  if (method === 'GET') return /^\/api\/(products(?:\/day-stock)?$|dashboard$|sales(?:\/(?:-?\d+|rejected))?$|currency-purchases$|cash-withdrawals$|reports\/days$|inventory-counts(?:\/-?\d+)?$|cash-closes(?:\/(?:current|summary))?$|auth\/cashiers$|accounting\/(?:expenses|withdrawals|summary)$)/.test(route)
+  return /^\/api\/(products(?:\/(?:-?\d+|import))?$|sales$|currency-purchases$|cash-withdrawals(?:\/[\w-]+\/void)?$|inventory-counts$|cash-closes$|sales\/rejected\/\d+\/review$|accounting\/expenses$|accounting\/expenses\/[\w-]+\/void$)/.test(route)
 }
 
 // Copiar primero y retirar después: un cierre de la app entre ambas escrituras
@@ -159,6 +159,8 @@ const CURSOR_PARAMS = {
   withdrawal_state: 'after_withdrawal_state',
   correction: 'after_correction',
   close_correction: 'after_close_correction',
+  expense: 'after_expense',
+  expense_state: 'after_expense_state',
 }
 const emptyCursors = () => Object.fromEntries(Object.keys(CURSOR_PARAMS).map((key) => [key, 0]))
 const INITIAL_SYNC_DAYS = 7
@@ -215,7 +217,7 @@ async function syncHistoryMonth(account, month, storageKey) {
 }
 const monthFor = (path) => {
   const url = new URL(path, 'http://local')
-  if (url.pathname === '/api/reports/days') return url.searchParams.get('month') || businessDate().slice(0, 7)
+  if (['/api/reports/days', '/api/accounting/summary', '/api/accounting/expenses'].includes(url.pathname)) return url.searchParams.get('month') || businessDate().slice(0, 7)
   if (['/api/sales', '/api/sales/corrections', '/api/cash-withdrawals', '/api/currency-purchases'].includes(url.pathname)) {
     const date = url.searchParams.get('date')
     return date && /^\d{4}-\d{2}$/.test(date.slice(0, 7)) ? date.slice(0, 7) : null
@@ -235,6 +237,8 @@ const cursorsFromSnapshot = (snapshot) => {
     withdrawal_state: 0,
     correction: 0,
     close_correction: 0,
+    expense: max(snapshot.expenses),
+    expense_state: 0,
   }
 }
 let syncing = null
@@ -373,6 +377,16 @@ export async function syncOffline() {
             broadcast()
             continue
           }
+          if (op.kind === 'expense_void' && [404, 409].includes(res.status)) {
+            // El gasto ya se anuló desde otro aparato: ignorar y seguir.
+            // El snapshot al final restaura el estado real.
+            await updateAccount(storageKey, (state) => {
+              state.outbox = state.outbox.filter((pending) => pending.id !== op.id)
+              return state
+            })
+            broadcast()
+            continue
+          }
           if (res.status === 401) throw new Error('La sesión necesita renovarse. Tus cambios siguen guardados; inicia sesión con esta misma cuenta.')
           const error = result.error || `No se pudo sincronizar (${res.status})`
           // Nunca descartar una operación cobrada o sobrepasar una dependencia.
@@ -415,7 +429,7 @@ export async function syncOffline() {
         }
         await updateAccount(storageKey, (s = initialState(account, shared)) => {
           s.base = applyChanges(s.base, page)
-          s.cursors = { ...page.cursors, ...(page.has_more || page.state_changes_version === 1 ? {} : { sale_state: 0, purchase_state: 0, withdrawal_state: 0 }) }
+          s.cursors = { ...page.cursors, ...(page.has_more || page.state_changes_version === 1 ? {} : { sale_state: 0, purchase_state: 0, withdrawal_state: 0, expense_state: 0 }) }
           s.stateChangesVersion = page.state_changes_version === 1 ? 1 : 0
           s.initialized = true
           s.lastSynced = Date.now()

@@ -1,9 +1,9 @@
-import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES, withdrawalSplit, withdrawalFields, WITHDRAWAL_METHODS } from './payment.js'
+import { paymentSplit, purchaseSplit, purchaseCup, offShopRate, CURRENCIES, withdrawalSplit, withdrawalFields, WITHDRAWAL_METHODS, WITHDRAWAL_KINDS, classifyByMethod, expenseFields, expenseCup, EXPENSE_CATEGORIES } from './payment.js'
 import { parseServerDate } from './dates.js'
 import { isValidUnit, validQuantity, roundQty, lineTotal, lineUnits } from './units.js'
 import { dailyStockFor } from './dailyStock.js'
 
-export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], cash_withdrawals: [], rejected_sales: [], cashiers: [], current_period: null })
+export const emptyData = () => ({ products: [], sales: [], cash_closes: [], inventory_counts: [], currency_purchases: [], cash_withdrawals: [], expenses: [], rejected_sales: [], cashiers: [], current_period: null })
 export const CASH_CLOSE_COVERAGE_VERSION = 1
 export const businessDate = (value = new Date()) => {
   const date = value instanceof Date ? value : parseServerDate(value)
@@ -73,6 +73,14 @@ export function applyOperation(data, op, result = op.result) {
   } else if (op.kind === 'withdrawal_void') {
     const w = (data.cash_withdrawals ||= []).find((w) => w.client_withdrawal_id === op.withdrawal_id)
     if (w) w.voided_at = result.voided_at
+  } else if (op.kind === 'expense') {
+    upsert(data.expenses ||= [], { ...op.result, ...result }, 'client_expense_id')
+  } else if (op.kind === 'expense_void') {
+    const e = (data.expenses ||= []).find((e) => e.client_expense_id === op.expense_id)
+    if (e) {
+      e.voided_at = result.voided_at
+      if (result.voided_by_email) e.voided_by_email = result.voided_by_email
+    }
   } else if (op.kind === 'close') {
     for (const sale of data.sales) if (op.saleIds.includes(sale.id)) sale.cash_close_id = result.id
     for (const purchase of data.currency_purchases || []) if (op.purchaseIds?.includes(purchase.id)) purchase.cash_close_id = result.id
@@ -97,6 +105,7 @@ export function project(state) {
   if (kinds.has('count')) copyRows('inventory_counts')
   if (kinds.has('purchase') || kinds.has('close')) copyRows('currency_purchases')
   if (kinds.has('withdrawal') || kinds.has('withdrawal_void') || kinds.has('close')) copyRows('cash_withdrawals')
+  if (kinds.has('expense') || kinds.has('expense_void')) copyRows('expenses')
   if (kinds.has('close')) copyRows('cash_closes')
   if (kinds.has('review')) copyRows('rejected_sales')
   if (kinds.has('product')) data.local_entries = structuredClone(state.base.local_entries || {})
@@ -148,6 +157,18 @@ export function applyChanges(base, page) {
   if (page.inventory_counts?.length) { copy('inventory_counts'); for (const count of page.inventory_counts) upsert(base.inventory_counts, count, 'client_count_id') }
   if (page.currency_purchases?.length) { copy('currency_purchases'); for (const purchase of page.currency_purchases) upsert(base.currency_purchases, purchase, 'client_purchase_id') }
   if (page.cash_withdrawals?.length) { copy('cash_withdrawals'); for (const withdrawal of page.cash_withdrawals) upsert(base.cash_withdrawals, withdrawal, 'client_withdrawal_id') }
+  // Los gastos llegan solo cuando el cliente pidió el cursor (after_expense).
+  if (page.expenses?.length) { copy('expenses'); base.expenses ||= []; for (const expense of page.expenses) upsert(base.expenses, expense, 'client_expense_id') }
+  // Anulaciones de gastos hechas en otro aparato. Sin gaveta no hay
+  // cash_close_id: solo importa voided_at.
+  for (const state of page.expense_states || []) {
+    copy('expenses')
+    base.expenses ||= []
+    const row = base.expenses.find((entry) => Number(entry.id) === Number(state.id))
+    if (!row) continue
+    if (Object.hasOwn(state, 'voided_at')) row.voided_at = state.voided_at
+    else row.server_voided = Number(state.voided) === 1
+  }
   for (const [key, rows, withdrawal = false] of [
     ['sales', page.sales, false], ['currency_purchases', page.currency_purchases, false], ['cash_withdrawals', page.cash_withdrawals, true],
   ]) for (const incoming of rows || []) {
@@ -206,6 +227,7 @@ export function applyHistory(base, page) {
     inventory_counts: page.inventory_counts,
     currency_purchases: page.currency_purchases,
     cash_withdrawals: page.cash_withdrawals,
+    expenses: page.expenses,
     sale_corrections: page.sale_corrections,
     cash_close_corrections: page.cash_close_corrections,
     cash_close_coverage_version: page.cash_close_coverage_version,
@@ -232,6 +254,7 @@ const copyOperationBase = (base, kind) => {
   if (kind === 'count') copy('inventory_counts')
   if (kind === 'purchase' || kind === 'close') copy('currency_purchases')
   if (kind === 'withdrawal' || kind === 'withdrawal_void' || kind === 'close') copy('cash_withdrawals')
+  if (kind === 'expense' || kind === 'expense_void') copy('expenses')
   if (kind === 'close') copy('cash_closes')
   if (kind === 'review') copy('rejected_sales')
   if (kind === 'product') base.local_entries = structuredClone(base.local_entries || {})
@@ -466,6 +489,36 @@ export function prepareOperation(data, method, path, body, ctx) {
     }
     op.withdrawal_id = withdrawalId
     op.result = { ...withdrawal, voided_at: now }
+  } else if (path === '/api/accounting/expenses') {
+    op.kind = 'expense'
+    assert(owner, 'Solo el dueño puede registrar gastos')
+    op.body.client_expense_id ||= ctx.newId()
+    const existing = (data.expenses || []).find((e) => e.client_expense_id === op.body.client_expense_id)
+    if (existing) return { ...op, kind: 'noop', result: existing }
+    // Mismas reglas que el servidor (server/lib/payment.js, expenseFields):
+    // si aquí se aceptara un gasto que allá se rechaza, quedaría contado en el
+    // teléfono y rechazado al subir.
+    const fields = expenseFields(body)
+    op.body.method = fields.method
+    op.body.amount = fields.amount
+    op.body.concept = fields.concept
+    if (fields.category !== null) op.body.category = fields.category
+    op.body.spent_at = now
+    // Tasa de la tienda que conoce esta sesión, para que el gasto en divisa
+    // reste del resultado desde ya. El servidor congela la suya al subir y el
+    // ack deja la fila real; si allá no hay tasa, la fila queda sin conversión.
+    const frozen = expenseCup(fields.amount, fields.method === 'USD' ? ctx.user.usd_rate : fields.method === 'EUR' ? ctx.user.eur_rate : null)
+    op.result = { ...op.body, ...meta, id: ctx.localId(), exchange_rate: frozen.exchange_rate, cup_amount: frozen.cup_amount, created_at: now, voided_at: null, pending: true }
+  } else if (/^\/api\/accounting\/expenses\/[\w-]+\/void$/.test(path)) {
+    op.kind = 'expense_void'
+    assert(owner, 'Solo el dueño puede anular gastos')
+    const expenseId = path.split('/')[4]
+    const expense = (data.expenses || []).find((e) => e.client_expense_id === expenseId)
+    assert(expense, 'Gasto no encontrado')
+    if (expense.voided_at) return { ...op, kind: 'noop', result: { ...expense, voided_at: expense.voided_at } }
+    // Un gasto nunca entra en un cierre de caja: se puede anular sin conexión.
+    op.expense_id = expenseId
+    op.result = { ...expense, voided_at: now, voided_by_email: ctx.user.email }
   } else if (path === '/api/inventory-counts') {
     op.kind = 'count'
     op.body.client_count_id ||= ctx.newId()
@@ -557,6 +610,107 @@ export function monthlyReport(data, month) {
   for (const day of days) for (const key of Object.keys(totals)) { day[key] = round(day[key]); totals[key] = round(totals[key] + day[key]) }
   return { month, days, totals }
 }
+/**
+ * Resumen contable local del mes, con las mismas claves que monthAccounting
+ * en server/routes/accounting.js: ingresos de monthlyReport más gastos y
+ * extracciones de la base descargada. `previous` se omite a propósito: sin el
+ * historial del mes anterior descargado, una comparación local daría cifras
+ * falsas; las flechas de comparación solo se muestran con el resumen del
+ * servidor.
+ */
+export function monthlyAccounting(data, month) {
+  const report = monthlyReport(data, month)
+  const allDays = new Map(report.days.map((d) => [d.date, { ...d }]))
+  const expensesByDay = new Map()
+  const dayExpense = (date) => {
+    if (!expensesByDay.has(date)) expensesByDay.set(date, { expenses_cup: 0, expenses_usd: 0, expenses_eur: 0, merchandise_cup: 0, personal_cup: 0, unclassified_cup: 0 })
+    return expensesByDay.get(date)
+  }
+  const categoryTotals = new Map()
+  let missingRateCount = 0
+  for (const row of data.expenses || []) {
+    if (row.voided_at) continue
+    const date = businessDate(row.created_at)
+    if (!date.startsWith(month)) continue
+    const d = dayExpense(date)
+    const classified = classifyByMethod(row.method, row.amount)
+    const converted = round(row.cup_amount || 0)
+    d.expenses_cup += classified.cup + converted
+    d.expenses_usd += classified.usd
+    d.expenses_eur += classified.eur
+    if (classified.usd + classified.eur > 0 && !converted) missingRateCount++
+    const category = EXPENSE_CATEGORIES.includes(row.category) ? row.category : 'sin_categoria'
+    const byCategory = categoryTotals.get(category) || { cup: 0, usd: 0, eur: 0 }
+    byCategory.cup = round(byCategory.cup + classified.cup + converted)
+    byCategory.usd = round(byCategory.usd + classified.usd)
+    byCategory.eur = round(byCategory.eur + classified.eur)
+    categoryTotals.set(category, byCategory)
+  }
+  let unclassifiedCount = 0
+  for (const row of data.cash_withdrawals || []) {
+    if (row.voided_at) continue
+    const date = businessDate(row.created_at)
+    if (!date.startsWith(month)) continue
+    if (!WITHDRAWAL_KINDS.includes(row.kind)) unclassifiedCount++
+    const d = dayExpense(date)
+    const classified = classifyByMethod(row.method, row.amount)
+    if (row.kind === 'negocio') {
+      d.expenses_cup += classified.cup + round(row.cup_amount || 0)
+      d.expenses_usd += classified.usd
+      d.expenses_eur += classified.eur
+    } else if (row.kind === 'mercancia') {
+      d.merchandise_cup += classified.cup
+    } else if (row.kind === 'personal') {
+      d.personal_cup += classified.cup
+    } else {
+      d.unclassified_cup += classified.cup
+    }
+  }
+  for (const [date, amounts] of expensesByDay) {
+    const d = allDays.get(date)
+    if (!d) allDays.set(date, { date, sales_count: 0, off_rate_count: 0, total: 0, profit: 0, cash_total: 0, transfer_total: 0, foreign_total: 0, usd_total: 0, eur_total: 0, stock_moves: 0, closes: null, ...amounts })
+    else for (const key of Object.keys(amounts)) d[key] = (d[key] || 0) + amounts[key]
+  }
+  const days = [...allDays.values()].sort((a, b) => b.date.localeCompare(a.date)).map((d) => ({
+    date: d.date,
+    income: round(d.total || 0),
+    profit: round(d.profit || 0),
+    expenses_cup: round(d.expenses_cup || 0),
+    expenses_usd: round(d.expenses_usd || 0),
+    expenses_eur: round(d.expenses_eur || 0),
+    merchandise_cup: round(d.merchandise_cup || 0),
+    personal_cup: round(d.personal_cup || 0),
+    unclassified_cup: round(d.unclassified_cup || 0),
+    result_cup: round((d.profit || 0) - (d.expenses_cup || 0)),
+  }))
+  const totals = {
+    income: report.totals.total,
+    income_cash: report.totals.cash_total,
+    income_transfer: report.totals.transfer_total,
+    income_foreign_cup: report.totals.foreign_total,
+    profit: report.totals.profit,
+    expenses_cup: 0,
+    expenses_usd: 0,
+    expenses_eur: 0,
+    merchandise_cup: 0,
+    personal_cup: 0,
+    unclassified_cup: 0,
+    unclassified_count: unclassifiedCount,
+    result_cup: 0,
+    category_totals: Object.fromEntries(categoryTotals),
+    missing_rate_count: missingRateCount,
+  }
+  for (const d of days) {
+    totals.expenses_cup = round(totals.expenses_cup + d.expenses_cup)
+    totals.expenses_usd = round(totals.expenses_usd + d.expenses_usd)
+    totals.expenses_eur = round(totals.expenses_eur + d.expenses_eur)
+    totals.merchandise_cup = round(totals.merchandise_cup + d.merchandise_cup)
+    totals.personal_cup = round(totals.personal_cup + d.personal_cup)
+    totals.unclassified_cup = round(totals.unclassified_cup + d.unclassified_cup)
+  }
+  totals.result_cup = round(totals.profit - totals.expenses_cup)
+  return { month, totals, days }
+}
 export function readLocal(data, path, account, user) {
   const url = new URL(path, 'https://local.invalid'), route = url.pathname
   const owner = user.role !== 'cajero'
@@ -608,6 +762,17 @@ export function readLocal(data, path, account, user) {
     return newest(filtered, 'created_at')
   }
   assert(owner, 'Solo el dueño puede ver esto')
+  if (route === '/api/accounting/expenses') {
+    const month = url.searchParams.get('month')
+    return newest((data.expenses || []).filter((e) => !month || businessDate(e.created_at).startsWith(month)), 'created_at')
+  }
+  if (route === '/api/accounting/withdrawals') {
+    const month = url.searchParams.get('month')
+    return newest((data.cash_withdrawals || [])
+      .filter((w) => w.voided_at == null && (!month || businessDate(w.created_at).startsWith(month)))
+      .map(({ id, client_withdrawal_id, created_at, method, amount, note, kind, account_email }) => ({ id, client_withdrawal_id, created_at, method, amount, note, kind, account_email })), 'created_at')
+  }
+  if (route === '/api/accounting/summary') return monthlyAccounting(data, url.searchParams.get('month') || businessDate().slice(0, 7))
   if (route === '/api/products/day-stock') return dailyStockFor(data, businessDate())
   if (route === '/api/reports/days') return monthlyReport(data, url.searchParams.get('month') || businessDate().slice(0, 7))
   if (route === '/api/currency-purchases') return newest((data.currency_purchases || []).filter((p) => !url.searchParams.has('date') || businessDate(p.created_at) === url.searchParams.get('date')), 'created_at')
