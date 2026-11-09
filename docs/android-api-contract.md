@@ -21,7 +21,9 @@ Este documento describe las rutas existentes en la copia local de `server/app.js
   - `after_warehouse_state` -> `warehouse_states`: `{id, name, unit, cost, quantity}` por id ascendente, para refrescar cantidad, costo y nombre de artículos ya descargados. Cursor `cursors.warehouse_state`. Si el cursor enviado es `0` la respuesta añade `warehouse_live_ids` (todos los ids vivos, sin paginar): los ids locales que no estén ahí fueron borrados. Tras cada pasada completa reinicie este cursor a `0` (igual que `after_sale_state`).
   - `after_warehouse_transfer` -> `warehouse_transfers`: pases (filas completas, inmutables), cursor `cursors.warehouse_transfer`.
   - `after_stock_entry` -> `stock_entries`: entradas de stock (incluye `kind` y `reason`), cursor `cursors.stock_entry`.
-  - Comparten `limit`/`max_bytes` y `has_more`. Un cursor ausente en la solicitud no aparece en `cursors`. Los gastos/contabilidad aún no están en el snapshot (pendiente tras integrar main).
+  - `after_expense` -> `expenses`: gastos de contabilidad (filas completas, con `category`, `exchange_rate`, `cup_amount`, `voided_at` y `voided_by_email`), solo dueño, por id ascendente. Cursor `cursors.expense`.
+  - `after_expense_state` -> `expense_states`: `{id, voided_at, voided}` para reconciliar anulaciones hechas en otro aparato. Los gastos no tienen gaveta: sin `cash_close_id` ni `closed`. Tras cada pasada completa reinícielo a `0`.
+  - Comparten `limit`/`max_bytes` y `has_more`. Un cursor ausente en la solicitud no aparece en `cursors` ni trae el campo nuevo.
 - `sale_state`, `purchase_state` y `withdrawal_state` avanzan por separado de las altas. Solicite esos cursores desde el comienzo para recibir cambios de estado como ventas que entraron en un cierre, compras cerradas y extracciones anuladas. El cursor solo avanza sobre filas incluidas; respete `has_more` aunque una lista visible esté vacía.
 - `GET /api/sync/delta` es una ruta legada exclusiva del dueño, con filtros equivalentes por cursores y límite máximo 500. Para una implementación nueva use el snapshot paginado.
 - Los cajeros no pueden llamar `/api/sync/delta`: `403` por `requireOwner`. El snapshot en cambio está autenticado y entrega la vista reducida que corresponde al rol.
@@ -40,7 +42,13 @@ Las escrituras del POS llevan ids generados en el dispositivo y `register_id`, p
 Estas rutas están en `origin/main` (contabilidad: commit 546c13b), no en la copia local de la rama actual.
 
 - `GET /api/audit/reports?severity=&limit=` y `GET /api/audit/reports/:id`: informes de cierre de la tienda. Solo dueño (`requireOwner`). La web no reconoce ni resuelve informes.
-- `GET /api/accounting/summary?month=YYYY-MM`, `GET /api/accounting/expenses?month=`, `POST /api/accounting/expenses` (con `client_expense_id`; repetirlo devuelve el mismo gasto), `POST /api/accounting/expenses/:clientExpenseId/void` y `GET /api/accounting/export?month=` (Excel). Solo dueño y plan `enterprise`: en Basic el servidor responde `403` con `code: PLAN_REQUIRED`. No hay edición de gastos.
+- `GET /api/accounting/summary?month=YYYY-MM`, `GET /api/accounting/expenses?month=`, `POST /api/accounting/expenses` (con `client_expense_id`; repetirlo devuelve el mismo gasto), `POST /api/accounting/expenses/:clientExpenseId/void` y `GET /api/accounting/export?month=` (Excel). Solo dueño y plan `enterprise`: en Basic el servidor responde `403` con `code: PLAN_REQUIRED`.
+- `POST /api/accounting/expenses` acepta además `category` opcional (enum: `salarios`, `servicios`, `transporte`, `insumos`, `renta`, `impuestos`, `otros`). Para method `USD`/`EUR` el servidor congela la tasa vigente de la tienda (`exchange_rate` y `cup_amount = round2(amount * rate)`); sin tasa definida deja ambos en `NULL` y el gasto no resta del resultado. No se acepta la tasa del cliente.
+- `PATCH /api/accounting/expenses/:clientExpenseId/category` recategoriza (mismo enum, `null` = sin categoría). No mueve dinero.
+- `POST .../void` congela además `voided_by_email` (quién anuló).
+- `GET /api/accounting/summary` trae `totals.category_totals` (`{[categoría]: {cup, usd, eur}}`, `sin_categoria` para gastos viejos), `totals.missing_rate_count` (gastos en divisa sin tasa) y `previous` (totales del mes anterior para comparar). `expenses_cup` ya incluye las divisas convertidas con su tasa congelada.
+- `GET /api/accounting/year?year=YYYY` devuelve `{year, months: [{month, income, profit, expenses_cup, expenses_usd, expenses_eur, result_cup, category_totals}], totals, category_totals}` para la vista anual; en el año en curso solo van los meses transcurridos.
+- No hay edición de concepto ni monto de un gasto: solo recategorizar (PATCH) y anular (void). La web sirve gastos y resumen sin conexión (cola + snapshot); Android puede alinear `after_expense`/`after_expense_state` cuando integre este main.
 
 ## Idempotencia con `operation_id` (opcional)
 
