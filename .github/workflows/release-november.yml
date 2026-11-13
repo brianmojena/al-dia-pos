@@ -1,0 +1,77 @@
+name: Actualización del 14 de noviembre
+run-name: "Actualización · ${{ github.event_name == 'schedule' && 'publicar a la 1 a. m. de Cuba' || 'comprobar sin publicar' }}"
+
+on:
+  schedule:
+    # Comprueba la versión antes de la hora de publicación.
+    - cron: '40 0 14 11 *'
+      timezone: America/Havana
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-2026-11-14
+  cancel-in-progress: false
+
+jobs:
+  date:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.date.outputs.enabled }}
+    steps:
+      - id: date
+        name: Limitar la programación a esta actualización
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch || "$(TZ=America/Havana date +%F)" == 2026-11-14 ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  check:
+    needs: date
+    if: needs.date.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release-2026-11-14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Comprobar la versión que se publicará
+        run: |
+          npm ci --prefix server
+          npm ci --prefix client
+          npm test --prefix server
+          npm test --prefix client
+          npm run test:integration --prefix client
+          npm run build --prefix client
+
+  publish:
+    needs: check
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release-2026-11-14
+          fetch-depth: 0
+      - name: Esperar hasta la 1 a. m. de Cuba
+        env:
+          RELEASE_AT: '2026-11-14T01:00:00-05:00'
+        run: |
+          target=$(date --date="$RELEASE_AT" +%s)
+          now=$(date +%s)
+          if (( now < target )); then sleep "$((target - now))"; fi
+      - name: Publicar mediante la integración GitHub de Vercel
+        run: |
+          git fetch origin main
+          # Solo avanza main: si hubo cambios independientes, no los sobrescribe.
+          git merge-base --is-ancestor origin/main HEAD
+          git push origin HEAD:refs/heads/main
+          echo 'Versión enviada a main. Vercel publica la web y la API mediante su integración con GitHub.' >> "$GITHUB_STEP_SUMMARY"
