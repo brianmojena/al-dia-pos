@@ -27,6 +27,10 @@ app.use('/api/auth', authRouter);
 // Activación remota de una caja compartida: el código de un solo uso es la
 // credencial (lo dicta el administrador), por eso va sin requireAuth.
 app.use('/api/shared', require('./routes/sharedEnroll'));
+// Catálogo público por negocio (/t/<slug> en el cliente): el enlace compartible
+// es la credencial de lectura del cliente. Solo expone nombre, precios y
+// disponibilidad — nunca costos ni stock exacto (ver routes/catalog.js).
+app.use('/api/public/catalog', require('./routes/catalog').publicRouter);
 
 // Confirmación de tiendas desde el panel del administrador (ver routes/admin.js;
 // el privilegio se comprueba con users.is_admin).
@@ -51,6 +55,9 @@ app.use('/api/inventory-counts', requireAuth, inventoryCountsRouter);
 app.use('/api/reports', requireAuth, reportsRouter);
 // Contabilidad: solo dueño + plan Enterprise.
 app.use('/api/accounting', requireAuth, requireOwner, requireEnterprise, accountingRouter);
+// Tienda online del dueño: configuración del catálogo público y sus reservas
+// (el catálogo que ve el cliente vive en /api/public/catalog, más arriba).
+app.use('/api/catalog', requireAuth, requireOwner, require('./routes/catalog').ownerRouter);
 // Informes de auditoría de la propia tienda: el router exige rol de dueño.
 app.use('/api/audit', requireAuth, auditRouter);
 app.use('/api/sync', requireAuth, require('./routes/pwaSync'));

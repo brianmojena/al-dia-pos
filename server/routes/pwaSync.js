@@ -6,7 +6,7 @@ const { describeAccount } = require('../lib/account');
 const { logStockChange } = require('../lib/stockLog');
 const { resolveRegisterId } = require('../lib/register');
 const { withdrawalScopeSql } = require('../lib/withdrawalScope');
-const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack, parseBarcode, barcodeOwner } = require('../lib/units');
 const { dailyStock } = require('../lib/dailyStock');
 const { syncChanges, isPaginated } = require('../lib/syncChanges');
 const normalize = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -190,7 +190,9 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
     if (method !== 'POST' && expected) {
       const previous = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0];
       // Con add_stock el stock no se compara: lo que cambió allá son ventas y se suma encima.
-      const compared = priceOnly ? (hasPrice ? ['sale_price'] : []) : ['name', 'sale_price', 'purchase_price', ...(hasAdd ? [] : ['stock']), 'unit'];
+      // El código de barras solo se compara cuando el cliente lo manda en el snapshot:
+      // las operaciones encoladas por apps anteriores no lo traen y no deben chocar.
+      const compared = priceOnly ? (hasPrice ? ['sale_price'] : []) : ['name', 'sale_price', 'purchase_price', ...(hasAdd ? [] : ['stock']), 'unit', ...(expected.barcode !== undefined ? ['barcode'] : [])];
       if (previous && compared.some((key) => (previous[key] ?? null) !== (expected[key] ?? null))) {
         await tx.rollback();
         return res.status(409).json({ error: 'El producto cambió en otra caja. Los cambios locales están guardados y necesitan revisión antes de subir.' });
@@ -214,19 +216,43 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
       const current = hasAdd ? (await tx.execute({ sql: 'SELECT stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
       const sale = Number(product.sale_price), purchase = Number(product.purchase_price ?? 0), stock = hasAdd ? Number(current?.stock ?? 0) : Number(product.stock ?? 0);
       const unit = parseUnit(product.unit) ?? null;
+      // Código de barras: mismo contrato que la ruta directa ('' y null = sin
+      // código); solo se toca cuando la operación lo trae — las apps viejas no lo mandan.
+      const hasBarcode = 'barcode' in product;
+      const barcode = hasBarcode ? parseBarcode(product.barcode) : undefined;
       const prior = method === 'PUT' ? (await tx.execute({ sql: 'SELECT track_stock, pack_size, pack_price FROM products WHERE user_id = ? AND id = ?', args: [req.userId, product_id] })).rows[0] : null;
       const trackStock = trackStockFor(unit, product.track_stock, method === 'PUT' ? Number(prior?.track_stock ?? 1) : 0);
       if (!name || product.sale_price == null || !Number.isFinite(sale) || sale < 0 || !Number.isFinite(purchase) || purchase < 0 || unit === false || !validQuantity(trackStock ? stock : 0, unit)) { await tx.rollback(); return res.status(400).json({ error: 'Nombre, precios o stock inválidos' }); }
       // Paquete: si la operación no lo trae (una app antigua) se conserva el que había.
       const pack = parsePack(product, unit) ?? (unit || !prior ? { pack_size: null, pack_price: null } : { pack_size: prior.pack_size ?? null, pack_price: prior.pack_price ?? null });
       if (pack.error) { await tx.rollback(); return res.status(400).json({ error: pack.error }); }
+      if (barcode === false) { await tx.rollback(); return res.status(400).json({ error: 'El código de barras no es válido (máximo 64 caracteres)' }); }
+      if (barcode) {
+        const owner = await barcodeOwner(tx, req.userId, barcode, method === 'PUT' ? product_id : undefined);
+        if (owner) { await tx.rollback(); return res.status(409).json({ error: `Ese código de barras ya pertenece al producto «${owner.name}»` }); }
+      }
       let id = product_id;
+      // Publicar en el catálogo público viene en el cuerpo del dueño; va aparte
+      // del UPDATE principal porque las apps viejas no lo mandan (undefined = no tocar).
+      const catalogVisible = product.catalog_visible === undefined
+        ? undefined
+        : (product.catalog_visible === true || product.catalog_visible === 1 || product.catalog_visible === '1' ? 1 : 0);
       if (method === 'POST') {
         const existing = (await tx.execute({ sql: 'SELECT * FROM products WHERE user_id = ?', args: [req.userId] })).rows.find((p) => normalize(p.name) === normalize(name));
-        if (existing) result = { ...existing, merged: true };
+        if (existing) {
+          // Re-registrar con el escáner: el producto que ya existe por nombre se
+          // queda con el código si no lo tenía (misma regla que la ruta directa;
+          // la colisión con otro producto ya se rechazó más arriba).
+          if (barcode && !existing.barcode) {
+            await tx.execute({ sql: 'UPDATE products SET barcode = ? WHERE user_id = ? AND id = ?', args: [barcode, req.userId, existing.id] });
+            existing.barcode = barcode;
+          }
+          result = { ...existing, merged: true };
+        }
         else {
-          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, track_stock, pack_size, pack_price, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, trackStock ? stock : 0, unit, trackStock, pack.pack_size, pack.pack_price, account.id, account.email] });
+          const insert = await tx.execute({ sql: 'INSERT INTO products (user_id, name, purchase_price, sale_price, stock, unit, track_stock, pack_size, pack_price, barcode, created_by_account_id, created_by_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', args: [req.userId, name, purchase, sale, trackStock ? stock : 0, unit, trackStock, pack.pack_size, pack.pack_price, barcode ?? null, account.id, account.email] });
           id = Number(insert.lastInsertRowid);
+          if (catalogVisible !== undefined) await tx.execute({ sql: 'UPDATE products SET catalog_visible = ? WHERE user_id = ? AND id = ?', args: [catalogVisible, req.userId, id] });
           // Log stock entry for new product with initial stock
           if (trackStock && stock > 0) {
             await logStockChange(tx, { userId: req.userId, product: { id, name }, before: 0, after: stock, account, kind: 'nuevo' });
@@ -235,6 +261,8 @@ router.post('/product-operation', asyncHandler(async (req, res) => {
       } else {
         const before = hasAdd ? null : (await tx.execute({ sql: 'SELECT stock, track_stock FROM products WHERE user_id = ? AND id = ?', args: [req.userId, id] })).rows[0];
         const updated = await tx.execute({ sql: 'UPDATE products SET name = ?, purchase_price = ?, sale_price = ?, stock = ?, unit = ?, track_stock = ?, pack_size = ?, pack_price = ? WHERE user_id = ? AND id = ?', args: [name, purchase, sale, trackStock ? stock : 0, unit, trackStock, pack.pack_size, pack.pack_price, req.userId, id] });
+        if (catalogVisible !== undefined) await tx.execute({ sql: 'UPDATE products SET catalog_visible = ? WHERE user_id = ? AND id = ?', args: [catalogVisible, req.userId, id] });
+        if (hasBarcode) await tx.execute({ sql: 'UPDATE products SET barcode = ? WHERE user_id = ? AND id = ?', args: [barcode, req.userId, id] });
         if (!updated.rowsAffected) { await tx.rollback(); return res.status(404).json({ error: 'Producto no encontrado' }); }
         // Stock puesto a mano por la cuenta principal: queda anotado (ver lib/stockLog.js).
         if (before && trackStock && Number(before.track_stock ?? 1) === 1) {

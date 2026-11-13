@@ -6,7 +6,7 @@ const { withOperation } = require('../lib/clientOperations');
 const { requireOwner } = require('../middleware/auth');
 const { describeAccount } = require('../lib/account');
 const { stockChangeStatement } = require('../lib/stockLog');
-const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack } = require('../lib/units');
+const { parseUnit, validQuantity, trackStockFor, roundQty, parsePack, parseBarcode, barcodeOwner } = require('../lib/units');
 const { dailyStock } = require('../lib/dailyStock');
 
 // Leer el catálogo lo necesita cualquiera que cobre: es la pantalla del POS.
@@ -101,6 +101,22 @@ router.post('/', asyncHandler(async (req, res) => {
   if (unit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
   const pack = parsePack(req.body, unit) ?? { pack_size: null, pack_price: null };
   if (pack.error) return res.status(400).json({ error: pack.error });
+  const barcode = parseBarcode(req.body.barcode);
+  if (barcode === false) {
+    return res.status(400).json({ error: 'El código de barras no es válido (máximo 64 caracteres)' });
+  }
+  // Publicar en el catálogo público es del dueño; el empleado da de alta la
+  // mercancía pero no decide qué se muestra a los clientes.
+  if (req.body.catalog_visible !== undefined && req.role !== 'dueño') {
+    return res.status(403).json({ error: 'El cajero no puede publicar en el catálogo de clientes' });
+  }
+  const rawVisible = req.body.catalog_visible;
+  if (rawVisible !== undefined && rawVisible !== null
+      && rawVisible !== true && rawVisible !== false
+      && rawVisible !== 0 && rawVisible !== 1 && rawVisible !== '0' && rawVisible !== '1') {
+    return res.status(400).json({ error: 'El valor de visible en catálogo no es válido' });
+  }
+  const catalogVisible = rawVisible === true || rawVisible === 1 || rawVisible === '1' ? 1 : 0;
 
   if (!name || sale_price === undefined || sale_price === null || sale_price === '') {
     return res.status(400).json({ error: 'Nombre y precio de venta son requeridos' });
@@ -132,7 +148,24 @@ router.post('/', asyncHandler(async (req, res) => {
   });
   const existing = existingResult.rows.find((p) => normalizeName(p.name) === key);
   if (existing) {
+    // Re-registrar con el escáner: si el producto ya existe por nombre y no
+    // tiene código, el escaneado le asigna el suyo. Si el código ya es de otro
+    // producto, gana 409 — la interfaz ofrece abrir al dueño del código.
+    if (barcode && !existing.barcode) {
+      const owner = await barcodeOwner(db, req.userId, barcode, existing.id);
+      if (owner) return res.status(409).json({ error: `Ese código de barras ya pertenece al producto «${owner.name}»` });
+      await db.execute({
+        sql: 'UPDATE products SET barcode = ? WHERE id = ? AND user_id = ?',
+        args: [barcode, existing.id, req.userId],
+      });
+      existing.barcode = barcode;
+    }
     return res.status(200).json({ ...existing, merged: true });
+  }
+
+  const barcodeOwnerRow = await barcodeOwner(db, req.userId, barcode);
+  if (barcodeOwnerRow) {
+    return res.status(409).json({ error: `Ese código de barras ya pertenece al producto «${barcodeOwnerRow.name}»` });
   }
 
   const account = await describeAccount(db, req);
@@ -142,10 +175,10 @@ router.post('/', asyncHandler(async (req, res) => {
   const insertResult = await db.execute({
     sql: `INSERT INTO products
             (user_id, name, purchase_price, sale_price, stock, unit, track_stock, pack_size, pack_price,
-             created_by_account_id, created_by_email)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             catalog_visible, barcode, created_by_account_id, created_by_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [req.userId, name, purchase, sale, trackStock ? Number(stock) || 0 : 0, unit ?? null, trackStock,
-           pack.pack_size, pack.pack_price, account.id, account.email],
+           pack.pack_size, pack.pack_price, catalogVisible, barcode, account.id, account.email],
   });
   const newId = Number(insertResult.lastInsertRowid);
   const result = await db.execute({
@@ -330,6 +363,10 @@ router.put('/:id', asyncHandler(async (req, res) => {
   }
   const parsedUnit = parseUnit(req.body.unit);
   if (parsedUnit === false) return res.status(400).json({ error: 'La unidad de medida no es válida (kg, g o lb)' });
+  const barcode = parseBarcode(req.body.barcode);
+  if (barcode === false) {
+    return res.status(400).json({ error: 'El código de barras no es válido (máximo 64 caracteres)' });
+  }
 
   const db = getDb();
   const account = await describeAccount(db, req);
@@ -355,6 +392,13 @@ router.put('/:id', asyncHandler(async (req, res) => {
     if (!existing) {
       await tx.rollback();
       return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    // Un código de barras no puede estar ya en otro producto de la tienda.
+    const barcodeOwnerRow = await barcodeOwner(tx, req.userId, barcode, existing.id);
+    if (barcodeOwnerRow) {
+      await tx.rollback();
+      return res.status(409).json({ error: `Ese código de barras ya pertenece al producto «${barcodeOwnerRow.name}»` });
     }
 
     const { name, purchase_price, sale_price } = req.body;
@@ -423,6 +467,19 @@ router.put('/:id', asyncHandler(async (req, res) => {
     if (parsedUnit !== undefined || 'track_stock' in req.body) set('track_stock', trackStock);
     if (parsedUnit !== undefined) set('unit', unit);
     if (pack) { set('pack_size', pack.pack_size); set('pack_price', pack.pack_price); }
+    // El código se escribe siempre que venga (vacío = quitarlo); la petición de
+    // un cajero ya fue rechazada más arriba por esta clave.
+    if ('barcode' in req.body) set('barcode', barcode);
+    // Publicar en el catálogo público lo decide el dueño producto por producto
+    // (la petición de un cajero ya fue rechazada más arriba por esta clave).
+    if ('catalog_visible' in req.body) {
+      const v = req.body.catalog_visible;
+      if (v !== true && v !== false && v !== 0 && v !== 1 && v !== '0' && v !== '1') {
+        await tx.rollback();
+        return res.status(400).json({ error: 'El valor de visible en catálogo no es válido' });
+      }
+      set('catalog_visible', v === true || v === 1 || v === '1' ? 1 : 0);
+    }
 
     let after = Number(existing.stock);
     if (sets.length > 0) {

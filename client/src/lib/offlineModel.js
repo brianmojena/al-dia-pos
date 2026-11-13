@@ -377,19 +377,47 @@ export function prepareOperation(data, method, path, body, ctx) {
     }
     // Si el producto se convierte a peso, eliminar paquete.
     if (p.unit) { packSize = null; packPrice = null }
+    // Código de barras: mismas reglas que el servidor (lib/units.js). Vacío
+    // significa "sin código" y se guarda como null; el tipo no se adivina aquí.
+    let barcode
+    if ('barcode' in body) {
+      const raw = body.barcode
+      barcode = raw == null || raw === '' ? null : (typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ') : false)
+      if (barcode === '') barcode = null
+      assert(barcode === null || (typeof barcode === 'string' && barcode.length <= 64), 'El código de barras no es válido (máximo 64 caracteres)')
+    }
     if (!previous) {
       const existing = data.products.find((p) => normalize(p.name) === normalize(body.name))
-      if (existing) return { ...op, kind: 'noop', result: { ...existing, merged: true } }
+      if (existing) {
+        // El nombre ya existe: gana lo que había (mismo criterio del servidor).
+        // El único dato nuevo que vale la pena subir es un código de barras
+        // que el existente no tiene — re-registrar con el escáner le asigna el
+        // suyo — y sube como edición del producto existente, no como alta.
+        if (barcode && !existing.barcode) {
+          return prepareOperation(data, 'PUT', `/api/products/${existing.id}`, {
+            name: existing.name,
+            purchase_price: existing.purchase_price,
+            sale_price: existing.sale_price,
+            stock: existing.stock,
+            unit: existing.unit || null,
+            track_stock: Number(existing.track_stock ?? 1) === 1,
+            pack_size: existing.pack_size ?? null,
+            pack_price: existing.pack_price ?? null,
+            barcode,
+          }, ctx)
+        }
+        return { ...op, kind: 'noop', result: { ...existing, merged: true } }
+      }
     }
     op.productId = previous?.id
-    if (previous) op.before = owner ? { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null } : { sale_price: previous.sale_price }
+    if (previous) op.before = owner ? { name: previous.name, sale_price: previous.sale_price, purchase_price: previous.purchase_price, stock: previous.stock, unit: previous.unit ?? null, barcode: previous.barcode ?? null } : { sale_price: previous.sale_price }
     // La unidad viaja siempre en las altas y ediciones del dueño: si se omitiera,
     // una edición que no la menciona (p. ej. la importación) la dejaría en blanco.
-    if (!previous || owner) { op.body.unit = p.unit || null; op.body.track_stock = trackStock; op.body.pack_size = packSize; op.body.pack_price = packPrice }
+    if (!previous || owner) { op.body.unit = p.unit || null; op.body.track_stock = trackStock; op.body.pack_size = packSize; op.body.pack_price = packPrice; if (barcode !== undefined) op.body.barcode = barcode }
     // La entrada de mercancía sube como cantidad a sumar, nunca como stock final:
     // si otra caja vendió mientras tanto, un total absoluto pisaría esas ventas.
     if (addStock != null && addStock !== '') { delete op.body.stock; op.body.add_stock = Number(addStock) }
-    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, pack_size: packSize ?? null, pack_price: packPrice ?? null, created_by_email: previous?.created_by_email ?? ctx.user.email, ...(!previous && { created_at: now }) }
+    op.result = { ...p, id: previous?.id ?? ctx.localId(), name: p.name.trim().replace(/\s+/g, ' '), sale_price: Number(p.sale_price), purchase_price: Number(p.purchase_price ?? 0), stock: Number(p.stock ?? 0), unit: p.unit || null, track_stock: trackStock, pack_size: packSize ?? null, pack_price: packPrice ?? null, barcode: (barcode !== undefined ? barcode : previous?.barcode) ?? null, created_by_email: previous?.created_by_email ?? ctx.user.email, ...(!previous && { created_at: now }) }
   } else if (path === '/api/sales') {
     op.kind = 'sale'
     op.body.client_sale_id ||= ctx.newId()

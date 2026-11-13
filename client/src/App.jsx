@@ -22,6 +22,8 @@ import Auditoria from './pages/Auditoria'
 import Contabilidad from './pages/Contabilidad'
 import Inventario from './pages/Inventario'
 import ImportarProductos from './pages/ImportarProductos'
+import CatalogoPublico from './pages/CatalogoPublico'
+import TiendaOnline from './pages/TiendaOnline'
 import { isElectron } from './lib/api'
 
 // BrowserRouter necesita una URL real de servidor (usa el History API sobre
@@ -39,6 +41,9 @@ export default function App() {
         <Route path="/activar" element={<ActivateDevice />} />
         <Route path="/register" element={<Register />} />
         <Route path="/recuperar" element={<RecuperarContrasena />} />
+        {/* Tienda pública de un negocio: el enlace compartible por WhatsApp.
+            Sin sesión ni Layout del POS — el cliente solo mira y reserva. */}
+        <Route path="/t/:slug" element={<CatalogoPublico />} />
 
         <Route element={<RequireAuth />}>
           {/* Cartel tras registrarse: prueba de 7 días + plan pendiente de
@@ -74,6 +79,9 @@ export default function App() {
               {/* Los informes viven en la nube; en el escritorio offline no hay nada que ver. */}
               <Route path="auditoria"  element={<Auditoria />} />
               <Route path="contabilidad" element={<Contabilidad />} />
+              {/* La tienda online vive en la nube: el catálogo público y sus
+                  reservas. En el escritorio offline no hay nada que ver. */}
+              <Route path="tienda-online" element={<TiendaOnline />} />
               <Route path="products/importar" element={<ImportarProductos />} />
             </Route>
 

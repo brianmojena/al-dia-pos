@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles, MoreHorizontal, X, BookOpen } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, ClipboardList, Calculator, ArrowLeftRight, Warehouse, LogOut, CloudOff, ShieldCheck, Sparkles, MoreHorizontal, X, BookOpen, Globe } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { flushQueue, getLogoutBlockers } from '../lib/salesQueue'
 import { splitMobileNav, isMoreActive } from '../lib/mobileNav.js'
@@ -8,6 +8,7 @@ import OfflineStatus from './OfflineStatus'
 import { localSyncStatus, retrySync } from '../lib/offlineClient.js'
 import { isElectron } from '../lib/network.js'
 import SyncStatus from './SyncStatus'
+import UpdateNotice from './UpdateNotice'
 import { planLabel } from '../lib/plans'
 import { getSharedContext, getSharedMembers } from '../lib/sharedDevice.js'
 
@@ -28,6 +29,9 @@ const navItems = [
   { to: '/auditoria', icon: Sparkles,        label: 'Auditoría',   ownerOnly: true, cloudOnly: true },
   // La contabilidad es solo para plan Enterprise.
   { to: '/contabilidad', icon: BookOpen,     label: 'Contabilidad', ownerOnly: true, cloudOnly: true },
+  // La tienda online vive en la nube: la página pública /t/<slug> y las
+  // reservas que hacen los clientes llegan del servidor.
+  { to: '/tienda-online', icon: Globe,      label: 'Tienda online', ownerOnly: true, cloudOnly: true },
   // Panel de administración: confirmar tiendas nuevas (ver pages/Admin.jsx).
   // Solo existe para la cuenta de administración (is_admin del servidor).
   { to: '/admin',     icon: ShieldCheck,     label: 'Admin',     adminOnly: true   },
@@ -113,6 +117,7 @@ export default function Layout() {
 
   return (
     <div className="flex flex-col h-screen bg-[#F5F5F7] overflow-hidden">
+      {user && !isElectron() && <UpdateNotice key={user.id} userId={user.id} />}
       {/* Top header */}
       <header className="bg-white border-b border-gray-200 px-5 py-3.5 flex items-center gap-3 flex-shrink-0">
         <div className="w-8 h-8 bg-[#007AFF] rounded-lg flex items-center justify-center text-white font-bold text-sm">M</div>

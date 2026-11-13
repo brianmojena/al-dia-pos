@@ -111,10 +111,9 @@ async function sendFcm(tokens, message) {
 // Transportes reemplazables en pruebas.
 const transports = { ios: sendApns, android: sendFcm };
 
-async function deliver(db, userId, sale) {
+async function deliver(db, userId, message) {
   const rows = (await db.execute({ sql: 'SELECT platform, token FROM push_devices WHERE user_id = ?', args: [userId] })).rows;
   if (!rows.length) return;
-  const message = buildMessage(sale);
   const jobs = [];
   const ios = rows.filter((r) => r.platform === 'ios').map((r) => r.token);
   const android = rows.filter((r) => r.platform === 'android').map((r) => r.token);
@@ -127,11 +126,15 @@ async function deliver(db, userId, sale) {
   }
 }
 
-/** Nunca lanza y nunca tarda más de SEND_TIMEOUT_MS: un cobro no depende de Apple/Google. */
-async function notifySale(db, userId, sale) {
+/**
+ * Aviso genérico con el mensaje ya armado (la reserva lo usa para avisar al
+ * dueño que le pidieron mercancía). Nunca lanza y nunca tarda más de
+ * SEND_TIMEOUT_MS: un cobro no depende de Apple/Google.
+ */
+async function notify(db, userId, message) {
   try {
     await Promise.race([
-      deliver(db, userId, sale),
+      deliver(db, userId, message),
       new Promise((resolve) => setTimeout(resolve, SEND_TIMEOUT_MS).unref?.()),
     ]);
   } catch (err) {
@@ -139,4 +142,8 @@ async function notifySale(db, userId, sale) {
   }
 }
 
-module.exports = { notifySale, buildMessage, transports };
+async function notifySale(db, userId, sale) {
+  return notify(db, userId, buildMessage(sale));
+}
+
+module.exports = { notifySale, notify, buildMessage, transports };

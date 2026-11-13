@@ -60,4 +60,39 @@ function parsePack(body, unit) {
 /** Sueltos que salen del stock por una línea de venta: 2 paquetes de 20 son 40. */
 const lineUnits = (item) => roundQty(Number(item.quantity) * (Number(item.pack_size) > 1 ? Number(item.pack_size) : 1));
 
-module.exports = { UNITS, roundQty, parseUnit, validQuantity, trackStockFor, parsePack, lineUnits };
+// Código de barras del fabricante (EAN-13, Code-128, etc.), leído con la
+// cámara al dar de alta el producto. Solo texto con espacios colapsados: los
+// formatos llevan letras (Code-39) o guiones, y no es esta ruta la que debe
+// adivinar el tipo. '' y null significan "sin código" y se guardan como NULL
+// para que el índice parcial de unicidad los ignore.
+const MAX_BARCODE_LENGTH = 64;
+
+/** null = sin código (o vacío); false = inválido; string limpio = código. */
+function parseBarcode(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') return false;
+  const cleaned = value.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return null;
+  return cleaned.length > MAX_BARCODE_LENGTH ? false : cleaned;
+}
+
+/**
+ * Producto que ya tiene ese código en la tienda, si existe (null si el código
+ * está libre). Acepta la base o una transacción en marcha: mismo contrato
+ * execute(). Con excludeId se ignora el propio producto (en una edición).
+ */
+async function barcodeOwner(db, userId, barcode, excludeId) {
+  if (!barcode) return null;
+  const rows = excludeId === undefined
+    ? (await db.execute({
+        sql: 'SELECT id, name FROM products WHERE user_id = ? AND barcode = ?',
+        args: [userId, barcode],
+      })).rows
+    : (await db.execute({
+        sql: 'SELECT id, name FROM products WHERE user_id = ? AND barcode = ? AND id != ?',
+        args: [userId, barcode, excludeId],
+      })).rows;
+  return rows[0] || null;
+}
+
+module.exports = { UNITS, roundQty, parseUnit, validQuantity, trackStockFor, parsePack, lineUnits, parseBarcode, barcodeOwner };

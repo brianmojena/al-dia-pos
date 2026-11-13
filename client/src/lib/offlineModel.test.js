@@ -87,6 +87,36 @@ test('un alta fusionada por el servidor no cuenta el stock ya existente como ent
   assert.equal(state.base.local_entries?.[date]?.[10] ?? 0, 0)
   assert.equal(dailyStockFor(project(state), date).products.find((p) => p.id === 10).entries_stock, 0)
 })
+test('el código de barras viaja en el alta y edición offline; re-registrar por nombre le asigna el código al existente', () => {
+  const state = fixture()
+  // Alta con código: body, resultado y proyección local llevan el código limpio.
+  const alta = add(state, 'POST', '/api/products', { name: 'Detergente', purchase_price: 220, sale_price: 300, stock: 8, barcode: ' 7501234500015 ' })
+  assert.equal(alta.body.barcode, '7501234500015')
+  assert.equal(alta.result.barcode, '7501234500015')
+  assert.equal(project(state).products.find((p) => p.id === alta.result.id).barcode, '7501234500015')
+
+  // Edición del existente: el expected (op.before) incluye el código para el
+  // conflicto optimista del servidor; vacío lo quita.
+  const edicion = add(state, 'PUT', `/api/products/${alta.result.id}`, { name: 'Detergente', purchase_price: 220, sale_price: 300, stock: 8, barcode: '' })
+  assert.equal(edicion.before.barcode, '7501234500015')
+  assert.equal(edicion.body.barcode, null)
+  assert.equal(project(state).products.find((p) => p.id === alta.result.id).barcode, null)
+
+  // Re-registrar con el escáner un nombre que ya existe ('Pan', sin código):
+  // no se descarta el código, sube como edición del existente que se lo asigna.
+  const asigna = add(state, 'POST', '/api/products', { name: '  pan ', purchase_price: 99, sale_price: 99, stock: 999, barcode: '7790001112223' })
+  assert.equal(asigna.method, 'PUT', 'sube como edición, no como alta')
+  assert.equal(asigna.productId, 10)
+  assert.equal(asigna.body.barcode, '7790001112223')
+  assert.equal(asigna.result.name, 'Pan')
+  assert.equal(asigna.result.sale_price, 10, 'el precio del existente manda')
+  assert.equal(project(state).products.find((p) => p.id === 10).barcode, '7790001112223')
+
+  // Nombre existente y código que ya le pertenece: no se crea ni se sube nada.
+  const fusion = add(state, 'POST', '/api/products', { name: 'Pan', purchase_price: 6, sale_price: 10, stock: 5, barcode: '7790001112223' })
+  assert.equal(fusion.kind, 'noop')
+  assert.equal(state.outbox.some((op) => op.id === fusion.id), false)
+})
 test('cierre cubre exactamente sus ventas y no incluye la siguiente venta offline', () => {
   const state = fixture(), first = sell(state)
   const close = add(state, 'POST', '/api/cash-closes', { counted_cash: 20, opening_float: 0 })

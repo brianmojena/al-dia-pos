@@ -2,7 +2,7 @@ import { useLocalRefresh } from '../lib/useLocalRefresh.js'
 import { useBusinessDayRefresh } from '../lib/useBusinessDayRefresh.js'
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTriangle } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Package, ClipboardCheck, Upload, Info, AlertTriangle, ScanLine } from 'lucide-react'
 import { apiFetch, isElectron } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
 import { accountLabel } from '../lib/accountLabel'
@@ -10,6 +10,7 @@ import { UNITS, formatQty, priceSuffix, hasPack, formatPackStock } from '../lib/
 import { productDayStockValues } from '../lib/dailyStock'
 import { businessDate } from '../lib/offlineModel'
 import ProductDayStock from '../components/ProductDayStock.jsx'
+import BarcodeScanner from '../components/BarcodeScanner.jsx'
 import { localSyncStatus, syncOffline } from '../lib/offlineClient.js'
 
 const fmt = (n) => '$ ' + new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(Math.round(n || 0))
@@ -22,7 +23,7 @@ const dayStockLabel = (value, product) => {
   if (value == null || !Number.isFinite(Number(value))) return '—'
   return hasPack(product) ? formatPackStock(value, product.pack_size) : formatQty(value, product.unit)
 }
-const EMPTY = { name: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '', pack_size: '', pack_price: '', pack_cost: '', pack_on: false, stock_packs: '', stock_loose: '', add_stock_packs: '', add_stock_loose: '' }
+const EMPTY = { name: '', barcode: '', purchase_price: '', sale_price: '', stock: '', unit: '', track_stock: false, add_stock: '', stock_reason: '', pack_size: '', pack_price: '', pack_cost: '', pack_on: false, stock_packs: '', stock_loose: '', add_stock_packs: '', add_stock_loose: '', catalog_visible: false }
 
 // Cada movimiento del registro de stock: mercancía recibida, stock puesto a
 // mano por la cuenta principal o unidades que volvieron al anular una venta.
@@ -52,6 +53,10 @@ export default function Products() {
   const [search,    setSearch]    = useState('')
   const [formError, setFormError] = useState('')
   const [notice,    setNotice]    = useState('')
+  // Escáner abierto desde el formulario o desde la página, y el producto
+  // que ya le pertenece al código escaneado (si lo hay).
+  const [scanning,     setScanning]     = useState(false)
+  const [barcodeRival, setBarcodeRival] = useState(null)
 
   const load = async () => {
     try {
@@ -91,9 +96,28 @@ export default function Products() {
 
   const filtered = products.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase())
+    || (p.barcode || '').toLowerCase().includes(search.toLowerCase())
   )
 
-  const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setShowForm(true) }
+  // Un código leído por la cámara (o tecleado en el escáner). Desde el
+  // formulario rellena el campo —avisando si ya pertenece a otro producto—;
+  // desde la página busca: código conocido abre su edición, desconocido abre
+  // el alta con el código precargado.
+  const handleScan = (code) => {
+    setScanning(false)
+    const norm = code.trim().replace(/\s+/g, ' ')
+    const rival = products.find(p => (p.barcode || '') === norm && (!editing || p.id !== editing.id))
+    if (showForm) {
+      if (rival) setBarcodeRival(rival)
+      else { setBarcodeRival(null); setForm(f => ({ ...f, barcode: norm })) }
+    } else if (rival) {
+      openEdit(rival)
+    } else {
+      setEditing(null); setForm({ ...EMPTY, barcode: norm }); setFormError(''); setBarcodeRival(null); setShowForm(true)
+    }
+  }
+
+  const openNew = () => { setEditing(null); setForm(EMPTY); setFormError(''); setBarcodeRival(null); setShowForm(true) }
   const openEdit = (p) => {
     setEditing(p)
     const hasPack = p.pack_size && Number(p.pack_size) > 1
@@ -102,6 +126,7 @@ export default function Products() {
     const stockLoose = hasPack ? (Number(p.stock) % Number(p.pack_size)) : ''
     setForm({
       name: p.name,
+      barcode: p.barcode || '',
       purchase_price: p.purchase_price,
       sale_price: p.sale_price,
       stock: p.stock,
@@ -116,12 +141,14 @@ export default function Products() {
       stock_packs: stockPacks,
       stock_loose: stockLoose,
       add_stock_packs: '',
-      add_stock_loose: ''
+      add_stock_loose: '',
+      catalog_visible: Number(p.catalog_visible) === 1
     })
     setFormError('')
+    setBarcodeRival(null)
     setShowForm(true)
   }
-  const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY); setFormError('') }
+  const closeForm = () => { setShowForm(false); setEditing(null); setForm(EMPTY); setFormError(''); setBarcodeRival(null) }
 
   const [showEntries, setShowEntries] = useState(false)
   const [entries, setEntries] = useState(null)
@@ -231,8 +258,14 @@ export default function Products() {
       ...(form.unit && { track_stock: !!form.track_stock }),
       ...(hasPack_ && { pack_size: parseInt(form.pack_size), pack_price: parseFloat(form.pack_price) }),
       ...(!hasPack_ && { pack_size: null, pack_price: null }),
+      // El código viaja siempre (vacío = quitarlo). El cajero no lo manda: el
+      // servidor rechazaría cualquier campo que no sea precio o stock.
+      barcode: form.barcode.trim().replace(/\s+/g, ' ') || null,
       ...(editing && addStock > 0 && { add_stock: addStock }),
       ...(stockChanged && form.stock_reason.trim() && { stock_reason: form.stock_reason.trim() }),
+      // La visibilidad en el catálogo público se guarda siempre que venga del
+      // dueño en la web; en el escritorio offline la columna todavía no existe.
+      ...(!isElectron() && { catalog_visible: !!form.catalog_visible }),
     }
     try {
       const res = await apiFetch(editing ? `/api/products/${editing.id}` : '/api/products', {
@@ -338,6 +371,14 @@ export default function Products() {
             <span className="hidden sm:inline">Contar</span>
           </Link>
           <button
+            onClick={() => setScanning(true)}
+            title="Escanear un código de barras: si el producto existe se abre para editar, si no se da de alta con el código"
+            className="flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl font-semibold text-sm hover:bg-gray-50 active:scale-95 transition-all"
+          >
+            <ScanLine size={17} />
+            <span className="hidden sm:inline">Escanear</span>
+          </button>
+          <button
             onClick={openNew}
             className="flex items-center gap-2 bg-[#007AFF] text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-blue-600 active:scale-95 transition-all"
           >
@@ -433,6 +474,38 @@ export default function Products() {
                 </label>
                 <input disabled={!!editing && !isOwner} required placeholder="Ej: Coca-Cola 600ml" {...field('name')} />
               </div>
+              {/* Código de barras del fabricante: se escanea con la cámara o se
+                  teclea. El cajero no lo edita en productos existentes (el
+                  servidor lo rechazaría), pero sí lo asigna al dar de alta. */}
+              {(!editing || isOwner) && (
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                    Código de barras
+                  </label>
+                  <div className="flex gap-2">
+                    <input placeholder="Escanéalo con la cámara o escríbelo" {...field('barcode')} />
+                    <button
+                      type="button"
+                      onClick={() => setScanning(true)}
+                      title="Escanear con la cámara"
+                      aria-label="Escanear código de barras con la cámara"
+                      className="shrink-0 flex items-center bg-white border border-gray-200 text-gray-600 px-4 rounded-xl hover:bg-gray-50 active:scale-95 transition-all"
+                    >
+                      <ScanLine size={17} />
+                    </button>
+                  </div>
+                  {barcodeRival && (
+                    <div className="flex items-center gap-2 mt-2 bg-orange-50 text-orange-800 rounded-xl px-3 py-2 text-xs">
+                      <span className="flex-1">
+                        Ese código ya pertenece a «{barcodeRival.name}», así que no se asignó aquí.
+                      </span>
+                      <button type="button" onClick={() => openEdit(barcodeRival)} className="font-semibold text-[#007AFF] hover:underline shrink-0">
+                        Abrir
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Productos fraccionados: el precio y el stock pasan a ser por
                   kg, g o lb, y en la venta se marca cuánto pesa lo que se lleva. */}
               {(!editing || isOwner) && (
@@ -536,6 +609,27 @@ export default function Products() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+              {/* Tienda online: publicar en el catálogo que ven los clientes.
+                  En el escritorio offline la columna todavía no existe, así que
+                  ahí no se ofrece la opción. */}
+              {isOwner && !isElectron() && (
+                <div className="rounded-xl border border-gray-200 px-4 py-3">
+                  <label className="flex items-start gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!form.catalog_visible}
+                      onChange={(e) => setForm(f => ({ ...f, catalog_visible: e.target.checked }))}
+                      className="w-5 h-5 accent-[#007AFF] mt-0.5"
+                    />
+                    <span>
+                      <span className="text-sm font-semibold text-gray-800 block">Visible en la tienda online</span>
+                      <span className="text-xs text-gray-400">
+                        Aparece en tu página pública para clientes, con su precio y si hay disponible. El enlace se comparte desde «Tienda online».
+                      </span>
+                    </span>
+                  </label>
                 </div>
               )}
               <div className={editing && !isOwner ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-2 gap-3'}>
@@ -654,6 +748,16 @@ export default function Products() {
         </div>
       )}
 
+      {/* Escáner de código de barras: la cámara va encima del formulario si
+          se abrió desde él (se renderiza después en el DOM, mismo z-index). */}
+      {scanning && (
+        <BarcodeScanner
+          title={showForm ? 'Escanear código del producto' : 'Escanear código de barras'}
+          onScan={handleScan}
+          onClose={() => setScanning(false)}
+        />
+      )}
+
       {/* Product table */}
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         {filtered.length === 0 ? (
@@ -688,6 +792,7 @@ export default function Products() {
                   <tr key={p.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors">
                     <td className="px-5 py-4">
                       <span className="font-medium text-gray-900 text-sm">{p.name}</span>
+                      {p.barcode && <span className="block text-xs text-gray-400 mt-0.5 font-mono">{p.barcode}</span>}
                       {isOwner && p.created_by_email && p.created_by_email !== user?.email && (
                         <span className="block text-xs text-gray-400 mt-0.5">
                           agregado por {accountLabel(p.created_by_email)}

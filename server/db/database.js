@@ -553,6 +553,21 @@ async function initDb() {
     // de tasa que los gastos, para que el resultado la descuenta igual.
     'ALTER TABLE cash_withdrawals ADD COLUMN exchange_rate REAL',
     'ALTER TABLE cash_withdrawals ADD COLUMN cup_amount REAL',
+    // Tienda online (catálogo público por negocio): el enlace compartible es el
+    // slug (la credencial de lectura del cliente), el interruptor decide si la
+    // página responde, y la nota/teléfono son el texto que el dueño quiere
+    // mostrar. NULL = nunca configuró nada.
+    'ALTER TABLE users ADD COLUMN catalog_slug TEXT',
+    'ALTER TABLE users ADD COLUMN catalog_enabled INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN catalog_note TEXT',
+    'ALTER TABLE users ADD COLUMN catalog_phone TEXT',
+    // Publicación en el catálogo público, decidida producto por producto
+    // (0 = oculto, que es lo seguro para lo que ya existe).
+    'ALTER TABLE products ADD COLUMN catalog_visible INTEGER NOT NULL DEFAULT 0',
+    // Código de barras del fabricante (EAN-13, Code-128, etc.), leído con la
+    // cámara para dar de alta productos sin tipear. NULL = el producto no tiene
+    // código; vacío se guarda como NULL para que el índice parcial lo ignore.
+    'ALTER TABLE products ADD COLUMN barcode TEXT',
   ];
   for (const sql of addColumns) {
     try { await db.execute(sql); } catch (_) { /* la columna ya existe */ }
@@ -636,6 +651,11 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_products_user      ON products(user_id);
     CREATE INDEX IF NOT EXISTS idx_sale_items_sale    ON sale_items(sale_id);
 
+    -- Un código de barras pertenece a un solo producto por tienda. Parcial:
+    -- los productos sin código (NULL o '') no compiten entre sí.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_products_user_barcode
+      ON products(user_id, barcode) WHERE barcode IS NOT NULL AND barcode <> '';
+
     -- El cierre siempre busca "el último corte" de este usuario.
     CREATE INDEX IF NOT EXISTS idx_cash_closes_user_closed ON cash_closes(user_id, closed_at);
 
@@ -688,6 +708,38 @@ async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_client_id
       ON expenses(user_id, client_expense_id) WHERE client_expense_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id, created_at);
+
+    -- El slug público es único entre tiendas (índice parcial: NULL = sin
+    -- configurar, lo tienen todas las que nunca abrieron la tienda online).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_catalog_slug
+      ON users(catalog_slug) WHERE catalog_slug IS NOT NULL;
+
+    -- Reservas del catálogo público. No bloquean stock: son la solicitud del
+    -- cliente para que el dueño la prepare y la venda en el POS como siempre.
+    -- Los items van congelados en JSON (precedente: rejected_sales.items) con
+    -- nombre y precio del momento: si el producto cambia o desaparece, el
+    -- pedido del cliente no se reescribe.
+    CREATE TABLE IF NOT EXISTS product_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      client_reservation_id TEXT,
+      customer_name TEXT NOT NULL,
+      customer_phone TEXT NOT NULL,
+      customer_note TEXT,
+      items TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pendiente'
+        CHECK (status IN ('pendiente', 'confirmada', 'entregada', 'anulada')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    -- La idempotencia funciona igual que en las ventas: el índice UNIQUE
+    -- rechaza la segunda inserción aunque dos peticiones idénticas lleguen a la vez.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_product_reservations_client
+      ON product_reservations(user_id, client_reservation_id) WHERE client_reservation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_product_reservations_user ON product_reservations(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_product_reservations_status ON product_reservations(user_id, status);
 
     -- El worker busca trabajos pendientes por fecha; el índice evita escanear
     -- toda la tabla cuando ya hay historial de miles de cierres.
