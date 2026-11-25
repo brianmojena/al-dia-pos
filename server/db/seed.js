@@ -1,4 +1,13 @@
 require('dotenv').config();
+
+// Este script BORRA ventas y productos. El .env de server/ apunta a producción:
+// el 25-nov-2026 un seed contra Turso vació el catálogo y las ventas de Montevaldes.
+const target = process.env.TURSO_DATABASE_URL;
+if (target && !target.startsWith('file:')) {
+  console.error('seed.js solo corre contra una base local (file:...). Usa `npm run seed:local`.');
+  process.exit(1);
+}
+
 const bcrypt = require('bcryptjs');
 const { getDb, initDb } = require('./database');
 
