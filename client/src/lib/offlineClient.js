@@ -7,6 +7,7 @@ import { newId } from './newId.js'
 import { operationNow } from './operationClock.js'
 import { requestPersistentStorage } from './storagePersistence.js'
 import { emptyData, project, prepareOperation, readLocal, acknowledgeOperation, applyOperation, applyChanges, applyHistory, businessDate, CASH_CLOSE_COVERAGE_VERSION } from './offlineModel.js'
+import { flushQueue, refreshQueueStatus } from './salesQueue.js'
 import { getSharedDevice, getSharedContext, getSharedCredential, getLastSharedAccount, isSharedLocked, isSharedExpired } from './sharedDevice.js'
 
 const sharedFor = (account) => {
@@ -289,7 +290,6 @@ export async function syncOffline() {
     const request = (path, options = {}) => networkFetch(path, { token, ...options, preserveSession: true })
     try {
       await migrateLegacy(account)
-      const { flushQueue } = await import('./salesQueue.js')
       await flushQueue()
       if (!stillCurrent()) return
       while (stillCurrent()) {
@@ -362,7 +362,6 @@ export async function syncOffline() {
               for (const pending of state.outbox) if (pending.saleIds) pending.saleIds = pending.saleIds.filter((id) => id !== op.result.id)
               return state
             })
-            const { refreshQueueStatus } = await import('./salesQueue.js')
             await refreshQueueStatus()
             broadcast()
             continue

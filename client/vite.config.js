@@ -40,6 +40,21 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // Separa las librerías de terceros del código de la app: el bundle
+        // principal baja de 500 kB y el navegador (y el service worker) puede
+        // reutilizar el chunk de vendor cuando solo cambia el código propio.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler|@remix-run)\//.test(id)) return 'vendor-react'
+          if (id.includes('node_modules/lucide-react')) return 'vendor-icons'
+          return undefined
+        },
+      },
+    },
+  },
   server: {
     port: 3000,
     proxy: {
